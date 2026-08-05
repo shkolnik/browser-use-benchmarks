@@ -63,7 +63,10 @@ round-trip) is sound before spending real time/bandwidth on the full-scale run.
   Synology's Container Manager (dockerd) doesn't offer — not applicable to our target.
 
 **Timeout circumvention (James, 2026-08-05):** the 10-min push timeout is gameable because layer
-uploads are digest-deduped across pushes — a simple retry loop banks completed layers each
-attempt and converges as long as ≥1 layer finishes per window (driver's push now retries).
-Escalation if needed: staged intermediate tags (first k layers, 2k, ...) so no single push is
-large. Layer limit thus remains the only real per-artifact constraint.
+uploads are digest-deduped across pushes. Caveat (James): blobs from a FAILED push are
+manifest-orphaned and may be GC'd server-side, so retry-banks-progress is PLAUSIBLE, not
+guaranteed — retention window vs retry cadence is an unknown. The robust variant is staged
+intermediate tags (first k layers, 2k, ...): each stage's manifest REFERENCES its layers, making
+them GC-immune by construction. Driver does plain retries (correct for transient failures
+regardless); staged tags is the design if timeouts bite. Layer limit thus remains the only real
+per-artifact constraint.
