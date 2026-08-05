@@ -1,0 +1,54 @@
+name: build-images
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "all, <benchmark>, or <benchmark>/<service>"
+        default: all
+  push:
+    branches: [main]
+    paths: ["images/**", "builder/**", "bin/**"]
+
+# v1 deliberately does NOT implement change-detection on push: the download
+# cache (datasets/ persists on the self-hosted runner) plus docker's own
+# layer cache make a no-change rebuild cheap, and skipping change-detection
+# keeps this workflow index-free (glob discovery only, per design.md).
+# Revisit only if rebuild time actually becomes a problem.
+
+jobs:
+  discover:
+    runs-on: [self-hosted, benchmark-builder]
+    outputs:
+      images: ${{ steps.ls.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ls
+        run: |
+          target='${{ github.event.inputs.target || 'all' }}'
+          # The probe benchmark (images/probe/synthetic) has no [[datasets]]
+          # (data is generated locally, not downloaded) and no [service]
+          # healthcheck (it isn't a runnable service) — `build`/`smoke` are
+          # not CI-safe for it, so it's excluded here by name. This is the
+          # workflow's own concern, not a root index: removing the probe
+          # later means deleting its directory AND this one grep line.
+          echo "images=$(bin/build list "$target" | cut -f1 | grep -v '^probe/' | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    runs-on: [self-hosted, benchmark-builder]
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # one huge build at a time; the disk is the constraint
+      matrix:
+        image: ${{ fromJSON(needs.discover.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: login to ghcr
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: download datasets (cached on runner)
+        run: bin/build download '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
+      - name: build
+        run: bin/build build '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
+      - name: push
+        if: github.event_name == 'push' || github.event.inputs.target != ''
+        run: bin/build push '${{ matrix.image }}'
