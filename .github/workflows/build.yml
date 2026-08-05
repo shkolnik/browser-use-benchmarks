@@ -1,4 +1,15 @@
 name: build-images
+# Dispatched runs otherwise all display as "build-images"; an empty run-name
+# falls back to the default (push runs keep their commit-message title).
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('build {0}', inputs.target) || '' }}
+
+# One run at a time: concurrent runs would race on the runner's shared
+# datasets cache (two jobs appending the same .part download) and double-pay
+# the expensive prepare/derive phases. Queue, never cancel — every push's
+# build must actually run so its commit status is truthful.
+concurrency:
+  group: build-images
+  cancel-in-progress: false
 
 # GITHUB_TOKEN scopes: the default token couldn't push to ghcr (the first
 # run's push step was denied 5/5 attempts) — packages:write must be explicit.
@@ -41,12 +52,18 @@ jobs:
           # not CI-safe for it, so it's excluded here by name. This is the
           # workflow's own concern, not a root index: removing the probe
           # later means deleting its directory AND this one grep line.
-          # TEMPORARY (first-run shakeout, 2026-08-05): 'all' narrows to
-          # miniwob/server — the smallest image — until the runner setup is
-          # proven. An explicitly dispatched target is honored as-is. Remove
-          # the override below to restore full discovery.
-          if [ "$target" = all ]; then target='miniwob/server'; fi
-          images=$(bin/build list "$target" | cut -f1 | grep -v '^probe/' \
+          #
+          # Low-tech enablement (James, 2026-08-05): images not yet converted
+          # to a provenance-clear build are excluded below; enabling one =
+          # deleting its exclude line. Everything else builds on push and
+          # reports commit status.
+          images=$(bin/build list "$target" | cut -f1 \
+            | grep -v '^probe/' \
+            | grep -v '^webarena/reddit$' \
+            | grep -v '^webarena/shopping-admin$' \
+            | grep -v '^webarena/shopping$' \
+            | grep -v '^vwa/classifieds$' \
+            | grep -v '^webshop/server$' \
             | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
           echo "discovered: $images"
           test "$images" != "[]"   # fail loudly instead of handing build an empty matrix
