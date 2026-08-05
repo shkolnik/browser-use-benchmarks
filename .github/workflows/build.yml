@@ -41,10 +41,11 @@ jobs:
           # not CI-safe for it, so it's excluded here by name. This is the
           # workflow's own concern, not a root index: removing the probe
           # later means deleting its directory AND this one grep line.
-          # TEMPORARY (first-run shakeout, 2026-08-05): only miniwob/server —
-          # the smallest image — until the runner setup is proven. Remove the
-          # override below to restore full discovery.
-          target='miniwob/server'
+          # TEMPORARY (first-run shakeout, 2026-08-05): 'all' narrows to
+          # miniwob/server — the smallest image — until the runner setup is
+          # proven. An explicitly dispatched target is honored as-is. Remove
+          # the override below to restore full discovery.
+          if [ "$target" = all ]; then target='miniwob/server'; fi
           images=$(bin/build list "$target" | cut -f1 | grep -v '^probe/' \
             | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
           echo "discovered: $images"
