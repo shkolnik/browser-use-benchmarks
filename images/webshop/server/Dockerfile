@@ -58,3 +58,5 @@ RUN cd search_engine \
 
 EXPOSE 3000
 CMD ["python", "-m", "web_agent_site.app"]
+
+LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
