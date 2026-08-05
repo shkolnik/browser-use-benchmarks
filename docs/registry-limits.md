@@ -78,3 +78,12 @@ bound; a failed rung gets retried public (isolates visibility), then from shkoln
 (isolates tier). Final confirmation at target conditions (ghcr.io/shkolnik, public) required
 before relying on the result. Private-package storage is billed/quota'd — delete probe tags
 promptly.
+
+## Round-trip + visibility-flip results (2026-08-05, verified live)
+
+- Private→public flip on `registry-probe` took effect in ≤120s (anonymous manifest poll);
+  the already-banked 80 GiB survived the flip byte-identical (manifest re-verified after).
+- Full round trip proven: g80 (80.03 GiB, 8x 10.003 GiB layers) pulled anonymously to an
+  independent host (Synology NAS, stock dockerd, 3 concurrent downloads) — download succeeded.
+- Staircase cut after g100 by decision: ~20% headroom over the largest real image (gitlab 73G)
+  is enough; probing for GHCR's actual ceiling buys nothing we need.
