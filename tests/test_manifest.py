@@ -100,3 +100,46 @@ def test_build_kind_rejects_stray_source_keys(tmp_path):
     bad = GOOD + '\n[source]\nkind = "build"\ntag = "x:latest"\n'
     with pytest.raises(SystemExit, match="only valid with kind"):
         load_manifest(write(tmp_path, bad))
+
+PREPARE = GOOD + '''
+[prepare]
+script = "derive.sh"
+outputs = ["derived.tar", "extra.tar.gz"]
+'''
+
+def test_prepare_good(tmp_path):
+    (tmp_path / "derive.sh").write_text("#!/bin/bash\n")
+    m = load_manifest(write(tmp_path, PREPARE))
+    assert m.prepare.script == "derive.sh"
+    assert m.prepare.outputs == ["derived.tar", "extra.tar.gz"]
+
+def test_prepare_missing_script_file_fails_loud(tmp_path):
+    with pytest.raises(SystemExit, match="not found"):
+        load_manifest(write(tmp_path, PREPARE))
+
+def test_prepare_empty_outputs_fails_loud(tmp_path):
+    (tmp_path / "derive.sh").write_text("#!/bin/bash\n")
+    bad = PREPARE.replace('outputs = ["derived.tar", "extra.tar.gz"]', "outputs = []")
+    with pytest.raises(SystemExit, match="outputs"):
+        load_manifest(write(tmp_path, bad))
+
+def test_prepare_on_docker_save_fails_loud(tmp_path):
+    (tmp_path / "derive.sh").write_text("#!/bin/bash\n")
+    (tmp_path / "image.toml")  # DOCKER_SAVE fixture defined below in file order; inline here
+    text = '''
+[[datasets]]
+filename = "app.tar"
+sha256 = "%s"
+urls = ["https://mirror/app.tar"]
+
+[source]
+kind = "docker-save"
+dataset = "app.tar"
+tag = "app:latest"
+
+[prepare]
+script = "derive.sh"
+outputs = ["x"]
+''' % ("b" * 64)
+    with pytest.raises(SystemExit, match="prepare"):
+        load_manifest(write(tmp_path, text))

@@ -134,3 +134,51 @@ def test_run_clean_continues_past_failures(monkeypatch):
                          runner=lambda c: calls.append(c) or R(), log=logs.append)
     assert calls, "runner never invoked"
     assert any("warning" in l for l in logs)
+
+
+def test_run_prepare_skips_when_outputs_present(tmp_path, capsys):
+    from builder.docker import run_prepare
+    from builder.manifest import Manifest, Prepare
+    from builder.discover import ImageRef
+    (tmp_path / "derived.tar").write_text("x")
+    m = Manifest(prepare=Prepare("derive.sh", ["derived.tar"]))
+    ref = ImageRef("bench", "svc", tmp_path)
+    run_prepare(ref, m, "ghcr.io/x", tmp_path)  # must not try to run the script
+    assert "skipping" in capsys.readouterr().out
+
+
+def test_run_prepare_runs_script_with_env(tmp_path):
+    from builder.docker import run_prepare
+    from builder.manifest import Manifest, Prepare
+    from builder.discover import ImageRef
+    imgdir = tmp_path / "img"
+    dsdir = tmp_path / "ds"
+    imgdir.mkdir()
+    dsdir.mkdir()
+    (imgdir / "derive.sh").write_text(
+        '#!/bin/bash\necho "$REGISTRY" > "$DATASETS_DIR/derived.tar"\n')
+    m = Manifest(prepare=Prepare("derive.sh", ["derived.tar"]))
+    run_prepare(ImageRef("bench", "svc", imgdir), m, "ghcr.io/x", dsdir)
+    assert (dsdir / "derived.tar").read_text().strip() == "ghcr.io/x"
+
+
+def test_run_prepare_missing_output_fails_loud(tmp_path):
+    import pytest
+    from builder.docker import run_prepare
+    from builder.manifest import Manifest, Prepare
+    from builder.discover import ImageRef
+    (tmp_path / "derive.sh").write_text("#!/bin/bash\ntrue\n")
+    m = Manifest(prepare=Prepare("derive.sh", ["never-made.tar"]))
+    with pytest.raises(SystemExit, match="did not produce"):
+        run_prepare(ImageRef("bench", "svc", tmp_path), m, "ghcr.io/x", tmp_path)
+
+
+def test_run_prepare_script_failure_fails_loud(tmp_path):
+    import pytest
+    from builder.docker import run_prepare
+    from builder.manifest import Manifest, Prepare
+    from builder.discover import ImageRef
+    (tmp_path / "derive.sh").write_text("#!/bin/bash\nexit 3\n")
+    m = Manifest(prepare=Prepare("derive.sh", ["x.tar"]))
+    with pytest.raises(SystemExit, match="failed"):
+        run_prepare(ImageRef("bench", "svc", tmp_path), m, "ghcr.io/x", tmp_path)

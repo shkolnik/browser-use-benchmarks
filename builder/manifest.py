@@ -18,11 +18,18 @@ class Source:
     tag: str | None = None      # docker-save only: the image tag embedded in the tar's manifest.json
 
 @dataclass(frozen=True)
+class Prepare:
+    script: str          # runs from the image dir after download, before build
+    outputs: list[str]   # files it must leave in the datasets dir; all present = skip
+
+
+@dataclass(frozen=True)
 class Manifest:
     datasets: list[Dataset] = field(default_factory=list)
     healthcheck: str | None = None
     build_args: dict[str, str] = field(default_factory=dict)
     source: Source = Source(kind="build")
+    prepare: Prepare | None = None
 
 def _die(path: Path, msg: str):
     raise SystemExit(f"error: {path / 'image.toml'}: {msg}")
@@ -57,9 +64,23 @@ def load_manifest(image_dir: Path) -> Manifest:
             _die(image_dir, "docker-save images take no [build] section — nothing is built")
     elif src and set(src) != {"kind"}:
         _die(image_dir, "source.dataset/source.tag are only valid with kind = 'docker-save'")
+    prepare = None
+    prep = data.get("prepare")
+    if prep is not None:
+        if kind != "build":
+            _die(image_dir, "[prepare] is only valid with source.kind = 'build'")
+        for key in ("script", "outputs"):
+            if key not in prep:
+                _die(image_dir, f"prepare missing '{key}'")
+        if not (image_dir / prep["script"]).is_file():
+            _die(image_dir, f"prepare.script '{prep['script']}' not found in image dir")
+        if not prep["outputs"]:
+            _die(image_dir, "prepare.outputs is empty")
+        prepare = Prepare(prep["script"], list(prep["outputs"]))
     return Manifest(
         datasets=datasets,
         healthcheck=data.get("service", {}).get("healthcheck"),
         build_args={k: str(v) for k, v in data.get("build", {}).get("args", {}).items()},
         source=Source(kind=kind, dataset=src.get("dataset"), tag=src.get("tag")),
+        prepare=prepare,
     )

@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 import urllib.request
@@ -41,6 +42,22 @@ def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
     return [["docker", "push", f"{registry}/{ref.name}:{version}"],
             ["docker", "push", f"{registry}/{ref.name}:latest"]]
 
+def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -> None:
+    missing = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
+    if not missing:
+        print(f"{ref.name}: prepare outputs present, skipping {m.prepare.script}")
+        return
+    print(f"{ref.name}: running {m.prepare.script} (missing: {', '.join(missing)})")
+    env = dict(os.environ, DATASETS_DIR=str(datasets_dir.resolve()), REGISTRY=registry)
+    proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
+    if proc.returncode != 0:
+        raise SystemExit(f"error: prepare script failed for {ref.name}")
+    still = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
+    if still:
+        raise SystemExit(
+            f"error: prepare for {ref.name} did not produce: {', '.join(still)}")
+
+
 def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
     version = version_tag(repo_root)
     for ref in refs:
@@ -49,6 +66,8 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
             for cmd in load_cmds(ref, m, registry, datasets_dir, version):
                 run(cmd)
         else:
+            if m.prepare:
+                run_prepare(ref, m, registry, datasets_dir)
             run(build_cmd(ref, m, registry, datasets_dir, version))
 
 def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:

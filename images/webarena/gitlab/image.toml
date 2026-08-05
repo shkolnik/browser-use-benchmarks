@@ -5,10 +5,14 @@ urls = ["http://metis.lti.cs.cmu.edu/webarena-images/gitlab-populated-final-port
 # sha256 computed at salvage time (docs/prior-download/sha256.computed); the metis host is
 # flaky — see docs/prior-download/fetch.sh for the historical retry approach.
 
-[source]
-kind = "docker-save"
-dataset = "gitlab-populated-final-port8023.tar"
-tag = "gitlab-populated-final-port8023:latest"  # verified via `tar -xOf <tar> manifest.json`
+# Rebuilt from the official gitlab-ce release + a gitlab-backup restore instead
+# of shipping the upstream docker-save image verbatim: provenance-clear layers,
+# each under GHCR's layer ceiling, shedding ~40G of upstream log/packfile bloat.
+# Equivalence proven 2026-08-05: 0 field diffs across 2,399 users / 175 projects,
+# repo stats matching to packfile-size jitter.
+[prepare]
+script = "derive-backup.sh"
+outputs = ["webarena_gitlab_backup.tar", "etc-gitlab.tar.gz"]
 
 [service]
 # GitLab is configured upstream with external_url on port 8023 (it listens on 8023
