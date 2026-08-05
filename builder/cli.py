@@ -25,4 +25,12 @@ def main(argv=None) -> int:
     if args.cmd == "download":
         run_download(refs, dsdir)
         return 0
+
+    from builder import docker
+    if args.cmd == "build":
+        docker.run_build(refs, args.registry, dsdir, repo_root())
+        return 0
+    if args.cmd == "push":
+        docker.run_push(refs, args.registry, repo_root())
+        return 0
     raise SystemExit(f"error: '{args.cmd}' not implemented yet")
