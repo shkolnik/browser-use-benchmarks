@@ -70,3 +70,11 @@ intermediate tags (first k layers, 2k, ...): each stage's manifest REFERENCES it
 them GC-immune by construction. Driver does plain retries (correct for transient failures
 regardless); staged tags is the design if timeouts bite. Layer limit thus remains the only real
 per-artifact constraint.
+
+**Probe confounds (James, 2026-08-05):** the staircase runs under the strictest plausible tier —
+PRIVATE package, FREE-tier account (shkolnik-beep). Limits may differ for public packages (GH is
+more generous in public) and for the paid shkolnik account. Passing here is the pessimistic
+bound; a failed rung gets retried public (isolates visibility), then from shkolnik creds
+(isolates tier). Final confirmation at target conditions (ghcr.io/shkolnik, public) required
+before relying on the result. Private-package storage is billed/quota'd — delete probe tags
+promptly.
