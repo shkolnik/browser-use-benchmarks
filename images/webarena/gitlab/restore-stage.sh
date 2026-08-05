@@ -31,8 +31,11 @@ gitlab-ctl reconfigure
 echo "=== clean shutdown ==="
 gitlab-ctl stop
 # A quiesced Postgres matters: the final image must start from a cleanly
-# shut-down data directory, not one that looks like a crash.
-gitlab-ctl status postgresql 2>/dev/null | grep -q ^down || { echo "postgresql still up" >&2; exit 1; }
+# shut-down data directory, not one that looks like a crash. gitlab-ctl
+# status exits non-zero when the service is down (that's the state we WANT),
+# so capture output first instead of piping under pipefail.
+pg_status=$(gitlab-ctl status postgresql 2>/dev/null || true)
+echo "$pg_status" | grep -q '^down' || { echo "postgresql still up: $pg_status" >&2; exit 1; }
 kill "$WRAPPER_PID" 2>/dev/null || true
 
 echo "=== trim state not worth shipping ==="
