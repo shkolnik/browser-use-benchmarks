@@ -35,11 +35,23 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
     for ref in refs:
         run(build_cmd(ref, load_manifest(ref.path), registry, datasets_dir, version))
 
+def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
+                   sleep=time.sleep, log=print) -> None:
+    # Registry pushes can die on the server's whole-push timeout, but completed
+    # layers are digest-deduped across attempts, so retrying converges as long
+    # as at least one layer finishes per attempt.
+    for attempt in range(1, attempts + 1):
+        log(f"+ {' '.join(cmd)} (attempt {attempt}/{attempts})")
+        if runner(cmd).returncode == 0:
+            return
+        sleep(min(60, 10 * attempt))
+    raise SystemExit(f"error: command failed after {attempts} attempts: {' '.join(cmd)}")
+
 def run_push(refs, registry: str, repo_root: Path) -> None:
     version = version_tag(repo_root)
     for ref in refs:
         for cmd in push_cmds(ref, registry, version):
-            run(cmd)
+            run_with_retry(cmd)
 
 def poll_health(url: str, timeout_s: int = 120,
                 opener=urllib.request.urlopen, sleep=time.sleep) -> bool:

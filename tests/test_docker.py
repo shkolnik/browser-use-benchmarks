@@ -42,3 +42,24 @@ def test_poll_health_times_out():
     def opener(url, timeout):
         raise ConnectionRefusedError()
     assert not poll_health("http://x/", timeout_s=0, opener=opener, sleep=lambda s: None)
+
+from builder.docker import run_with_retry
+import pytest
+
+class FakeProc:
+    def __init__(self, rc): self.returncode = rc
+
+def test_push_retry_banks_progress_and_succeeds():
+    rcs = [1, 1, 0]
+    calls = []
+    def runner(cmd):
+        calls.append(list(cmd))
+        return FakeProc(rcs.pop(0))
+    run_with_retry(["docker", "push", "x"], attempts=5, runner=runner, sleep=lambda s: None)
+    assert len(calls) == 3 and all(c == ["docker", "push", "x"] for c in calls)
+
+def test_push_retry_exhausted_fails_loud():
+    def runner(cmd):
+        return FakeProc(1)
+    with pytest.raises(SystemExit, match="after 2 attempts"):
+        run_with_retry(["docker", "push", "x"], attempts=2, runner=runner, sleep=lambda s: None)
