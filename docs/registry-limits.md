@@ -28,7 +28,17 @@ probe is not a runnable service, only a data-shape stress test. That is intentio
 
 | Registry | total size | chunk size | result | per-layer errors | push wall-time | pull-back verified | date |
 |---|---|---|---|---|---|---|---|
-| _(not yet run at full scale in this environment)_ | | | | | | | |
+| ghcr.io (private, free-tier `shkolnik-beep`) | 20.01 GiB (g20) | 10.003 GiB | ACCEPTED | none | — | — | 2026-08-05 |
+| ghcr.io (same) | 40.01 GiB (g40) | 10.003 GiB | ACCEPTED | none | — | — | 2026-08-05 |
+| ghcr.io (same) | 60.02 GiB (g60) | 10.003 GiB | ACCEPTED | none | — | — | 2026-08-05 |
+| ghcr.io (then flipped public) | 80.03 GiB (g80) | 10.003 GiB | ACCEPTED | none | — | YES (Synology, anonymous) | 2026-08-05 |
+| ghcr.io (public) | **100.03 GiB (g100)** | 10.003 GiB | ACCEPTED | none | ~50 min (build+push rung) | — | 2026-08-05 |
+
+**Conclusion:** GHCR accepts ≥100 GiB single images with ~10 GiB layers on a free-tier account,
+private or public, with anonymous pull proven end-to-end at 80 GiB. Every size in our benchmark
+compilation (largest: gitlab ~73 GiB) fits with ≥20% headroom. All rung sizes above are
+registry-side ground truth via `tools/ghcr-manifest-size.py`, not local estimates. Staircase
+deliberately cut after g100 (see below); GHCR's actual ceiling was not reached.
 
 ### Local smoke-scale verification (2 x 1G, this sandbox, 2026-08-05)
 
