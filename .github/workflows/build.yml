@@ -88,7 +88,7 @@ jobs:
       # push-to-registry also attaches it to the image as an OCI referrer.
       - name: attest build provenance
         if: github.event_name == 'push' || github.event.inputs.target != ''
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.digest.outputs.name }}
           subject-digest: ${{ steps.digest.outputs.digest }}
