@@ -26,6 +26,17 @@ def build_cmd(ref: ImageRef, m: Manifest, registry: str,
             "-t", f"{registry}/{ref.name}:latest", str(ref.path)]
     return cmd
 
+def load_cmds(ref: ImageRef, m: Manifest, registry: str,
+              datasets_dir: Path, version: str) -> list[list[str]]:
+    tarball = datasets_dir / m.source.dataset
+    if not tarball.is_file():
+        raise SystemExit(f"error: {tarball} not found — run download for {ref.name} first")
+    return [
+        ["docker", "load", "-i", str(tarball)],
+        ["docker", "tag", m.source.tag, f"{registry}/{ref.name}:{version}"],
+        ["docker", "tag", m.source.tag, f"{registry}/{ref.name}:latest"],
+    ]
+
 def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
     return [["docker", "push", f"{registry}/{ref.name}:{version}"],
             ["docker", "push", f"{registry}/{ref.name}:latest"]]
@@ -33,7 +44,12 @@ def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
 def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
     version = version_tag(repo_root)
     for ref in refs:
-        run(build_cmd(ref, load_manifest(ref.path), registry, datasets_dir, version))
+        m = load_manifest(ref.path)
+        if m.source.kind == "docker-save":
+            for cmd in load_cmds(ref, m, registry, datasets_dir, version):
+                run(cmd)
+        else:
+            run(build_cmd(ref, m, registry, datasets_dir, version))
 
 def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
                    sleep=time.sleep, log=print) -> None:
