@@ -116,6 +116,6 @@ the registry afterward.
 The built containers will likely run directly on James's Synology NAS (low workload, high disk).
 Consequences: per-benchmark `compose.yml` is the deployment interface (Container Manager runs
 compose natively) — keep host ports unique across benchmarks and pin versioned tags in compose,
-not bare `latest`; RAM (esp. GitLab's ~4G+) is the likelier constraint than CPU; if registries
+not bare `latest`; RAM was upgraded to 32G (2026-08-05) so the full set fits comfortably; if registries
 reject the huge images, `docker save | ssh` to the NAS is the fallback transport, so registry
 limits cost convenience, not feasibility.
