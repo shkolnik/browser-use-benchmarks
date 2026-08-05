@@ -1,0 +1,54 @@
+[2026-07-17T23:32:28-05:00] START free=482G
+[2026-07-17T23:32:28-05:00] LOAD shopping_admin (9.0G) free=482G ...
+Loaded image: shopping_admin_final_0719:latest
+[2026-07-17T23:33:19-05:00] LOAD shopping_admin OK free=462G
+[2026-07-17T23:33:19-05:00] LOAD gitlab (43G) free=462G ...
+failed to ingest "430fe851ec17ec972df50e4786052d5ac36cbbd1874a9a66063608efb4a6e333/layer.tar": short read: expected 31355003904 bytes but got 5502263808: unexpected EOF
+[2026-07-17T23:35:33-05:00] LOAD gitlab FAILED (see log) free=413G
+[2026-07-17T23:35:33-05:00] LOAD postmill (50G) free=413G ...
+Loaded image: postmill-populated-exposed-withimg:latest
+[2026-07-18T00:06:23-05:00] LOAD postmill OK free=335G
+[2026-07-18T00:06:23-05:00] LOAD shopping (63G) free=335G ...
+Loaded image: shopping_final_0712:latest
+[2026-07-18T00:51:49-05:00] LOAD shopping OK free=209G
+[2026-07-18T00:51:49-05:00] PULL classifieds (jykoh/classifieds:latest — retry the pathological ~63G pull) free=209G ...
+latest: Pulling from jykoh/classifieds
+6480d4ad61d2: Pulling fs layer
+2330b2e5ceb7: Pulling fs layer
+af107e978371: Pulling fs layer
+f3c45c844db4: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+650b19d7612a: Pulling fs layer
+37a054e08979: Pulling fs layer
+95f5176ece8b: Pulling fs layer
+a0aa6b885c0f: Pulling fs layer
+0ebe7ec824ca: Pulling fs layer
+4652a2e93947: Pulling fs layer
+630356341a53: Pulling fs layer
+552d59c23c47: Pulling fs layer
+ec57d9f250af: Pulling fs layer
+4f4fb700ef54: Already exists
+0ebe7ec824ca: Download complete
+a0aa6b885c0f: Download complete
+630356341a53: Download complete
+6480d4ad61d2: Download complete
+f3c45c844db4: Download complete
+4652a2e93947: Download complete
+af107e978371: Download complete
+2330b2e5ceb7: Download complete
+650b19d7612a: Download complete
+552d59c23c47: Download complete
+37a054e08979: Download complete
+af107e978371: Pull complete
+95f5176ece8b: Download complete
+6480d4ad61d2: Pull complete
+95f5176ece8b: Pull complete
+0ebe7ec824ca: Pull complete
+2330b2e5ceb7: Pull complete
+630356341a53: Pull complete
+37a054e08979: Pull complete
+f3c45c844db4: Pull complete
+a0aa6b885c0f: Pull complete
+650b19d7612a: Pull complete
+552d59c23c47: Pull complete
+4652a2e93947: Pull complete
