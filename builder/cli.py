@@ -19,4 +19,10 @@ def main(argv=None) -> int:
         for r in refs:
             print(f"{r.benchmark}/{r.service}\t{r.name}")
         return 0
+
+    from builder.download import default_datasets_dir, run_download
+    dsdir = args.datasets_dir or default_datasets_dir(repo_root())
+    if args.cmd == "download":
+        run_download(refs, dsdir)
+        return 0
     raise SystemExit(f"error: '{args.cmd}' not implemented yet")
