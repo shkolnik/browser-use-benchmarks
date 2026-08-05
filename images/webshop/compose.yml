@@ -1,0 +1,7 @@
+# WebShop upstream-standard port 3000 (web_agent_site/app.py); unique across benchmarks
+# (miniwob 8399; webarena 7770/7780/9999/8023).
+services:
+  server:
+    image: ghcr.io/shkolnik/webshop-server:latest
+    ports:
+      - "3000:3000"
