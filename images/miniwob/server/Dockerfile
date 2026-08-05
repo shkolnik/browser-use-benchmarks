@@ -12,3 +12,5 @@ RUN mkdir -p /usr/share/nginx/miniwob \
       -C /usr/share/nginx/miniwob "${top}miniwob/html" \
  && rm /tmp/miniwob-plusplus.tar.gz
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"

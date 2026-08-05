@@ -119,3 +119,12 @@ compose natively) — keep host ports unique across benchmarks and pin versioned
 not bare `latest`; RAM was upgraded to 32G (2026-08-05) so the full set fits comfortably; if registries
 reject the huge images, `docker save | ssh` to the NAS is the fallback transport, so registry
 limits cost convenience, not feasibility.
+
+## GHCR package topology (2026-08-05)
+
+One package per service image (`<benchmark>-<service>`), all fed from this repo. Dockerfile-built
+images carry `org.opencontainers.image.source` pointing here, so GHCR auto-links each package to the
+repo and inherits its (public) visibility on first push. The four WebArena `docker-save` images
+cannot carry the label (their config is upstream's, and we only re-tag), so those packages need a
+one-time manual visibility-flip/repo-link in the GitHub UI after their first push — visibility is
+per package and defaults to private without the label.
