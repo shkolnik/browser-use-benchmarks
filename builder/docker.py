@@ -51,6 +51,23 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
         else:
             run(build_cmd(ref, m, registry, datasets_dir, version))
 
+def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:
+    tags = [f"{registry}/{ref.name}:{version}", f"{registry}/{ref.name}:latest"]
+    if m.source.kind == "docker-save":
+        tags.append(m.source.tag)
+    return [["docker", "image", "rm", "-f"] + tags]
+
+def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=print) -> None:
+    # Best-effort by design: clean runs in CI's always() step, where the image
+    # may never have been built. `rm -f` exits 0 on missing images, so a
+    # non-zero here is a real docker failure — surface it but keep cleaning.
+    version = version_tag(repo_root)
+    for ref in refs:
+        for cmd in clean_cmds(ref, load_manifest(ref.path), registry, version):
+            log("+ " + " ".join(cmd))
+            if runner(cmd).returncode != 0:
+                log(f"warning: cleanup command failed (continuing): {' '.join(cmd)}")
+
 def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
                    sleep=time.sleep, log=print) -> None:
     # Registry pushes can die on the server's whole-push timeout, but completed

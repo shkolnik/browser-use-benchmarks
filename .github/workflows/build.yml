@@ -52,3 +52,17 @@ jobs:
       - name: push
         if: github.event_name == 'push' || github.event.inputs.target != ''
         run: bin/build push '${{ matrix.image }}'
+
+      # Disk hygiene: the runner VM's disk is the scarce resource, so every
+      # job leaves docker the way it found it — only the datasets cache
+      # ($HOME/benchmark-datasets) and a bounded builder cache persist.
+      # always() so a failed build's partial images still get reclaimed.
+      - name: clean up images
+        if: always()
+        run: bin/build clean '${{ matrix.image }}'
+      - name: clean up docker leftovers
+        if: always()
+        run: |
+          docker image prune -f
+          docker builder prune -f --keep-storage 20GB
+          docker system df

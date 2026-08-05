@@ -1,6 +1,7 @@
 from pathlib import Path
 from builder.discover import ImageRef
-from builder.manifest import Manifest
+from builder.manifest import Manifest, Source
+from builder import docker as docker_mod
 from builder.docker import build_cmd, push_cmds, poll_health
 
 REF = ImageRef("miniwob", "server", Path("/repo/images/miniwob/server"))
@@ -106,3 +107,30 @@ def test_run_build_dispatches_docker_save_to_load_path(tmp_path, monkeypatch):
     dk.run_build([ref], "ghcr.io/shkolnik", dsdir, tmp_path)
     assert [c[:2] for c in calls] == [["docker", "load"], ["docker", "tag"], ["docker", "tag"]]
     assert not any("build" in c for c in calls)
+
+
+def test_clean_cmds_removes_registry_tags():
+    m = Manifest()
+    [cmd] = docker_mod.clean_cmds(REF, m, "ghcr.io/x", "v1")
+    assert cmd[:4] == ["docker", "image", "rm", "-f"]
+    assert "ghcr.io/x/miniwob-server:v1" in cmd and "ghcr.io/x/miniwob-server:latest" in cmd
+
+
+def test_clean_cmds_docker_save_removes_embedded_tag():
+    m = Manifest(source=Source(kind="docker-save", dataset="d.tar", tag="upstream:latest"))
+    [cmd] = docker_mod.clean_cmds(REF, m, "ghcr.io/x", "v1")
+    assert "upstream:latest" in cmd
+
+
+def test_run_clean_continues_past_failures(monkeypatch):
+    calls, logs = [], []
+
+    class R:
+        returncode = 1
+
+    monkeypatch.setattr(docker_mod, "version_tag", lambda root: "v1")
+    monkeypatch.setattr(docker_mod, "load_manifest", lambda path: Manifest())
+    docker_mod.run_clean([REF], "ghcr.io/x", Path("/repo"),
+                         runner=lambda c: calls.append(c) or R(), log=logs.append)
+    assert calls, "runner never invoked"
+    assert any("warning" in l for l in logs)
