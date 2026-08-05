@@ -7,7 +7,7 @@ on:
         default: all
   push:
     branches: [main]
-    paths: ["images/**", "builder/**", "bin/**"]
+    paths: ["images/**", "builder/**", "bin/**", ".github/workflows/build.yml"]
 
 # v1 deliberately does NOT implement change-detection on push: the download
 # cache (datasets/ persists on the self-hosted runner) plus docker's own
@@ -31,6 +31,10 @@ jobs:
           # not CI-safe for it, so it's excluded here by name. This is the
           # workflow's own concern, not a root index: removing the probe
           # later means deleting its directory AND this one grep line.
+          # TEMPORARY (first-run shakeout, 2026-08-05): only miniwob/server —
+          # the smallest image — until the runner setup is proven. Remove the
+          # override below to restore full discovery.
+          target='miniwob/server'
           echo "images=$(bin/build list "$target" | cut -f1 | grep -v '^probe/' | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
 
   build:
