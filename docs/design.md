@@ -110,3 +110,12 @@ the registry afterward.
 - Docker Hub account/namespace for the probe push (James's call if a new account is needed).
 - Registry cleanup policy for superseded huge tags (GHCR storage is free for public but
   politeness/quota unknowns — note findings during M0).
+
+## Deployment target note (James, 2026-08-05)
+
+The built containers will likely run directly on James's Synology NAS (low workload, high disk).
+Consequences: per-benchmark `compose.yml` is the deployment interface (Container Manager runs
+compose natively) — keep host ports unique across benchmarks and pin versioned tags in compose,
+not bare `latest`; RAM (esp. GitLab's ~4G+) is the likelier constraint than CPU; if registries
+reject the huge images, `docker save | ssh` to the NAS is the fallback transport, so registry
+limits cost convenience, not feasibility.
