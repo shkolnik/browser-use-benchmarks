@@ -8,7 +8,7 @@ def repo_root() -> Path:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="build", description="benchmark image builder")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("list", "download", "build", "push", "smoke"):
+    for name in ("list", "download", "build", "push", "smoke", "clean"):
         sp = sub.add_parser(name)
         sp.add_argument("target", help="all, <benchmark>, or <benchmark>/<service>")
         sp.add_argument("--registry", default="ghcr.io/shkolnik")
@@ -32,6 +32,9 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "push":
         docker.run_push(refs, args.registry, repo_root())
+        return 0
+    if args.cmd == "clean":
+        docker.run_clean(refs, args.registry, repo_root())
         return 0
     docker.run_smoke(refs, repo_root())
     return 0
