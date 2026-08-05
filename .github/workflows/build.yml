@@ -28,7 +28,7 @@ jobs:
     outputs:
       images: ${{ steps.ls.outputs.images }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: ls
         run: |
           target='${{ github.event.inputs.target || 'all' }}'
@@ -57,7 +57,7 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.discover.outputs.images) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: login to ghcr
         run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
       - name: download datasets (cached on runner)
