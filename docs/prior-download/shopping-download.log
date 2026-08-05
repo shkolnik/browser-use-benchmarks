@@ -1,0 +1,81 @@
+[2026-07-17T20:46:36Z] shopping GDrive download start (id=1gxXalk9O0p9eu1YkIJcmZta1nvvyAJpA)
+Failed to retrieve file url:
+
+	Too many users have viewed or downloaded this file recently. Please
+	try accessing the file again later. If the file you are trying to
+	access is particularly large or is shared with many people, it may
+	take up to 24 hours to be able to view or download the file. If you
+	still can't access a file after 24 hours, contact your domain
+	administrator.
+
+You may still be able to access the file from the browser:
+
+	https://drive.google.com/uc?id=1gxXalk9O0p9eu1YkIJcmZta1nvvyAJpA
+
+but Gdown can't. Please check connections and permissions.
+[2026-07-17T20:46:37Z] shopping download FAILED rc=1 (GDrive quota/virus-scan block is the usual cause for large public files)
+[2026-07-17T20:48:20Z] shopping GDrive retry attempt 1/18
+Failed to retrieve file url:
+
+	Too many users have viewed or downloaded this file recently. Please
+	try accessing the file again later. If the file you are trying to
+	access is particularly large or is shared with many people, it may
+	take up to 24 hours to be able to view or download the file. If you
+	still can't access a file after 24 hours, contact your domain
+	administrator.
+
+You may still be able to access the file from the browser:
+
+	https://drive.google.com/uc?id=1gxXalk9O0p9eu1YkIJcmZta1nvvyAJpA
+
+but Gdown can't. Please check connections and permissions.
+[2026-07-17T20:48:21Z] attempt 1 failed (quota); sleeping 2h
+[2026-07-17T22:48:21Z] shopping GDrive retry attempt 2/18
+Failed to retrieve file url:
+
+	Too many users have viewed or downloaded this file recently. Please
+	try accessing the file again later. If the file you are trying to
+	access is particularly large or is shared with many people, it may
+	take up to 24 hours to be able to view or download the file. If you
+	still can't access a file after 24 hours, contact your domain
+	administrator.
+
+You may still be able to access the file from the browser:
+
+	https://drive.google.com/uc?id=1gxXalk9O0p9eu1YkIJcmZta1nvvyAJpA
+
+but Gdown can't. Please check connections and permissions.
+[2026-07-17T22:48:22Z] attempt 2 failed (quota); sleeping 2h
+[2026-07-18T00:48:22Z] shopping GDrive retry attempt 3/18
+Failed to retrieve file url:
+
+	Too many users have viewed or downloaded this file recently. Please
+	try accessing the file again later. If the file you are trying to
+	access is particularly large or is shared with many people, it may
+	take up to 24 hours to be able to view or download the file. If you
+	still can't access a file after 24 hours, contact your domain
+	administrator.
+
+You may still be able to access the file from the browser:
+
+	https://drive.google.com/uc?id=1gxXalk9O0p9eu1YkIJcmZta1nvvyAJpA
+
+but Gdown can't. Please check connections and permissions.
+[2026-07-18T00:48:23Z] attempt 3 failed (quota); sleeping 2h
+[2026-07-18T02:48:23Z] shopping GDrive retry attempt 4/18
+Failed to retrieve file url:
+
+	Too many users have viewed or downloaded this file recently. Please
+	try accessing the file again later. If the file you are trying to
+	access is particularly large or is shared with many people, it may
+	take up to 24 hours to be able to view or download the file. If you
+	still can't access a file after 24 hours, contact your domain
+	administrator.
+
+You may still be able to access the file from the browser:
+
+	https://drive.google.com/uc?id=1gxXalk9O0p9eu1YkIJcmZta1nvvyAJpA
+
+but Gdown can't. Please check connections and permissions.
+[2026-07-18T02:48:24Z] attempt 4 failed (quota); sleeping 2h
+[2026-07-18T04:48:24Z] shopping already present (67575898112 bytes) — retry loop exiting
