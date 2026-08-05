@@ -35,7 +35,11 @@ jobs:
           # the smallest image — until the runner setup is proven. Remove the
           # override below to restore full discovery.
           target='miniwob/server'
-          echo "images=$(bin/build list "$target" | cut -f1 | grep -v '^probe/' | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+          images=$(bin/build list "$target" | cut -f1 | grep -v '^probe/' \
+            | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "discovered: $images"
+          test "$images" != "[]"   # fail loudly instead of handing build an empty matrix
+          echo "images=$images" >> "$GITHUB_OUTPUT"
 
   build:
     needs: discover
