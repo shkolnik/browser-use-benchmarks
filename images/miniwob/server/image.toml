@@ -1,0 +1,10 @@
+[[datasets]]
+filename = "miniwob-plusplus.tar.gz"
+sha256 = "f31570f8f7ed5a05cbe23b9b11e90d62a685dce8043f1e9884769a05c34269e0"
+urls = ["https://github.com/Farama-Foundation/miniwob-plusplus/archive/refs/tags/v1.0.tar.gz"]
+# Computed in this repo (curl + sha256sum), not invented. GitHub tag archives are stable
+# per tag in practice; a checksum break here means the tag moved upstream — investigate,
+# don't bump this value blindly.
+
+[service]
+healthcheck = "http://localhost:8399/miniwob/click-button.html"

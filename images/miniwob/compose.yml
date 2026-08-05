@@ -1,0 +1,5 @@
+services:
+  server:
+    image: ghcr.io/shkolnik/miniwob-server:latest
+    ports:
+      - "8399:8399"
