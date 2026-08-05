@@ -1,0 +1,5 @@
+# probe image: no datasets (generated locally by generate-dataset.sh, not
+# downloaded), no runnable service. `bin/build smoke probe` fails loud on the
+# missing healthcheck — that is correct; the probe is not smoke-tested, see
+# docs/registry-limits.md. CI excludes this benchmark by name (see
+# .github/workflows/build.yml's discover step).
