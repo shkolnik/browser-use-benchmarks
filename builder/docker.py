@@ -59,8 +59,8 @@ def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[
 
 def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=print) -> None:
     # Best-effort by design: clean runs in CI's always() step, where the image
-    # may never have been built. `rm -f` exits 0 on missing images, so a
-    # non-zero here is a real docker failure — surface it but keep cleaning.
+    # may never have been built — and `docker image rm -f` exits non-zero on a
+    # missing image (verified live), so failures warn and cleaning continues.
     version = version_tag(repo_root)
     for ref in refs:
         for cmd in clean_cmds(ref, load_manifest(ref.path), registry, version):
