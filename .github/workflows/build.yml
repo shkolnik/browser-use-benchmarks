@@ -2,9 +2,12 @@ name: build-images
 
 # GITHUB_TOKEN scopes: the default token couldn't push to ghcr (the first
 # run's push step was denied 5/5 attempts) — packages:write must be explicit.
+# id-token + attestations are for the provenance attestation step.
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 on:
   workflow_dispatch:
@@ -67,6 +70,29 @@ jobs:
       - name: push
         if: github.event_name == 'push' || github.event.inputs.target != ''
         run: bin/build push '${{ matrix.image }}'
+      - name: resolve pushed digest
+        id: digest
+        if: github.event_name == 'push' || github.event.inputs.target != ''
+        run: |
+          name="ghcr.io/${{ github.repository_owner }}/$(echo '${{ matrix.image }}' | tr / -)"
+          # RepoDigests is populated by the push above; with a single registry
+          # there is exactly one entry.
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$name:latest" | cut -d@ -f2)
+          echo "resolved: $name@$digest"
+          case "$digest" in sha256:*) ;; *) echo "no digest resolved" >&2; exit 1;; esac
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Signed SLSA build provenance: lets anyone verify the image came from
+      # this repo's CI at a given commit, via
+      #   gh attestation verify oci://<image> -R ${{ github.repository }}
+      # push-to-registry also attaches it to the image as an OCI referrer.
+      - name: attest build provenance
+        if: github.event_name == 'push' || github.event.inputs.target != ''
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.digest.outputs.name }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
 
       # Disk hygiene: the runner VM's disk is the scarce resource, so every
       # job leaves docker the way it found it — only the datasets cache
