@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  # One entry covers every images/<benchmark>/<service>/Dockerfile.
+  # The probe's Dockerfile is generated at run time and never committed,
+  # so it is naturally out of scope.
+  - package-ecosystem: docker
+    directories:
+      - "/images/*/*"
+    schedule:
+      interval: weekly
+
+  # No pip entry: builder/ is deliberately stdlib-only (no requirements
+  # files to track), and WebShop's python deps are pinned by its upstream
+  # repo, not by files in this one.

@@ -1,4 +1,11 @@
 name: build-images
+
+# GITHUB_TOKEN scopes: the default token couldn't push to ghcr (the first
+# run's push step was denied 5/5 attempts) — packages:write must be explicit.
+permissions:
+  contents: read
+  packages: write
+
 on:
   workflow_dispatch:
     inputs:
