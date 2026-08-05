@@ -38,3 +38,26 @@ layer) against a local `registry:2` container, pushed, and `docker pull`ed back 
 This is NOT the registry-size probe itself (that needs the full ~120G run against real GHCR /
 Docker Hub) — it only confirms the plumbing (`--build-context`, chunk generation, push/pull
 round-trip) is sound before spending real time/bandwidth on the full-scale run.
+
+## Research findings (web sweep, 2026-08-05 — verified-vs-reported flagged inline)
+
+- GHCR: 10 GB/compressed layer (VERIFIED, GitHub docs); 10-minute upload timeout whose scope
+  (whole-push vs per-request) is ambiguous — a REPORTED 7.8 GiB push died at manifest
+  finalization at exactly 10 min. If whole-push, 120G needs ~1.6 Gbit/s sustained.
+- Largest verified public-registry push found anywhere: ~25 GiB via 7–8 GB layers. Nothing at
+  our 100G+ scale is documented as succeeding — our probe exits the tested envelope.
+- Docker Hub's cited 100 GB total cap: REPORTED community lore only, not in Docker's docs.
+  The ~10 GB layer ceiling across registries is an inherited S3 5 GB-multipart artifact.
+- docker push has NO intra-layer resume (a failed 9 GB layer re-pushes from zero) and pushes
+  5 layers concurrently by default — prefer ~8 GB layers; consider --max-concurrent-uploads
+  on slow uplinks.
+- WebArena upstream deliberately does NOT registry-distribute its big images: docker-save tars
+  over Google Drive/archive.org/CMU HTTP + an AWS AMI. The salvaged tars ARE their chosen format.
+- Alternatives if registries reject: (a) code-image + runtime dataset download (registry ships
+  only small service images), (b) ORAS OCI artifacts (~8 GB layers, same registries),
+  (c) self-hosted Zot registry or docker save|ssh directly to the NAS — the NAS being the only
+  consumer makes this a legitimate primary path, not a fallback.
+- Compression: zstd for compressible layers (faster + better decompress), zstd -1..3 for
+  incompressible shards (ratio is zero either way; don't burn CPU). Don't squash — per-layer
+  dedup across dataset versions is the win. Lazy-pull (eStargz/SOCI) needs containerd, which
+  Synology's Container Manager (dockerd) doesn't offer — not applicable to our target.
