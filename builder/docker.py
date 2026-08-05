@@ -1,4 +1,7 @@
 import subprocess
+import time
+import urllib.request
+import urllib.error
 from datetime import date
 from pathlib import Path
 from builder.discover import ImageRef
@@ -37,3 +40,35 @@ def run_push(refs, registry: str, repo_root: Path) -> None:
     for ref in refs:
         for cmd in push_cmds(ref, registry, version):
             run(cmd)
+
+def poll_health(url: str, timeout_s: int = 120,
+                opener=urllib.request.urlopen, sleep=time.sleep) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            with opener(url, timeout=10) as resp:
+                if 200 <= resp.status < 400:
+                    return True
+        except (urllib.error.URLError, ConnectionError, OSError, TimeoutError):
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        sleep(2)
+
+def run_smoke(refs, repo_root: Path) -> None:
+    benches = sorted({r.benchmark for r in refs})
+    for bench in benches:
+        compose = repo_root / "images" / bench / "compose.yml"
+        if not compose.is_file():
+            raise SystemExit(f"error: {compose} not found — every benchmark needs a compose.yml")
+        run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait"])
+        try:
+            for ref in [r for r in refs if r.benchmark == bench]:
+                hc = load_manifest(ref.path).healthcheck
+                if hc is None:
+                    raise SystemExit(f"error: {ref.name} has no [service].healthcheck in image.toml")
+                if not poll_health(hc):
+                    raise SystemExit(f"error: smoke FAILED — {ref.name} never became healthy at {hc}")
+                print(f"{ref.name}: healthy at {hc}")
+        finally:
+            run(["docker", "compose", "-f", str(compose), "down", "-v"])

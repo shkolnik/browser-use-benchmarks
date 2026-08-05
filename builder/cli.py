@@ -33,4 +33,5 @@ def main(argv=None) -> int:
     if args.cmd == "push":
         docker.run_push(refs, args.registry, repo_root())
         return 0
-    raise SystemExit(f"error: '{args.cmd}' not implemented yet")
+    docker.run_smoke(refs, repo_root())
+    return 0
