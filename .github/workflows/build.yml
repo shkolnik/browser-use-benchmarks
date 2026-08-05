@@ -17,7 +17,7 @@ on:
 
 jobs:
   discover:
-    runs-on: [self-hosted, benchmark-builder]
+    runs-on: self-hosted
     outputs:
       images: ${{ steps.ls.outputs.images }}
     steps:
@@ -39,7 +39,7 @@ jobs:
 
   build:
     needs: discover
-    runs-on: [self-hosted, benchmark-builder]
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       max-parallel: 1   # one huge build at a time; the disk is the constraint
