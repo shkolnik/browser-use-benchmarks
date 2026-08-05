@@ -1,0 +1,14 @@
+[[datasets]]
+filename = "postmill-populated-exposed-withimg.tar"
+sha256 = "6ff70f73bc808b4cd9faf4e925dab2a4ae3cc5f9d0e9755360500607973a0dc5"
+urls = ["https://archive.org/download/postmill-populated-exposed-withimg/postmill-populated-exposed-withimg.tar"]
+# sha256 computed at salvage time (docs/prior-download/sha256.computed); upstream md5 also
+# verified (docs/prior-download/md5.expected).
+
+[source]
+kind = "docker-save"
+dataset = "postmill-populated-exposed-withimg.tar"
+tag = "postmill-populated-exposed-withimg:latest"  # verified via `tar -xOf <tar> manifest.json`
+
+[service]
+healthcheck = "http://localhost:9999/forums"

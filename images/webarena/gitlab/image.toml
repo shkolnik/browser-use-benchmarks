@@ -1,0 +1,16 @@
+[[datasets]]
+filename = "gitlab-populated-final-port8023.tar"
+sha256 = "6269a90527a63c12d86fa4a5da8c5404553b78e75c5123712818c1b6d9f0972d"
+urls = ["http://metis.lti.cs.cmu.edu/webarena-images/gitlab-populated-final-port8023.tar"]
+# sha256 computed at salvage time (docs/prior-download/sha256.computed); the metis host is
+# flaky — see docs/prior-download/fetch.sh for the historical retry approach.
+
+[source]
+kind = "docker-save"
+dataset = "gitlab-populated-final-port8023.tar"
+tag = "gitlab-populated-final-port8023:latest"  # verified via `tar -xOf <tar> manifest.json`
+
+[service]
+# GitLab is configured upstream with external_url on port 8023 (it listens on 8023
+# inside the container, not 80).
+healthcheck = "http://localhost:8023/explore"

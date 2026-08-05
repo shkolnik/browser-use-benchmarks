@@ -1,0 +1,23 @@
+# WebArena services, upstream-standard host ports (webarena README):
+#   shopping 7770, shopping-admin 7780, reddit/postmill 9999, gitlab 8023.
+# Healthcheck URLs live in each service's image.toml ([service].healthcheck).
+services:
+  shopping:
+    image: ghcr.io/shkolnik/webarena-shopping:latest
+    ports:
+      - "7770:80"
+  shopping-admin:
+    image: ghcr.io/shkolnik/webarena-shopping-admin:latest
+    ports:
+      - "7780:80"
+  reddit:
+    image: ghcr.io/shkolnik/webarena-reddit:latest
+    ports:
+      - "9999:80"
+  gitlab:
+    image: ghcr.io/shkolnik/webarena-gitlab:latest
+    # Upstream runs the image with this command (webarena README docker run line);
+    # GitLab's external_url is baked in on port 8023, so the container port is 8023.
+    command: /opt/gitlab/embedded/bin/runsvdir-start
+    ports:
+      - "8023:8023"
