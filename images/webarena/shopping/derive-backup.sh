@@ -23,11 +23,33 @@ set -euo pipefail
 UPSTREAM_TAR="$DATASETS_DIR/shopping_final_0712.tar"
 UPSTREAM_TAG=shopping_final_0712:latest
 UPSTREAM_SHA=2052430ee930d18a0c362997f1ccd1c500041f720ece8794ed77a77ee99139b5
-CACHE="$REGISTRY/webarena-shopping-derived:${UPSTREAM_SHA:0:12}"
+# The cache key covers the RECIPE as well as the input. Keying on the upstream
+# tar's sha alone is wrong twice over: this script decides HOW the artifacts are
+# produced, so two different recipes over one identical input are two different
+# artifacts. Without this component a recipe fix is inert — the builder's
+# provenance stamp notices the script changed and re-runs it, the script then
+# cache-hits on the unchanged key, extracts the artifacts the OLD recipe made,
+# and exits 0 before deriving anything. run_prepare then stamps those stale
+# bytes as freshly derived. Bump RECIPE whenever what this script emits
+# changes; that also strands any bad entry from the previous revision.
+RECIPE=r2  # r2: mysqldump/gzip split into two steps (the pipeline hid failures)
+CACHE="$REGISTRY/webarena-shopping-derived:${UPSTREAM_SHA:0:12}-$RECIPE"
 
 DB_NAME=magentodb
 DB_USER=magentouser
 DB_PASS=MyPassword
+
+# Defined ABOVE the cache branch on purpose: the checks apply to cached
+# artifacts too. A cache is an input like any other, and it is the one path
+# that can serve a bad blob pushed by an older, buggier revision of this
+# script — nothing arrives trusted.
+assert_dump_complete() {
+  if ! gzip -dc "$DATASETS_DIR/$1" | tail -c 200 | grep -q '^-- Dump completed'; then
+    echo "derive: $1 carries no mysqldump completion trailer — the dump is truncated; refusing to use it" >&2
+    exit 1
+  fi
+  echo "derive: $1 completion trailer present"
+}
 
 extract_outputs_from_cache() {
   local cid
@@ -41,6 +63,7 @@ extract_outputs_from_cache() {
 echo "=== checking derived-inputs cache: $CACHE ==="
 if docker pull "$CACHE" 2>/dev/null; then
   extract_outputs_from_cache
+  assert_dump_complete shopping_db.sql.gz
   echo "derive: cache hit, outputs extracted"
   exit 0
 fi
@@ -90,6 +113,11 @@ docker exec shopping-derive sh -c \
   || { echo "derive: /tmp/shopping_db.sql has no mysqldump completion trailer — the dump was truncated; refusing to cache it" >&2; exit 1; }
 docker exec shopping-derive gzip -f /tmp/shopping_db.sql
 docker cp shopping-derive:/tmp/shopping_db.sql.gz "$DATASETS_DIR/"
+# Re-asserted on the host copy so both paths out of this script — fresh derive
+# and cache hit — are gated by the identical predicate. The in-container check
+# above fails faster (before gzipping ~2G); this one additionally covers the
+# gzip and the docker cp.
+assert_dump_complete shopping_db.sql.gz
 docker exec shopping-derive tar cf /tmp/shopping_media.tar -C /var/www/magento2/pub media
 docker cp shopping-derive:/tmp/shopping_media.tar "$DATASETS_DIR/"
 docker cp shopping-derive:/var/www/magento2/app/etc/env.php "$DATASETS_DIR/shopping_env.php"
