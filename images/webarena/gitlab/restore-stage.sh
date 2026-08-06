@@ -49,6 +49,7 @@ mkdir -p /staging
 for i in $(seq 0 $((BUCKET_COUNT - 1))); do mkdir -p "/staging/bucket-0$i"; done
 python3 - "$BUCKET_LIMIT_KB" "$BUCKET_COUNT" <<'EOF'
 import os
+import shutil
 import subprocess
 import sys
 
@@ -98,7 +99,9 @@ for piece, idx in assignments:
     rel = os.path.relpath(piece, ROOT)
     dest = os.path.join('/staging', f'bucket-{idx:02d}', rel)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    os.rename(piece, dest)
+    # Not os.rename: paths from the base image live in a lower overlayfs
+    # layer, and overlay returns EXDEV for cross-layer directory renames.
+    shutil.move(piece, dest)
 
 print(f'{len(buckets)} buckets:')
 for used, idx in buckets:
