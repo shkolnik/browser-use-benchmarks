@@ -1,0 +1,12 @@
+# Single-node ES 7.17 for Magento catalog search, mirroring the experiment's
+# compose environment (single-node discovery, disk watermarks off). Bound to
+# localhost only, which also keeps ES in dev mode (bootstrap checks warn
+# instead of failing on container sysctls like vm.max_map_count).
+cluster.name: shopping
+node.name: shopping-1
+path.data: /var/lib/elasticsearch
+path.logs: /var/log/elasticsearch
+network.host: 127.0.0.1
+discovery.type: single-node
+cluster.routing.allocation.disk.threshold_enabled: false
+xpack.security.enabled: false

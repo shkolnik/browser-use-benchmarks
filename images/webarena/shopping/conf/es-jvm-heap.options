@@ -1,0 +1,4 @@
+# Fixed 1G heap, as in the experiment's compose (ES_JAVA_OPTS=-Xms1g -Xmx1g);
+# the default would size the heap from container RAM.
+-Xms1g
+-Xmx1g
