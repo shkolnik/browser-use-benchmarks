@@ -14,6 +14,7 @@ urls = ["https://github.com/princeton-nlp/WebShop/archive/64fa2a5c15c7daa698b9ac
 filename = "items_shuffle.json"
 sha256 = "2ef591d65df3af89e972ab72468eb82cbf124d876552d9f3678667edd620a6c8"
 urls = [
+  "http://sandbox-1.lab.jshkol.com:8098/items_shuffle.json",
   "https://huggingface.co/datasets/YWZBrandon/webshop-data/resolve/main/items_shuffle.json",
   "https://huggingface.co/datasets/HongbangYuan/webshop/resolve/main/items_shuffle.json",
   "https://huggingface.co/datasets/Yuxuan13/webshop_dataset/resolve/main/items_shuffle.json",
@@ -27,6 +28,7 @@ urls = [
 filename = "items_ins_v2.json"
 sha256 = "1d36af476bdb8f82a5da62bd8acdabe54cd8de2fa84010d37da5c4890feb447e"
 urls = [
+  "http://sandbox-1.lab.jshkol.com:8098/items_ins_v2.json",
   "https://huggingface.co/datasets/YWZBrandon/webshop-data/resolve/main/items_ins_v2.json",
   "https://huggingface.co/datasets/HongbangYuan/webshop/resolve/main/items_ins_v2.json",
   "https://huggingface.co/datasets/Yuxuan13/webshop_dataset/resolve/main/items_ins_v2.json",
