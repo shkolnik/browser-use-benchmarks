@@ -55,7 +55,8 @@ retry logic clearest) with four subcommands, each taking an image dir (or `all`)
    skip; else `curl -C -` resume-download in a retry loop rotating through the mirror list,
    then verify the **mandatory** sha256. Failure is loud (exact URL, byte count, which mirrors
    were tried); a file that fails verification is quarantined (renamed aside), never handed to
-   docker.
+   docker. **Datasets marked `prepare_input = true` are skipped here** — see "Lazy
+   prepare-input fetching" below.
 2. **build** — `docker build` with the verified datasets exposed as a supplementary build
    context (`--build-context datasets=...`); Dockerfiles stay dumb (`COPY --from=datasets`).
    No network access needed by the build itself.
@@ -66,6 +67,24 @@ retry logic clearest) with four subcommands, each taking an image dir (or `all`)
 
 `image.toml` is the entire per-image configuration surface: image name, datasets (URLs +
 mirrors + sha256 + size), exposed ports, healthcheck path, and any build args.
+
+### Lazy prepare-input fetching
+
+A `[prepare]` image derives its real build inputs from a huge upstream docker-save tar and
+caches the *derived* artifacts in GHCR. The tar therefore only matters when that cache misses.
+Marking it `prepare_input = true` takes it out of the **download** step; the derive script
+fetches it itself, on its cache-miss path only, via
+`"$REPO_ROOT/bin/build" download --prepare-inputs "$IMAGE" --datasets-dir "$DATASETS_DIR"`
+(`REPO_ROOT` and `IMAGE` are exported by `run_prepare`).
+
+Without this the ordering defeats the cache: **download** fetches every declared dataset before
+**build** ever runs the script that consults GHCR, so a cold runner pulled e.g. shopping's
+67.6 GB tar and then never opened it. The win is not bytes saved — it is that the common path
+(cache hit) stops depending on a ~3.6 MB/s flaky university mirror and reads from GHCR instead.
+
+A dataset marked `prepare_input` with no `[prepare]` section is a load error: nothing would ever
+download it. Note that the count of upstream fetches, not their size, is the metric this is
+optimizing; it should trend to zero as derived caches stay valid.
 
 ## CI (`.github/workflows/build.yml`)
 

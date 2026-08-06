@@ -13,6 +13,12 @@ def main(argv=None) -> int:
         sp.add_argument("target", help="all, <benchmark>, or <benchmark>/<service>")
         sp.add_argument("--registry", default="ghcr.io/shkolnik")
         sp.add_argument("--datasets-dir", type=Path, default=None)
+        if name == "download":
+            sp.add_argument(
+                "--prepare-inputs", action="store_true",
+                help="fetch ONLY datasets marked prepare_input (what a derive "
+                     "script calls on its cache-miss path); default fetches "
+                     "everything else")
     args = ap.parse_args(argv)
     refs = find_images(repo_root(), args.target)
     if args.cmd == "list":
@@ -23,7 +29,7 @@ def main(argv=None) -> int:
     from builder.download import default_datasets_dir, run_download
     dsdir = args.datasets_dir or default_datasets_dir(repo_root())
     if args.cmd == "download":
-        run_download(refs, dsdir)
+        run_download(refs, dsdir, prepare_inputs=args.prepare_inputs)
         return 0
 
     from builder import docker

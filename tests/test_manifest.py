@@ -143,3 +143,41 @@ outputs = ["x"]
 ''' % ("b" * 64)
     with pytest.raises(SystemExit, match="prepare"):
         load_manifest(write(tmp_path, text))
+
+
+# --- prepare_input: datasets that only feed the prepare script ----------------
+
+PREPARE_INPUT = '''
+[[datasets]]
+filename = "upstream.tar"
+sha256 = "%s"
+urls = ["https://metis/upstream.tar"]
+prepare_input = true
+
+[[datasets]]
+filename = "plain.tar"
+sha256 = "%s"
+urls = ["https://metis/plain.tar"]
+
+[prepare]
+script = "derive.sh"
+outputs = ["derived.tar"]
+''' % ("a" * 64, "b" * 64)
+
+def write_with_script(tmp_path: Path, text: str) -> Path:
+    (tmp_path / "derive.sh").write_text("#!/bin/bash\ntrue\n")
+    return write(tmp_path, text)
+
+def test_prepare_input_parsed(tmp_path):
+    m = load_manifest(write_with_script(tmp_path, PREPARE_INPUT))
+    by_name = {d.filename: d for d in m.datasets}
+    assert by_name["upstream.tar"].prepare_input is True
+    assert by_name["plain.tar"].prepare_input is False
+
+def test_prepare_input_without_prepare_section_fails_loud(tmp_path):
+    # A prepare-input dataset is never downloaded by the normal path, so with no
+    # [prepare] script to fetch it on demand the build would look for a file
+    # nothing is responsible for producing.
+    bad = PREPARE_INPUT.split("[prepare]")[0]
+    with pytest.raises(SystemExit, match="prepare_input"):
+        load_manifest(write(tmp_path, bad))

@@ -209,12 +209,10 @@ def test_version_tag_uses_commit_date_not_wall_clock(tmp_path):
                          capture_output=True, text=True, check=True).stdout.strip()
     assert docker_mod.version_tag(tmp_path) == f"20200102.{sha}"
 
-# ==========
-# smoke — the step that stands between "the image assembled" and "the image is
+# ===# smoke — the step that stands between "the image assembled" and "the image is
 # published". These pin the targeting, because a smoke that quietly brings up
 # the WRONG set of services is worse than no smoke: it reports success.
-# ==========
-
+# ===
 def _smoke_repo(tmp_path, compose_body="services:\n  reddit:\n    image: x\n"):
     d = tmp_path / "images" / "webarena"
     (d / "reddit").mkdir(parents=True)
@@ -278,12 +276,10 @@ def test_compose_services_parses_docker_output():
                                       check_output=lambda cmd, text: out)
     assert got == ["shopping", "shopping-admin", "reddit", "gitlab"]
 
-# ==========
-# prepare provenance stamp — artifacts are reused only when they still match
+# ===# prepare provenance stamp — artifacts are reused only when they still match
 # what a successful derivation left behind. Presence alone let an empty dump
 # from a superseded recipe survive on the runner indefinitely.
-# ==========
-
+# ===
 def _prep_image(tmp_path, script_body="echo hi\n"):
     img = tmp_path / "images" / "webarena" / "reddit"
     img.mkdir(parents=True)
@@ -360,3 +356,21 @@ def test_run_prepare_RE_DERIVES_over_an_unstamped_artifact(tmp_path):
     docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
     assert (ds / "reddit_db.sql.gz").read_bytes() == b"REDERIVED", \
         "run_prepare reused an unstamped artifact instead of re-deriving"
+
+def test_run_prepare_exports_repo_root_and_image(tmp_path):
+    # The derive script fetches its own upstream tar on a cache miss, so it
+    # needs to find bin/build and name itself as a target.
+    from builder.docker import run_prepare
+    from builder.manifest import Manifest, Prepare
+    from builder.discover import ImageRef
+    imgdir = tmp_path / "img"
+    dsdir = tmp_path / "ds"
+    imgdir.mkdir()
+    dsdir.mkdir()
+    (imgdir / "derive.sh").write_text(
+        '#!/bin/bash\necho "$IMAGE $REPO_ROOT" > "$DATASETS_DIR/derived.tar"\n')
+    m = Manifest(prepare=Prepare("derive.sh", ["derived.tar"]))
+    run_prepare(ImageRef("bench", "svc", imgdir), m, "ghcr.io/x", dsdir)
+    image, repo_root = (dsdir / "derived.tar").read_text().split()
+    assert image == "bench/svc"
+    assert (Path(repo_root) / "bin" / "build").is_file()
