@@ -83,8 +83,21 @@ trap - EXIT
 docker image rm -f "$UPSTREAM_TAG"
 
 echo "=== push derived-inputs cache ==="
-# Registry layers over ~10G are refused, so the media tar ships split.
-work=$(mktemp -d)
+# Registry layers over ~10G are refused, so the media tar ships split. The
+# scratch dir sits NEXT TO the datasets rather than in /tmp: the split needs a
+# second full copy of the 45G media tar, which /tmp on the CI runner cannot
+# hold (`split: No space left on device`, run 31080808213). Check the room
+# first so the failure names the resource instead of surfacing 9 minutes of
+# download later as a cryptic split error.
+need=$(stat -c %s "$DATASETS_DIR/shopping_media.tar")
+avail=$(df -B1 --output=avail "$DATASETS_DIR" | tail -1)
+if [ "$avail" -lt "$((need + need / 20))" ]; then
+  echo "derive: splitting shopping_media.tar needs ~$((need >> 30))G beside the datasets in $DATASETS_DIR; only $((avail >> 30))G available" >&2
+  exit 1
+fi
+work=$(mktemp -d "$DATASETS_DIR/.derive-work.XXXXXX")
+# A leftover scratch dir would persist in the runner's datasets cache.
+trap 'rm -rf "$work"' EXIT
 split -b 8G -d "$DATASETS_DIR/shopping_media.tar" "$work/shopping_media.tar.part-"
 cp "$DATASETS_DIR/shopping_db.sql.gz" "$work/"
 cp "$DATASETS_DIR/shopping_env.php" "$work/"
