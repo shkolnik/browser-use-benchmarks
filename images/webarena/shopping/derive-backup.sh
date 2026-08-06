@@ -45,6 +45,12 @@ if docker pull "$CACHE" 2>/dev/null; then
   exit 0
 fi
 echo "cache miss — deriving from upstream tar"
+# Fetch the upstream tar HERE, not in the download step. It is declared
+# prepare_input, so `bin/build download` skipped it: on a cold runner whose
+# derived cache is valid we exit above having pulled only the derived
+# artifacts from GHCR, instead of pulling shopping_final_0712.tar from a ~3.6MB/s
+# university mirror and never opening it.
+"$REPO_ROOT/bin/build" download --prepare-inputs "$IMAGE" --datasets-dir "$DATASETS_DIR"
 
 echo "=== load + boot upstream image ==="
 docker load -i "$UPSTREAM_TAR"

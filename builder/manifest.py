@@ -10,6 +10,12 @@ class Dataset:
     filename: str
     sha256: str
     urls: list[str]
+    # True = only the prepare script consumes this, and only when its GHCR
+    # derived cache misses. The normal download path skips it; the script
+    # fetches it on demand. Without this the build downloads e.g. shopping's
+    # 67.6G upstream tar on every cold runner and then never opens it, because
+    # the cache check lives inside the script and runs long after download.
+    prepare_input: bool = False
 
 @dataclass(frozen=True)
 class Source:
@@ -48,7 +54,8 @@ def load_manifest(image_dir: Path) -> Manifest:
             _die(image_dir, f"datasets[{i}].sha256 is not 64 lowercase hex chars")
         if not d["urls"]:
             _die(image_dir, f"datasets[{i}].urls is empty")
-        datasets.append(Dataset(d["filename"], d["sha256"], list(d["urls"])))
+        datasets.append(Dataset(d["filename"], d["sha256"], list(d["urls"]),
+                                prepare_input=bool(d.get("prepare_input", False))))
     src = data.get("source", {})
     kind = src.get("kind", "build")
     if kind not in ("build", "docker-save"):
@@ -77,6 +84,11 @@ def load_manifest(image_dir: Path) -> Manifest:
         if not prep["outputs"]:
             _die(image_dir, "prepare.outputs is empty")
         prepare = Prepare(prep["script"], list(prep["outputs"]))
+    lazy = [d.filename for d in datasets if d.prepare_input]
+    if lazy and prepare is None:
+        _die(image_dir,
+             f"datasets marked prepare_input ({', '.join(lazy)}) but there is no "
+             "[prepare] section to fetch them — nothing would ever download them")
     return Manifest(
         datasets=datasets,
         healthcheck=data.get("service", {}).get("healthcheck"),

@@ -51,7 +51,12 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
         print(f"{ref.name}: prepare outputs present, skipping {m.prepare.script}")
         return
     print(f"{ref.name}: running {m.prepare.script} (missing: {', '.join(missing)})")
-    env = dict(os.environ, DATASETS_DIR=str(datasets_dir.resolve()), REGISTRY=registry)
+    # REPO_ROOT/IMAGE let the script call `$REPO_ROOT/bin/build download
+    # --prepare-inputs $IMAGE` on its cache-miss path — the lazy half of
+    # prepare_input datasets, which the download step deliberately skipped.
+    env = dict(os.environ, DATASETS_DIR=str(datasets_dir.resolve()), REGISTRY=registry,
+               REPO_ROOT=str(Path(__file__).resolve().parents[1]),
+               IMAGE=f"{ref.benchmark}/{ref.service}")
     proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
     if proc.returncode != 0:
         raise SystemExit(f"error: prepare script failed for {ref.name}")
