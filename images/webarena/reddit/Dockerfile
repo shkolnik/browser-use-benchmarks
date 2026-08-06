@@ -19,6 +19,7 @@ ARG PHP_VERSION=8.1
 ARG NODE_VERSION=14
 ARG COMPOSER_VERSION=2
 ARG SRC=Postmill-a6a9bbc86f44.tar.gz
+ARG SRC_COMMIT=a6a9bbc86f44
 
 # ======
 # Assets — upstream's postmill_assets stage
@@ -129,6 +130,7 @@ WORKDIR /app
 # ==========
 FROM runtime AS app
 ARG SRC
+ARG SRC_COMMIT
 COPY --from=datasets ${SRC} /tmp/src.tar.gz
 RUN set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
@@ -159,26 +161,25 @@ RUN set -eux; \
     # (there is no .git), but they do exist as literal strings, which is enough
     # to satisfy resolution. Stripping them BEFORE the install instead of after
     # kills the build with `Environment variable not found: "APP_BRANCH"`.
-    # dump-env then bakes .env.local.php for prod, and the empty ARG/ENV pair
-    # below restores the two names for runtime.
+    # After the install the two entries are rewritten to real values rather
+    # than DELETED, because dump-env bakes .env.local.php from whatever .env
+    # still holds and only baked names survive to runtime. Deleting them and
+    # re-declaring ENV in this stage does NOT work: the final stage is
+    # `FROM runtime`, so it inherits no ENV from here, and php-fpm's default
+    # `clear_env = yes` would wipe them from the workers even if it did. A
+    # booted image proved it — every page 500'd with
+    # `Environment variable not found: "APP_BRANCH"`.
     composer install \
         --apcu-autoloader \
         --classmap-authoritative \
         --no-dev \
         --prefer-dist; \
-    sed -i '/^APP_BRANCH\|APP_VERSION/d' .env; \
+    sed -i "s|^APP_BRANCH=.*|APP_BRANCH=|; s|^APP_VERSION=.*|APP_VERSION=$SRC_COMMIT|" .env; \
     composer dump-env prod; \
     composer clear-cache; \
     apk del --no-network .build-deps; \
     mkdir -p /app/var /app/public/media/cache /app/public/submission_images; \
     chown -R www-data:www-data /app/var /app/public
-
-# Upstream declares these as empty build args after the prod install; they exist
-# so the two names resolve at runtime once .env no longer carries them.
-ARG APP_BRANCH=""
-ARG APP_VERSION=""
-ENV APP_BRANCH=${APP_BRANCH} \
-    APP_VERSION=${APP_VERSION}
 
 # =======
 # Restore — load the derived data into a build-time postgres cluster.
