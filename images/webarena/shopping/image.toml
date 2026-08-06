@@ -1,7 +1,10 @@
 [[datasets]]
 filename = "shopping_final_0712.tar"
 sha256 = "2052430ee930d18a0c362997f1ccd1c500041f720ece8794ed77a77ee99139b5"
-urls = ["http://metis.lti.cs.cmu.edu/webarena-images/shopping_final_0712.tar"]
+urls = [
+    "http://sandbox-1.lab.jshkol.com:8098/shopping_final_0712.tar",
+    "http://metis.lti.cs.cmu.edu/webarena-images/shopping_final_0712.tar",
+]
 # sha256 computed at salvage time (docs/prior-download/sha256.computed); the metis host is
 # flaky — see docs/prior-download/fetch.sh for the historical retry approach.
 
