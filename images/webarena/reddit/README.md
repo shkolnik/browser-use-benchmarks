@@ -54,12 +54,26 @@ Single-container shape (nginx + php-fpm + postgres under supervisord) matches th
 upstream appliance and the rest of this fleet, so upstream's compose-specific
 nginx config needed two mechanical changes — see the comments in `nginx.conf`.
 
-## Expect a small image
+## Expect a ~40 GB image — an earlier version of this file said otherwise
 
-Measured inputs: **~477 MiB** of gzipped dump and **2.4 MB** of media. With an
-alpine base that is low single-digit GB. Upstream's 53 GB is mostly unpacked
-`node_modules` (which upstream's own Dockerfile deletes) plus the kitchen-sink base.
-**A result anywhere near 50 GB is a defect signal, not a success.**
+⚠️ This section previously read *"expect low single-digit GB; anywhere near 50 GB is a
+defect signal"*. **That was wrong**, and it was wrong the same way the classifieds
+scoping was: a subdirectory was measured and reported as the whole payload.
+
+Measured from the upstream container:
+
+| input | size |
+|---|---|
+| `pg_dump` of `postmill`, gzipped | 499.7 MB (1.33 GB raw) |
+| `public/media` | 2.4 MB, 277 files ← the old "2.4 MB of media" |
+| `public/submission_images` | **38.5 GB, 31,467 files** |
+
+The uploaded images *are* the point of the upstream tar — it is named
+`postmill-populated-exposed-**withimg**`. So the honest expectation is a **~40 GB**
+image, and the savings over upstream's 53 GB come from the unpacked `node_modules`
+and the kitchen-sink base, not from the data. Because of that, the app tree ships
+**partitioned across 7 staging buckets** (`restore-stage.sh`), one COPY layer each,
+exactly as `../shopping` handles its 45 GB of media.
 
 ## Build-time assertions
 
