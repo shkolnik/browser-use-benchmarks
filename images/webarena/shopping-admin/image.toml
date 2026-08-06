@@ -5,10 +5,11 @@ urls = ["http://metis.lti.cs.cmu.edu/webarena-images/shopping_admin_final_0719.t
 # sha256 computed at salvage time (docs/prior-download/sha256.computed); the metis host is
 # flaky — see docs/prior-download/fetch.sh for the historical retry approach.
 
-[source]
-kind = "docker-save"
-dataset = "shopping_admin_final_0719.tar"
-tag = "shopping_admin_final_0719:latest"  # verified via `tar -xOf <tar> manifest.json`
+# Same mechanism as ../shopping (see its image.toml/Dockerfile for the
+# base-image adjudication note); this instance's dataset is tiny (85M media).
+[prepare]
+script = "derive-backup.sh"
+outputs = ["shopping_admin_db.sql.gz", "shopping_admin_media.tar", "shopping_admin_env.php"]
 
 [service]
 healthcheck = "http://localhost:7780/admin"
