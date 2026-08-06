@@ -122,15 +122,23 @@ splits them at item granularity and no single piece comes close to a layer limit
 
 ## Deviations from upstream, and why
 
-1. **⚠️ MySQL 8.4 LTS instead of 8.1.** Parity policy says match upstream, and upstream is
-   `mysql:8.1` — but **8.1 is unobtainable**: it was an innovation release, and Oracle's apt
-   repo for bookworm today publishes only `mysql-8.0`, `mysql-8.4-lts`, `mysql-9.7-lts` and
-   `mysql-innovation` (measured against the live `Release` file). 8.0 is *older* than
-   upstream and already past EOL; 8.4 LTS is the maintained successor to the line 8.1 sat
-   in. Checked by running rather than assumed: the dump restored into `mysql:8.4` gives
-   **identical counts on all seven pins** and logs no errors. The dump is plain
-   InnoDB/MyISAM `utf8mb3` with no routines, views or triggers and no MySQL-8-only
-   collations, which is why this is a safe substitution.
+1. **MySQL 8.4 LTS instead of 8.1.** Upstream's compose db is `mysql:8.1`, which is
+   **unobtainable**: it was an innovation release, and Oracle's apt repo for bookworm today
+   publishes only `mysql-8.0`, `mysql-8.4-lts`, `mysql-9.7-lts` and `mysql-innovation`
+   (measured against the live `Release` file). 8.0 is *older* than upstream and already past
+   EOL; 8.4 LTS is the maintained successor to the line 8.1 sat in. Checked by running
+   rather than assumed: the dump restored into `mysql:8.4` gives **identical counts on all
+   seven pins** and logs no errors — it is plain InnoDB/MyISAM `utf8mb3` with no routines,
+   views, triggers or MySQL-8-only collations. James's call (2026-08-06): the database
+   version is the one dependency where being pragmatic beats matching literally, since
+   releases are backward compatible on all basic functions. Not a reluctant substitution.
+
+   The repo key is pinned by **fingerprint**, not by the key file's hash, because Oracle
+   re-issues the same key with a later expiry — the 2023 file has already expired
+   (2025-10-22) and would make apt refuse the repo outright. The server version is pinned
+   exactly; since the repo carries only the current release of each series, a removed point
+   release fails the build loudly and needs a reviewable one-line bump rather than drifting
+   forward silently.
 2. **One appliance, not two containers.** Upstream is a compose project; every image in
    this fleet is a single appliance with one healthcheck. `config.php`'s `DB_HOST` therefore
    becomes `127.0.0.1` instead of `db`. `WEB_PATH` stays `getenv("CLASSIFIEDS")` so the base
@@ -146,3 +154,27 @@ uploads from the upstream image by digest — they exist in neither zip — and 
 the derived-inputs cache. The Dockerfile then goes `runtime` → `restore` → `audited` (its
 own layer) → final with one `COPY` per staging bucket, using the shared
 `builder/stage-lib/partition-tree.py`.
+
+## What has been verified by running, and what has not
+
+Verified locally, with the real dump and the real Osclass zip, and a synthetic uploads tar
+carrying the measured shape (84,148 item directories, four files each) so the partitioner
+and the audit run against the true cardinality:
+
+- **The app tree reconstructs in-build** — `audit.sh` matched all 1,921 files against
+  `app-tree.sha256`.
+- **All eight database pins** hit their measured values.
+- **The image boots**: HTTP 200 about 6 seconds after start.
+- **Pages match upstream.** The home page is **byte-identical** to the upstream stack's
+  after normalising the host:port. `?page=search` differs on exactly one line — an
+  encrypted per-instance `alert` token. An item page rendered from the restored database
+  (`?page=item&id=84140`) matches on title.
+- **Task isolation works end to end.** With `s_title` for item 84151 mutated to
+  `MUTATED BY TEST`, a POST to `?page=reset` with the correct token restored it to
+  `iPhone X - 256GB, Space Gray, Excellent Condition`; a wrong token is refused with
+  `Error: Invalid token`.
+
+**Not yet exercised** — this is what the CI build proves: the real 73 GB derivation, the
+8 GB split and its cache reassembly, more than one staging bucket actually filling (the
+synthetic tar fits in one), and the ~73 GB push to GHCR. Do not merge until an image
+pulled **by digest** has been booted and re-checked against the table above.
