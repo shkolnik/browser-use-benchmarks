@@ -61,3 +61,55 @@ def test_all_mirrors_exhausted_dies_naming_urls(tmp_path):
         raise FetchError("404")
     with pytest.raises(SystemExit, match="u1.*u2"):
         ensure_dataset(ds(["u1", "u2"]), tmp_path, fetch=dead, attempts_per_url=2)
+
+
+# --- lazy prepare-input fetching ---------------------------------------------
+# The normal download path must NOT fetch a dataset the derive script only needs
+# on a cache miss: on a cold runner with a valid GHCR derived cache that download
+# is pure waste (67.6 GB for webarena/shopping) and it is never even opened.
+
+from builder.download import run_download
+from builder.discover import ImageRef
+
+def _image(tmp_path, name: str, toml: str) -> ImageRef:
+    d = tmp_path / "images" / "bench" / name
+    d.mkdir(parents=True)
+    (d / "image.toml").write_text(toml)
+    (d / "derive.sh").write_text("#!/bin/bash\ntrue\n")
+    return ImageRef("bench", name, d)
+
+LAZY_TOML = '''
+[[datasets]]
+filename = "upstream.tar"
+sha256 = "%s"
+urls = ["https://metis/upstream.tar"]
+prepare_input = true
+
+[[datasets]]
+filename = "plain.tar"
+sha256 = "%s"
+urls = ["https://metis/plain.tar"]
+
+[prepare]
+script = "derive.sh"
+outputs = ["derived.tar"]
+''' % (hashlib.sha256(b"upstream").hexdigest(), hashlib.sha256(b"plain").hexdigest())
+
+def _recording_fetch(fetched):
+    def fetch(url, dest: Path):
+        fetched.append(url)
+        dest.write_bytes(b"upstream" if "upstream" in url else b"plain")
+    return fetch
+
+def test_download_skips_prepare_inputs(tmp_path):
+    ref = _image(tmp_path, "svc", LAZY_TOML)
+    fetched = []
+    run_download([ref], tmp_path / "ds", fetch=_recording_fetch(fetched))
+    assert fetched == ["https://metis/plain.tar"]
+
+def test_download_prepare_inputs_fetches_only_those(tmp_path):
+    ref = _image(tmp_path, "svc", LAZY_TOML)
+    fetched = []
+    run_download([ref], tmp_path / "ds", fetch=_recording_fetch(fetched),
+                 prepare_inputs=True)
+    assert fetched == ["https://metis/upstream.tar"]
