@@ -1,0 +1,216 @@
+diff -ruN a/index.php b/index.php
+--- a/index.php	2026-08-06 12:50:57.394003169 -0500
++++ b/index.php	2026-08-06 12:50:57.394003169 -0500
+@@ -15,6 +15,8 @@
+  * this NOTICE section as it contains license information and copyrights.
+  */
+ 
++error_reporting(0);
++ini_set('display_errors', '0');
+ 
+ define('ABS_PATH', str_replace('//', '/', str_replace('\\', '/', dirname($_SERVER['SCRIPT_FILENAME'])) . '/'));
+ 
+@@ -314,6 +316,12 @@
+     $do->doModel();
+     break;
+ 
++  case ('reset'):
++    require_once(osc_lib_path() . 'osclass/controller/reset.php');
++    $do = new CWebMyCustomController();
++    $do->doModel();
++    break;
++
+   default:          // home
+     require_once(osc_lib_path() . 'osclass/controller/main.php');
+     $do = new CWebMain();
+@@ -329,4 +337,4 @@
+   }
+ }
+ 
+-/* file end: ./index.php */
+\ No newline at end of file
++/* file end: ./index.php */
+diff -ruN a/oc-content/themes/sigma/main.php b/oc-content/themes/sigma/main.php
+--- a/oc-content/themes/sigma/main.php	2026-08-06 12:50:57.398003464 -0500
++++ b/oc-content/themes/sigma/main.php	2026-08-06 12:50:57.402003758 -0500
+@@ -38,8 +38,18 @@
+ 
+         <strong><?php echo osc_category_name(); ?></strong>
+       </a>
+-      
++    
++      <?php if(osc_count_subcategories() > 0) { ?>
++          <?php while(osc_has_subcategories()) { ?>
++          <a href="<?php echo osc_search_category_url(); ?>">
++            <div class="icon" <?php if(osc_category_color() <> '') { ?>style="color:<?php echo osc_category_color(); ?>;"<?php } ?>>
++              <i class="<?php echo (osc_category_icon() <> '' ? osc_category_icon() : 'far fa-share-square'); ?>"></i>
++            </div>
+ 
++            <strong><?php echo osc_category_name(); ?></strong>
++          </a>
++          <?php } ?>
++      <?php } ?>
+     <?php } ?>
+   </div>
+ </div>
+diff -ruN a/oc-content/themes/sigma/search.php b/oc-content/themes/sigma/search.php
+--- a/oc-content/themes/sigma/search.php	2026-08-06 12:50:57.406004053 -0500
++++ b/oc-content/themes/sigma/search.php	2026-08-06 12:50:57.406004053 -0500
+@@ -72,7 +72,7 @@
+       <?php } ?>
+ 
+       <?php if(osc_count_items() == 0) { ?>
+-        <p class="empty" ><?php printf(__('There are no results matching "%s"', 'sigma'), osc_search_pattern()) ; ?></p>
++        <p class="empty" ><?php printf(__('There are no results matching "%s". Note that only search terms of 4 or more characters are valid.', 'sigma'), osc_search_pattern()) ; ?></p>
+       <?php } else { ?>
+       <span class="counter-search"><?php
+         $search_number = sigma_search_number();
+@@ -157,4 +157,4 @@
+       <?php echo osc_search_pagination(); ?>
+    </div>
+    <?php } ?>
+-<?php osc_current_web_theme_path('footer.php') ; ?>
+\ No newline at end of file
++<?php osc_current_web_theme_path('footer.php') ; ?>
+diff -ruN a/oc-includes/osclass/controller/item.php b/oc-includes/osclass/controller/item.php
+--- a/oc-includes/osclass/controller/item.php	2026-08-06 12:50:57.410004347 -0500
++++ b/oc-includes/osclass/controller/item.php	2026-08-06 12:50:57.410004347 -0500
+@@ -868,4 +868,4 @@
+   }
+ }
+ 
+-/* file end: ./item.php */
+\ No newline at end of file
++/* file end: ./item.php */
+diff -ruN a/oc-includes/osclass/controller/reset.php b/oc-includes/osclass/controller/reset.php
+--- a/oc-includes/osclass/controller/reset.php	1969-12-31 18:00:00.000000000 -0600
++++ b/oc-includes/osclass/controller/reset.php	2026-08-06 12:51:18.871584602 -0500
+@@ -0,0 +1,70 @@
++<?php
++if(!defined('ABS_PATH')) exit('ABS_PATH is not loaded. Direct access is not allowed.');
++
++
++class CWebMyCustomController extends BaseModel
++{
++  public function __construct()
++  {
++    parent::__construct();
++    //specific things for this class
++    osc_run_hook( 'init_custom' );
++  }
++
++  public function doModel() {
++    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
++        // Check if post token is equal to the session token
++        if ( !isset($_POST['token']) || $_POST['token'] !== getenv('RESET_TOKEN') ) {
++            echo "Error: Invalid token";
++            return;
++        }
++        
++        if ( defined( 'DB_HOST' ) && $dbHost == null ) {
++            $dbHost = osc_db_host();
++        }
++        if ( defined( 'DB_USER' ) && $dbUser == null ) {
++            $dbUser = osc_db_user();
++        }
++        if ( defined( 'DB_PASSWORD' ) && $dbPassword == null ) {
++            $dbPassword = osc_db_password();
++        }
++        if ( defined( 'DB_NAME' ) && $dbName == null ) {
++            $dbName = osc_db_name();
++        }
++        // Path to the SQL file
++        $sqlFilePath = '/usr/src/myapp/classifieds_restore.sql';
++        
++        // Command to execute
++        $command = "mysql -h {$dbHost} -u {$dbUser} --password='{$dbPassword}' {$dbName} < {$sqlFilePath}";
++        echo "Command: " . $command;
++        
++        // Execute the command
++        exec($command, $output, $return_var);
++        
++        // Check the result
++        if ($return_var === 0) {
++            echo "SQL file executed successfully.\n";
++        } else {
++            echo "Error occurred: " . implode("\n", $output) . "\n";
++        }
++    } else {
++        // Handle non-POST requests
++        echo "<h1>Error: This page only handles POST requests</h1>";
++    }
++  }
++
++  /**
++   * @param $file
++   *
++   * @return mixed|void
++   */
++  public function doView( $file )
++  {
++    osc_run_hook( 'before_html' );
++    osc_current_web_theme_path($file);
++    Session::newInstance()->_clearVariables();
++    osc_run_hook( 'after_html' );
++  }
++}
++
++/* file end: ./reset.php */
+diff -ruN a/oc-includes/osclass/gui/search.php b/oc-includes/osclass/gui/search.php
+--- a/oc-includes/osclass/gui/search.php	2026-08-06 12:50:57.414004642 -0500
++++ b/oc-includes/osclass/gui/search.php	2026-08-06 12:50:57.414004642 -0500
+@@ -72,7 +72,7 @@
+       <?php } ?>
+ 
+       <?php if(osc_count_items() == 0) { ?>
+-        <p class="empty" ><?php printf(__('There are no results matching "%s"', 'sigma'), osc_search_pattern()) ; ?></p>
++        <p class="empty" ><?php printf(__('There are no results matching "%s". Note that only search terms of 4 or more characters are valid.', 'sigma'), osc_search_pattern()) ; ?></p>
+       <?php } else { ?>
+       <span class="counter-search"><?php
+         $search_number = sigma_search_number();
+@@ -157,4 +157,4 @@
+       <?php echo osc_search_pagination(); ?>
+    </div>
+    <?php } ?>
+-<?php osc_current_web_theme_path('footer.php') ; ?>
+\ No newline at end of file
++<?php osc_current_web_theme_path('footer.php') ; ?>
+diff -ruN a/oc-includes/osclass/utils.php b/oc-includes/osclass/utils.php
+--- a/oc-includes/osclass/utils.php	2026-08-06 12:50:57.418004936 -0500
++++ b/oc-includes/osclass/utils.php	2026-08-06 12:50:57.422005231 -0500
+@@ -82,10 +82,10 @@
+       $admin ? osc_logged_admin_id() : osc_logged_user_id()
+     );
+ 
+-    @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '.' . $resource['s_extension']);
+-    @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '_original.' . $resource['s_extension']);
+-    @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '_thumbnail.' . $resource['s_extension']);
+-    @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '_preview.' . $resource['s_extension']);
++    // @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '.' . $resource['s_extension']);
++    // @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '_original.' . $resource['s_extension']);
++    // @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '_thumbnail.' . $resource['s_extension']);
++    // @unlink(osc_base_path() . $resource['s_path'] . $resource['pk_i_id'] . '_preview.' . $resource['s_extension']);
+     osc_run_hook('delete_resource', $resource);
+   }
+ }
+@@ -3044,4 +3044,4 @@
+ 
+     return bin2hex($hmac);
+   }
+-}
+\ No newline at end of file
++}
+diff -ruN a/robots.txt b/robots.txt
+--- a/robots.txt	1969-12-31 18:00:00.000000000 -0600
++++ b/robots.txt	2026-08-06 12:51:18.871584602 -0500
+@@ -0,0 +1,9 @@
++User-agent: *
++Disallow: /oc-admin/
++Disallow: /oc-content/downloads/
++Disallow: /oc-content/languages/
++Disallow: /oc-content/uploads/HTML/
++Disallow: /oc-content/uploads/minify/
++Disallow: /oc-content/uploads/temp/
++Disallow: /oc-includes/osclass/
++Disallow: /oc-includes/vendor/
+\ No newline at end of file
