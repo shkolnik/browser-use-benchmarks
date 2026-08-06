@@ -1,0 +1,16 @@
+# VisualWebArena services. Upstream's classifieds compose publishes 9980, and
+# the rebuilt appliance serves on the same port in-container.
+# Healthcheck URLs live in each service's image.toml ([service].healthcheck).
+services:
+  classifieds:
+    image: ghcr.io/shkolnik/vwa-classifieds:latest
+    ports:
+      - "9980:9980"
+    # Both are read at runtime, exactly as upstream's compose set them:
+    # config.php resolves WEB_PATH from CLASSIFIEDS, and the reset controller
+    # compares its POSTed token against RESET_TOKEN. The image carries these
+    # same values as defaults, so a deployment that moves the site only has to
+    # override CLASSIFIEDS.
+    environment:
+      - CLASSIFIEDS=http://127.0.0.1:9980/
+      - RESET_TOKEN=4b61655535e7ed388f0d40a93600254c
