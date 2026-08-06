@@ -1,0 +1,46 @@
+# Two datasets, and — as with ../../webarena/reddit — the split matters:
+# 1. the upstream compose zip contributes DATA (the seed dump) and the reset
+#    script, both hash-pinned;
+# 2. osclass-v8.1.2.zip contributes the CODE, fetched from the project's own
+#    surviving distribution point rather than copied out of the upstream image.
+# The 73 GB of item photos are in neither, so they are derived from the upstream
+# image by the prepare step below.
+
+[[datasets]]
+filename = "classifieds_docker_compose.zip"
+sha256 = "25b560fd0e1d7a8944ab3bb21916ffa2fe63e6272316d22d7bc43da9e7c0bc24"
+urls = [
+    "http://sandbox-1.lab.jshkol.com:8098/classifieds_docker_compose.zip",
+    "https://archive.org/download/classifieds_docker_compose/classifieds_docker_compose.zip",
+]
+# sha256 computed at salvage time (docs/prior-download/sha256.computed) and
+# re-verified against a fresh archive.org fetch on 2026-08-06.
+
+# Osclass 8.1.2 — the application source.
+#
+# ⚠️ NOT github.com/osclass/Osclass. That repo stops at v3.7.4 and has no 8.x
+# tag; neither does mindstellar/Osclass (v3.9.0) nor MercanoGlobal/Osclass-
+# Enterprise, which is a rebrand fork off 3.8.1. The 8.x line belongs to Osclass
+# Point, whose site osclass.org is dead — the domain is now parked on an
+# unrelated gambling site. The app names its real home itself: URLs compiled
+# into oc-includes point at osclasspoint.com and osclass-classifieds.com/
+# download, and that page points here. Apache-2.0.
+#
+# The zip's name matches the upstream image's `COPY osclass-v8.1.2` layer, and
+# 1,912 of the 1,918 files in the deployed tree are byte-identical to it — see
+# README.md and webarena-modifications.patch for the remaining six plus the two
+# added files, and app-tree.sha256 for the manifest the audit stage re-checks.
+[[datasets]]
+filename = "osclass-v8.1.2.zip"
+sha256 = "89a1b31effca164fd81b68a38937764042893c17fa40f8c52289c3ff33b64083"
+urls = [
+    "http://sandbox-1.lab.jshkol.com:8098/osclass-v8.1.2.zip",
+    "https://downloads.sourceforge.net/project/osclass-by-osclasspoint/osclass-v8.1.2.zip",
+]
+
+[prepare]
+script = "derive-backup.sh"
+outputs = ["classifieds_uploads.tar"]
+
+[service]
+healthcheck = "http://localhost:9980/"

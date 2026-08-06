@@ -9,10 +9,12 @@ REF = ImageRef("miniwob", "server", Path("/repo/images/miniwob/server"))
 
 def test_build_cmd():
     m = Manifest(build_args={"FOO": "bar"})
-    cmd = build_cmd(REF, m, "ghcr.io/shkolnik", Path("/repo/datasets"), "20260805.abc1234")
+    cmd = build_cmd(REF, m, "ghcr.io/shkolnik", Path("/repo/datasets"),
+                    "20260805.abc1234", Path("/repo"))
     assert cmd == [
         "docker", "build",
         "--build-context", "datasets=/repo/datasets",
+        "--build-context", "stagelib=/repo/builder/stage-lib",
         "--build-arg", "FOO=bar",
         "-t", "ghcr.io/shkolnik/miniwob-server:20260805.abc1234",
         "-t", "ghcr.io/shkolnik/miniwob-server:latest",

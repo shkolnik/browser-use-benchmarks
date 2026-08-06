@@ -1,92 +1,181 @@
-# VWA classifieds — scoped, not yet built (2026-08-06)
+# VWA classifieds — Osclass 8.1.2 appliance
 
-> ## ⚠️ Correction: this image is **76.86 GB**, and that changes the build
->
-> An earlier version of this file called classifieds a ~10-line Dockerfile away from
-> done. The provenance half of that was right; the size half was wrong, because the
-> image itself was never measured — only its code tree.
->
-> Measured by running it: `docker image inspect` = **76,861,318,207 bytes**, of which
-> the single `COPY osclass-v8.1.2 /usr/src/myapp` layer is **77.8 GB**. Inside,
-> `oc-content/uploads` holds **73 GB across 336,634 files** (the item photos). The app
-> tree without uploads is **105 MB** — the figure the old text was quoting.
->
-> So: a 77.8 GB layer is far past what GHCR accepts, meaning the uploads need
-> **staging-bucket partitioning** (~10 buckets) exactly like `../../webarena/shopping`
-> does for its media; and since the photos are in neither the upstream zip nor the
-> Osclass v8.1.2 source tag, they must be **derived from the upstream image** by a
-> prepare step. Pin for that: `jykoh/classifieds@sha256:a2a794da92f62a8d7ffd02314e4fab40ba6c7fc08f568371608f88f0ef605e43`.
->
-> This is the fleet's **largest** media payload — bigger than shopping's 45 GB.
-> Everything below about provenance still holds: the layer history really is complete
-> buildkit down to `php:8.1.27-cli`. Classifieds has no provenance hole; it has a size
-> problem, which is a different and more tractable thing.
+Status **2026-08-06: authored, and booted-and-verified locally at reduced scale; the full
+73 GB build has not run yet** (GitHub Actions was in a major outage). Everything below
+marked *measured* was read off a running stack or a live fetch, not from upstream docs —
+see the last section for exactly what is verified and what only CI can prove.
 
-Still carries no `image.toml` (discovery is by `image.toml` glob, so this directory stays
-invisible to the driver until the build lands). But the earlier framing here — "not
-buildable via either manifest kind, decision deferred" — was **wrong about the hard part**,
-and the correction is worth recording.
+## What the upstream image actually is
 
-## The provenance question is answered, and it is clean
+`jykoh/classifieds@sha256:a2a794da92f62a8d7ffd02314e4fab40ba6c7fc08f568371608f88f0ef605e43`
+is **76.86 GB**: a 105 MB Osclass 8.1.2 app tree plus **73 GB of item photos** in
+`oc-content/uploads`, all inside one 77.8 GB `COPY` layer. Its docker history is complete
+buildkit down to `php:8.1.27-cli`, with no hand `docker commit`s — contrast
+`../../webarena/reddit`, whose top four layers are commits.
 
-The upstream app image `jykoh/classifieds:latest` was pulled and inspected. **Every layer
-has a real buildkit history entry, all the way down to the official `php:8.1.27-cli`
-base.** There are no hand-made `docker commit` layers anywhere — contrast
-`../../webarena/reddit`, whose top four layers are commits whose history reads literally
-`supervisord -n -j /supervisord.pid`, i.e. a container someone modified by hand with no
-record of how. Classifieds has no such hole: the app image is reproducible from public,
-Apache-2.0 sources with roughly a ten-line Dockerfile.
+But a readable history is not the same as a reproducible source, and that distinction is
+where the earlier version of this file went wrong.
 
-The full upstream recipe, read off the image:
+## ⚠️ Correction: the v8.1.2 "tag" this file used to name does not exist
 
-1. `php:8.1.27-cli` (docker-library/php; PHP built from source with `PHP_URL`,
-   `PHP_SHA256` and GPG keys pinned in ENV)
-2. `RUN apt-get install libfreetype6-dev libjpeg62-turbo-dev libpng-dev && docker-php-ext-configure gd --with-freetype --with-jpeg && docker-php-ext-install -j$(nproc) gd`
-3. `RUN apt-get install default-mysql-client`
-4. `RUN docker-php-ext-install mysqli`
-5. `COPY osclass-v8.1.2 /usr/src/myapp`, `WORKDIR /usr/src/myapp`, `CMD ["php","-S","0.0.0.0:9980"]`
+The previous text said *"Osclass upstream: github.com/osclass/Osclass, tag v8.1.2 — that
+tag IS the parity pin."* **There is no such tag.** Measured:
 
-Verified by running the image: `OSCLASS_VERSION` = **8.1.2**, `php -v` = **PHP 8.1.27**,
-licence **Apache-2.0**. Upstream is github.com/osclass/Osclass — tag **v8.1.2** is the
-parity pin. The rebuild should fetch that tag and pin its sha256, **not** copy the app
-tree out of `jykoh/classifieds`; copying the blob would re-import exactly the opacity
-this program exists to remove.
+- `github.com/osclass/Osclass` stops at **v3.7.4** (last push 2022).
+- `mindstellar/Osclass` (where `navjottomer/Osclass` redirects) stops at **v3.9.0**.
+- `MercanoGlobal/Osclass-Enterprise` is a *rebrand fork off 3.8.1* — its CHANGELOG opens
+  with "Osclass Enterprise 3.10.0, Rebranded the project" and contains **none** of the
+  8.1.2 entries.
+- **osclass.org is gone** — the domain now serves a Thai gambling site.
 
-`config.php` reads `WEB_PATH` from `getenv("CLASSIFIEDS")`, so the site's base URL is
-injected at **runtime**, not baked into the image. Serving is PHP's built-in dev server
-on port 9980 (no nginx/apache). DB coordinates are `osclass` / `root` / `password` at
-host `db`.
+The 8.x line is a different project lineage (3.x → 4.x in 2020 → 8.x in 2021-2023),
+published by **Osclass Point**. The app itself names its own home: URLs baked into
+`oc-includes/osclass/` point at `osclasspoint.com` and `osclass-classifieds.com/download`,
+and that download page points at **SourceForge `osclass-by-osclasspoint`**, which carries
+`osclass-v8.1.2.zip` — the same name as the upstream image's `COPY osclass-v8.1.2` layer.
 
-## ⚠️ `classifieds_restore.sql` is the RESET script, not seed data
+That zip is the parity pin. It is Apache-2.0, and it is the only surviving public origin
+found for this code.
 
-19,001 bytes, present in BOTH the upstream zip (`mysql/02_classifieds_restore.sql`) and
-inside the app image at `/usr/src/myapp/classifieds_restore.sql`. Its body is
-`DELETE FROM <table> WHERE fk_i_item_id >= 84143` per table — it is what the
-`RESET_TOKEN` endpoint executes to return the site to a known state between benchmark
-tasks. It must remain present and executable in any rebuilt image: dropping it would
-silently break task isolation, with nothing failing loudly at build time.
+## The app tree reconstructs byte-for-byte — verified, not asserted
 
-The actual seed data is `mysql/osclass_craigslist.dump` (**84,608,226 bytes**) — small
-enough that no staging-bucket partitioning is needed, unlike shopping's 45G of media.
+Every file in the deployed tree was sha256'd against the extracted zip:
 
-## What is still an open call
+| | count |
+|---|---|
+| files compared (excluding `oc-content/uploads`) | 1,918 |
+| **byte-identical to the public zip** | **1,912** |
+| differing | 6 |
+| present only in the image | 7 |
 
-Not the provenance — the packaging shape:
+The 7 image-only files are: `config.php`, `classifieds_restore.sql`, three `oc-content/*.log`
+runtime logs (73 MB of debris — **not shipped** by the rebuild), `robots.txt`, and a new
+controller `oc-includes/osclass/controller/reset.php`.
 
-- **(a) Single self-contained appliance** (the lean): PHP base + a MySQL server +
-  supervisord, dump restored at **build** time, staged through the same
-  `restore` → `audited` (its own RUN layer) → final pattern the Magento images use.
-  Consistent with every other image in this fleet, one healthcheck, no new manifest kind,
-  and boots do no restore work at all.
-- **(b) A third manifest kind wrapping an upstream compose project.** Honest to upstream's
-  two-service shape, but introduces a new manifest concept and a multi-container runtime
-  contract for exactly one benchmark.
+`webarena-modifications.patch` here captures every difference. Applied to the pristine zip
+it yields a tree that is **byte-identical to the deployed one across all 1,919 files, with
+zero mismatches and nothing missing** — that reconstruction is how the patch was validated,
+and re-running it is how the build's audit stage will keep it honest.
 
-Sub-call inside (a): upstream's db is `mysql:8.1`, while the php base's Debian bookworm
-ships MariaDB. Parity policy prefers **MySQL 8.1 from Oracle's apt repo, version-pinned**;
-MariaDB is acceptable only as a **named, documented deviation** here (Osclass uses plain
-mysqli with no server-specific features, so the risk is low — but the deviation must be
-stated, not silently taken).
+What the patch actually does, semantically:
 
-Full task spec, including validation pins to measure before building:
-`~/beep-scratch/browser-use-benchmarks/classifieds/SPEC.md`.
+1. **`index.php`** — silences PHP error display, and routes `page=reset` to the new
+   controller.
+2. **`oc-includes/osclass/controller/reset.php`** (new) — the `RESET_TOKEN` endpoint. On
+   POST with a matching `token`, it shells out to `mysql … < /usr/src/myapp/classifieds_restore.sql`.
+   ⚠️ It also `echo`s that command, **password included**, to any caller holding the token.
+   Reproduced as-is for parity; flagged, not fixed, and noted for the security pass (#52).
+3. **`oc-includes/osclass/utils.php`** — comments out the four `@unlink` calls that delete
+   a listing's image files. This is load-bearing for the benchmark: it is what lets the
+   reset script restore deleted listings without their photos having been destroyed.
+4. **`oc-content/themes/sigma/main.php`** — renders subcategories on the home page.
+5. **`themes/sigma/search.php`** and **`oc-includes/osclass/gui/search.php`** — add
+   "only search terms of 4 or more characters are valid" to the empty-results message.
+6. **`oc-includes/osclass/controller/item.php`** — a trailing newline and nothing else.
+
+The trailing-newline hunks in several files are not edits anyone made on purpose; the tree
+was copied via macOS (it still carries `.DS_Store` and `._*` AppleDouble files, which the
+rebuild also drops). They are kept in the patch only so the reconstruction is exactly
+byte-identical rather than nearly so.
+
+## ⚠️ Upstream's own compose project cannot start — measured
+
+Brought up verbatim from the archive.org zip, `classifieds_db` **fails**:
+
+```
+[Entrypoint]: running /docker-entrypoint-initdb.d/classifieds_restore.sql
+ERROR 1146 (42S02) at line 2: Table 'osclass.oc_t_item_location' doesn't exist
+```
+
+All three files sit in `/docker-entrypoint-initdb.d`, and MySQL runs them in alphabetical
+order — so `classifieds_restore.sql` (which is a *reset* script, `DELETE FROM … WHERE
+fk_i_item_id >= 84143`) runs against an empty database before `init_db.sh` has created
+anything, and the entrypoint exits 1. The appliance built here sidesteps this by design:
+the restore is an explicit build-time step, and `classifieds_restore.sql` ships as a file
+for the reset endpoint to execute, never as an init script.
+
+(The zip's copy and the image's copy of `classifieds_restore.sql` are both 19,001 bytes and
+differ only in the position of one blank line. The rebuild ships the zip's copy — same
+content, hash-pinned provenance.)
+
+## Measured validation pins
+
+From the booted upstream stack (`mysql:8.1` + the dump). The earlier guess of "~39 tables,
+60 seeded items, one user" was close on two counts and wrong on the third:
+
+| pin | value |
+|---|---|
+| tables in `osclass` | 39 |
+| `oc_t_item` | 84,149 |
+| `oc_t_item_description` | 84,152 |
+| `oc_t_item_resource` | 84,149 |
+| `oc_t_user` | 1 |
+| `oc_t_category` | 23 |
+| `MAX(pk_i_id)` in `oc_t_item` | 84,154 |
+| items with `pk_i_id >= 84143` (what reset deletes) | 12 |
+| `oc-content/uploads` | 73 GB, **84,148 per-item directories**, 336,634 files |
+| largest single item directory | 6.3 MB |
+| app tree excluding uploads | 105 MB |
+| PHP / Osclass | 8.1.27 / 8.1.2 |
+
+The uploads are per-item directories, not a flat dump, so the staging-bucket partitioner
+splits them at item granularity and no single piece comes close to a layer limit.
+
+## Deviations from upstream, and why
+
+1. **MySQL 8.4 LTS instead of 8.1.** Upstream's compose db is `mysql:8.1`, which is
+   **unobtainable**: it was an innovation release, and Oracle's apt repo for bookworm today
+   publishes only `mysql-8.0`, `mysql-8.4-lts`, `mysql-9.7-lts` and `mysql-innovation`
+   (measured against the live `Release` file). 8.0 is *older* than upstream and already past
+   EOL; 8.4 LTS is the maintained successor to the line 8.1 sat in. Checked by running
+   rather than assumed: the dump restored into `mysql:8.4` gives **identical counts on all
+   seven pins** and logs no errors — it is plain InnoDB/MyISAM `utf8mb3` with no routines,
+   views, triggers or MySQL-8-only collations. James's call (2026-08-06): the database
+   version is the one dependency where being pragmatic beats matching literally, since
+   releases are backward compatible on all basic functions. Not a reluctant substitution.
+
+   The repo key is pinned by **fingerprint**, not by the key file's hash, because Oracle
+   re-issues the same key with a later expiry — the 2023 file has already expired
+   (2025-10-22) and would make apt refuse the repo outright. The server version is pinned
+   exactly; since the repo carries only the current release of each series, a removed point
+   release fails the build loudly and needs a reviewable one-line bump rather than drifting
+   forward silently.
+2. **One appliance, not two containers.** Upstream is a compose project; every image in
+   this fleet is a single appliance with one healthcheck. `config.php`'s `DB_HOST` therefore
+   becomes `127.0.0.1` instead of `db`. `WEB_PATH` stays `getenv("CLASSIFIEDS")` so the base
+   URL is still injected at runtime.
+3. **Runtime debris dropped**: the three `oc-content/*.log` files (73 MB), `.DS_Store` and
+   the `._*` AppleDouble files are not shipped.
+
+## Build shape
+
+`image.toml` datasets = the archive.org compose zip (for the dump and the reset script) and
+`osclass-v8.1.2.zip` from SourceForge, both sha256-pinned. `[prepare]` derives the 73 GB of
+uploads from the upstream image by digest — they exist in neither zip — and splits them for
+the derived-inputs cache. The Dockerfile then goes `runtime` → `restore` → `audited` (its
+own layer) → final with one `COPY` per staging bucket, using the shared
+`builder/stage-lib/partition-tree.py`.
+
+## What has been verified by running, and what has not
+
+Verified locally, with the real dump and the real Osclass zip, and a synthetic uploads tar
+carrying the measured shape (84,148 item directories, four files each) so the partitioner
+and the audit run against the true cardinality:
+
+- **The app tree reconstructs in-build** — `audit.sh` matched all 1,921 files against
+  `app-tree.sha256`.
+- **All eight database pins** hit their measured values.
+- **The image boots**: HTTP 200 about 6 seconds after start.
+- **Pages match upstream.** The home page is **byte-identical** to the upstream stack's
+  after normalising the host:port. `?page=search` differs on exactly one line — an
+  encrypted per-instance `alert` token. An item page rendered from the restored database
+  (`?page=item&id=84140`) matches on title.
+- **Task isolation works end to end.** With `s_title` for item 84151 mutated to
+  `MUTATED BY TEST`, a POST to `?page=reset` with the correct token restored it to
+  `iPhone X - 256GB, Space Gray, Excellent Condition`; a wrong token is refused with
+  `Error: Invalid token`.
+
+**Not yet exercised** — this is what the CI build proves: the real 73 GB derivation, the
+8 GB split and its cache reassembly, more than one staging bucket actually filling (the
+synthetic tar fits in one), and the ~73 GB push to GHCR. Do not merge until an image
+pulled **by digest** has been booted and re-checked against the table above.
