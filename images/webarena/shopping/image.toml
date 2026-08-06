@@ -5,10 +5,13 @@ urls = ["http://metis.lti.cs.cmu.edu/webarena-images/shopping_final_0712.tar"]
 # sha256 computed at salvage time (docs/prior-download/sha256.computed); the metis host is
 # flaky — see docs/prior-download/fetch.sh for the historical retry approach.
 
-[source]
-kind = "docker-save"
-dataset = "shopping_final_0712.tar"
-tag = "shopping_final_0712:latest"  # verified via `tar -xOf <tar> manifest.json`
+# Rebuilt from the pinned upstream image's own base plus a mysqldump +
+# pub/media + env.php restore, instead of shipping the upstream docker-save
+# image verbatim (see Dockerfile header for the base-image adjudication
+# note — no clean OFFICIAL Magento base could be substituted here).
+[prepare]
+script = "derive-backup.sh"
+outputs = ["shopping_db.sql.gz", "shopping_media.tar", "shopping_env.php"]
 
 [service]
 healthcheck = "http://localhost:7770/"
