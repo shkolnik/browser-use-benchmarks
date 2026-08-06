@@ -4,8 +4,10 @@
 services:
   shopping:
     image: ghcr.io/shkolnik/webarena-shopping:latest
+    # The rebuilt all-in-one image serves on 7770 in-container (nginx vhost
+    # matches the data's baked-in http://metis.lti.cs.cmu.edu:7770 base URLs).
     ports:
-      - "7770:80"
+      - "7770:7770"
   shopping-admin:
     image: ghcr.io/shkolnik/webarena-shopping-admin:latest
     ports:
