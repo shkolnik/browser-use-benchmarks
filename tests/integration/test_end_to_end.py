@@ -32,7 +32,8 @@ def test_download_build_push_roundtrip(tmp_path):
                           "registry:2"], capture_output=True, text=True, check=True).stdout.strip()
     try:
         version = "itest.1"
-        bdocker.run(bdocker.build_cmd(ref, Manifest(), "127.0.0.1:5000", dsdir, version))
+        bdocker.run(bdocker.build_cmd(ref, Manifest(), "127.0.0.1:5000", dsdir, version,
+                                      Path(__file__).resolve().parents[2]))
         for cmd in bdocker.push_cmds(ref, "127.0.0.1:5000", version):
             bdocker.run(cmd)
         out = subprocess.run(
