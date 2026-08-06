@@ -71,8 +71,25 @@ trap - EXIT
 docker image rm -f "$UPSTREAM_TAG"
 
 echo "=== push derived-inputs cache ==="
-# shopping-admin's media tar is well under 8G, so no split needed here.
-work=$(mktemp -d)
+# shopping-admin's media tar is well under 8G, so no split needed here — but
+# the scratch dir still needs to sit NEXT TO the datasets, not in /tmp: a
+# runner's /tmp can be far smaller than the volume already holding the
+# datasets (../shopping hit exactly this as `split: No space left on device`
+# mid-derivation, run 31080808213, even though its media tar was already
+# verified on disk — same class, adapted here since shopping-admin copies
+# instead of splitting). Check the room first so a failure names the resource
+# instead of surfacing after the (much shorter, ~85M) copy.
+need=$(( $(stat -c %s "$DATASETS_DIR/shopping_admin_media.tar") \
+       + $(stat -c %s "$DATASETS_DIR/shopping_admin_db.sql.gz") \
+       + $(stat -c %s "$DATASETS_DIR/shopping_admin_env.php") ))
+avail=$(df -B1 --output=avail "$DATASETS_DIR" | tail -1)
+if [ "$avail" -lt "$((need + need / 20))" ]; then
+  echo "derive: staging the derived-inputs cache needs ~$((need >> 20))M beside the datasets in $DATASETS_DIR; only $((avail >> 20))M available" >&2
+  exit 1
+fi
+work=$(mktemp -d "$DATASETS_DIR/.derive-work.XXXXXX")
+# A leftover scratch dir would persist in the runner's datasets cache.
+trap 'rm -rf "$work"' EXIT
 cp "$DATASETS_DIR/shopping_admin_media.tar" "$work/"
 cp "$DATASETS_DIR/shopping_admin_db.sql.gz" "$work/"
 cp "$DATASETS_DIR/shopping_admin_env.php" "$work/"
@@ -83,6 +100,5 @@ cp "$DATASETS_DIR/shopping_admin_env.php" "$work/"
   echo "COPY shopping_admin_env.php /"
 } > "$work/Dockerfile"
 docker build -t "$CACHE" "$work"
-rm -rf "$work"
 docker push "$CACHE" || echo "warning: cache push failed (continuing; derivation succeeded)"
 echo "derive complete"
