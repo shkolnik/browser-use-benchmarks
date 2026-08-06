@@ -1,0 +1,7 @@
+# Settings the experiment proved the WebArena dump needs (compose.yaml args):
+# large packets for catalog rows, and trust for the dump's function/trigger
+# definitions when re-created without SUPER.
+[mysqld]
+bind-address = 127.0.0.1
+max_allowed_packet = 64M
+log_bin_trust_function_creators = 1
