@@ -85,6 +85,12 @@ def load_manifest(image_dir: Path) -> Manifest:
             _die(image_dir, "prepare.outputs is empty")
         prepare = Prepare(prep["script"], list(prep["outputs"]))
     lazy = [d.filename for d in datasets if d.prepare_input]
+    if len(lazy) > 1:
+        _die(image_dir,
+             f"at most one prepare_input dataset is supported, got {len(lazy)} "
+             f"({', '.join(lazy)}): run_prepare exports a single "
+             "PREPARE_INPUT_SHA256 that the derive script keys its cache on, so a "
+             "second one would not be represented in that key")
     if lazy and prepare is None:
         _die(image_dir,
              f"datasets marked prepare_input ({', '.join(lazy)}) but there is no "

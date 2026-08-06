@@ -15,7 +15,11 @@ set -euo pipefail
 
 UPSTREAM_TAR="$DATASETS_DIR/shopping_admin_final_0719.tar"
 UPSTREAM_TAG=shopping_admin_final_0719:latest
-UPSTREAM_SHA=ad607557a79f1bacf83c4661730802bbedc6bcbbf15078352ae59bcec74182b8
+# The pin comes from image.toml via run_prepare — never a second copy here.
+# It is the cache tag AND part of the on-disk provenance stamp, so updating the
+# manifest alone is enough to strand every artifact derived from the old tar.
+: "${PREPARE_INPUT_SHA256:?run_prepare must export the pinned upstream sha256}"
+UPSTREAM_SHA="$PREPARE_INPUT_SHA256"
 CACHE="$REGISTRY/webarena-shopping-admin-derived:${UPSTREAM_SHA:0:12}"
 
 DB_NAME=magentodb
