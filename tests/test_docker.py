@@ -376,3 +376,37 @@ def test_run_prepare_exports_repo_root_and_image(tmp_path):
     image, repo_root = (dsdir / "derived.tar").read_text().split()
     assert image == "bench/svc"
     assert (Path(repo_root) / "bin" / "build").is_file()
+
+
+# ==========
+# The upstream pin is the cache key. It must have exactly one source of truth,
+# and changing it must invalidate BOTH the GHCR cache tag and the on-disk stamp.
+# ==========
+
+def _pinned(tmp_path, sha, script='echo "$PREPARE_INPUT_SHA256" > "$DATASETS_DIR/out.bin"\n'):
+    from builder.manifest import Dataset
+    img = tmp_path / "images" / "b" / "s"
+    img.mkdir(parents=True, exist_ok=True)
+    (img / "derive.sh").write_text(script)
+    ds = tmp_path / "datasets"
+    ds.mkdir(exist_ok=True)
+    m = Manifest(datasets=[Dataset("up.tar", sha, ["http://x/up.tar"], prepare_input=True)],
+                 prepare=Prepare("derive.sh", ["out.bin"]))
+    return ImageRef("b", "s", img), m, ds
+
+def test_prepare_exports_the_pin_so_the_script_need_not_duplicate_it(tmp_path):
+    ref, m, ds = _pinned(tmp_path, "c" * 64)
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    assert (ds / "out.bin").read_text().strip() == "c" * 64
+
+def test_changing_the_pin_invalidates_the_on_disk_stamp(tmp_path):
+    # The silent-wrong-data case: upstream republishes, image.toml's sha256 is
+    # updated, the derive script is untouched. Without the pin in the
+    # fingerprint the stamp still matches and the derive is SKIPPED, so the
+    # build uses artifacts derived from the OLD tar.
+    ref, m, ds = _pinned(tmp_path, "c" * 64)
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+    _, m2, _ = _pinned(tmp_path, "d" * 64)
+    assert docker_mod.prepare_reuse_check(ref, m2, ds) == \
+        "up.tar's pinned sha256 changed since these artifacts were derived"

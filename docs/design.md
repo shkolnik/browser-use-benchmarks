@@ -86,6 +86,32 @@ A dataset marked `prepare_input` with no `[prepare]` section is a load error: no
 download it. Note that the count of upstream fetches, not their size, is the metric this is
 optimizing; it should trend to zero as derived caches stay valid.
 
+### Cache invalidation: the pin IS the key
+
+There is no time-based expiry, and none is needed — the derived cache is content-addressed.
+Its GHCR tag is `<first 12 of the upstream sha256>-<RECIPE>`, so:
+
+- **Upstream republishes different bytes.** The fetch verifies against `image.toml`'s mandatory
+  sha256, mismatches, quarantines the file and exits. Changed upstream data can never be
+  derived from silently; adopting it is a deliberate act.
+- **We deliberately adopt new upstream data.** Updating the manifest's sha256 changes the cache
+  tag (GHCR miss) *and* the provenance stamp (on-disk artifacts stranded), so both caches
+  invalidate on their own.
+- **The recipe changes.** Bump `RECIPE`; same effect, and it strands the previous revision's
+  entries rather than overwriting them.
+
+The pin therefore has exactly ONE source of truth: `image.toml`. `run_prepare` exports it as
+`PREPARE_INPUT_SHA256` and the derive script uses that — it must never hardcode its own copy.
+Two copies is not redundancy, it is a silent-wrong-data hole: update the manifest alone and the
+downloaded bytes are new while the cache tag and the stamp both still describe the old tar, so
+the derive is skipped and the build uses artifacts derived from data it no longer has. At most
+one `prepare_input` dataset per image is allowed, because a second would not be represented in
+that key.
+
+Note what lazy fetching does NOT change: on a cache hit we never contact upstream, so upstream
+drift is not *detected* until the next miss. That is a detection latency, not a correctness
+problem — the pin means we would refuse the drifted bytes anyway.
+
 ## CI (`.github/workflows/build.yml`)
 
 - Runs on the self-hosted runner (`runs-on: [self-hosted, benchmark-builder]`).

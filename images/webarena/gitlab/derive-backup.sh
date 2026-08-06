@@ -14,7 +14,11 @@ set -euo pipefail
 
 UPSTREAM_TAR="$DATASETS_DIR/gitlab-populated-final-port8023.tar"
 UPSTREAM_TAG=gitlab-populated-final-port8023:latest
-UPSTREAM_SHA=6269a90527a63c12d86fa4a5da8c5404553b78e75c5123712818c1b6d9f0972d
+# The pin comes from image.toml via run_prepare — never a second copy here.
+# It is the cache tag AND part of the on-disk provenance stamp, so updating the
+# manifest alone is enough to strand every artifact derived from the old tar.
+: "${PREPARE_INPUT_SHA256:?run_prepare must export the pinned upstream sha256}"
+UPSTREAM_SHA="$PREPARE_INPUT_SHA256"
 CACHE="$REGISTRY/webarena-gitlab-derived:${UPSTREAM_SHA:0:12}"
 BK=webarena  # gitlab-backup expects <prefix>_gitlab_backup.tar
 

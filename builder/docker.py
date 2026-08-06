@@ -72,12 +72,29 @@ def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
 def prepare_stamp_path(datasets_dir: Path, ref: ImageRef) -> Path:
     return datasets_dir / ".prepare" / f"{ref.name}.json"
 
+def prepare_input_dataset(m: Manifest):
+    """The single upstream artifact the prepare script derives from, if any.
+
+    The manifest is the ONE place its sha256 is written down. It is both the
+    GHCR cache tag and part of the on-disk provenance stamp, so a script that
+    hardcoded its own copy could serve artifacts derived from a superseded tar
+    after the pin was updated in only one of the two places.
+    """
+    for ds in m.datasets:
+        if ds.prepare_input:
+            return ds
+    return None
+
 def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
     script_bytes = (ref.path / m.prepare.script).read_bytes()
     return {
         "script": m.prepare.script,
         "script_sha256": hashlib.sha256(script_bytes).hexdigest(),
         "outputs": {o: (datasets_dir / o).stat().st_size for o in m.prepare.outputs},
+        # Without this the artifacts survive a pin change untouched: the script
+        # is unchanged, the sizes are unchanged, so the derive is skipped and
+        # the build silently uses data derived from the previous upstream tar.
+        "prepare_input_sha256": (pin.sha256 if (pin := prepare_input_dataset(m)) else None),
     }
 
 def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str | None:
@@ -95,6 +112,9 @@ def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str |
     current = prepare_fingerprint(ref, m, datasets_dir)
     if recorded.get("script_sha256") != current["script_sha256"]:
         return f"{m.prepare.script} changed since these artifacts were derived"
+    if recorded.get("prepare_input_sha256") != current["prepare_input_sha256"]:
+        pin = prepare_input_dataset(m)
+        return f"{pin.filename}'s pinned sha256 changed since these artifacts were derived"
     for name, size in current["outputs"].items():
         was = recorded.get("outputs", {}).get(name)
         if was != size:
@@ -114,6 +134,10 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     env = dict(os.environ, DATASETS_DIR=str(datasets_dir.resolve()), REGISTRY=registry,
                REPO_ROOT=str(Path(__file__).resolve().parents[1]),
                IMAGE=f"{ref.benchmark}/{ref.service}")
+    # The pin, from the manifest, so the script never keeps its own copy.
+    if pin := prepare_input_dataset(m):
+        env["PREPARE_INPUT_SHA256"] = pin.sha256
+        env["PREPARE_INPUT_FILE"] = pin.filename
     proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
     if proc.returncode != 0:
         raise SystemExit(f"error: prepare script failed for {ref.name}")
