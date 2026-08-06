@@ -20,8 +20,8 @@ urls = [
 ]
 # ~5.1G (5,479,720,229 bytes). Upstream canonical source is Google Drive (gdown id
 # 1A2whVgOO0euk5O13n2iYDM0bQRkkRduB in WebShop's setup.sh) — not curl-fetchable. The
-# sha256 here is the LFS oid reported identically by all three independent HF mirrors;
-# not yet re-verified by a local download (mirrors agreeing is the current evidence).
+# sha256 here is the LFS oid reported identically by all three independent HF mirrors,
+# and was confirmed by a completed local download on 2026-08-05.
 
 [[datasets]]
 filename = "items_ins_v2.json"
@@ -32,7 +32,8 @@ urls = [
   "https://huggingface.co/datasets/Yuxuan13/webshop_dataset/resolve/main/items_ins_v2.json",
 ]
 # ~178M (186,295,270 bytes). Same provenance story as items_shuffle.json (upstream gdown
-# id 1s2j6NgHljiZzQNL3veZaAiyW_qDEgBNi); sha256 = LFS oid, identical on all three mirrors.
+# id 1s2j6NgHljiZzQNL3veZaAiyW_qDEgBNi); sha256 = LFS oid, identical on all three
+# mirrors, confirmed by a completed local download on 2026-08-05.
 
 [[datasets]]
 filename = "items_human_ins.json"
