@@ -68,8 +68,7 @@ jobs:
           # deleting its exclude line. Everything else builds on push and
           # reports commit status.
           enabled=$(bin/build list "$target" | cut -f1 \
-            | grep -v '^probe/' \
-            | grep -v '^vwa/classifieds$')
+            | grep -v '^probe/')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
           if [ '${{ github.event_name }}' = push ]; then

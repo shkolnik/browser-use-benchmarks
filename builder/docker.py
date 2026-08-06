@@ -23,9 +23,15 @@ def version_tag(repo_root: Path) -> str:
         capture_output=True, text=True, check=True).stdout.split()
     return f"{out[0].replace('-', '')}.{out[1]}"
 
-def build_cmd(ref: ImageRef, m: Manifest, registry: str,
-              datasets_dir: Path, version: str) -> list[str]:
-    cmd = ["docker", "build", "--build-context", f"datasets={datasets_dir}"]
+def build_cmd(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path,
+              version: str, repo_root: Path) -> list[str]:
+    # `stagelib` is offered to every image whether or not its Dockerfile COPYs
+    # from it: a named build context costs nothing unreferenced, and the
+    # alternative — per-image opt-in — is how three images ended up with three
+    # drifting copies of the same partitioner.
+    cmd = ["docker", "build",
+           "--build-context", f"datasets={datasets_dir}",
+           "--build-context", f"stagelib={repo_root / 'builder' / 'stage-lib'}"]
     for k, v in m.build_args.items():
         cmd += ["--build-arg", f"{k}={v}"]
     cmd += ["-t", f"{registry}/{ref.name}:{version}",
@@ -131,7 +137,7 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
         else:
             if m.prepare:
                 run_prepare(ref, m, registry, datasets_dir)
-            run(build_cmd(ref, m, registry, datasets_dir, version))
+            run(build_cmd(ref, m, registry, datasets_dir, version, repo_root))
 
 def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:
     tags = [f"{registry}/{ref.name}:{version}", f"{registry}/{ref.name}:latest"]
