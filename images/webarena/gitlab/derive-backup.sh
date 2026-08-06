@@ -38,7 +38,12 @@ echo "cache miss — deriving from upstream tar"
 
 echo "=== load + boot upstream image ==="
 docker load -i "$UPSTREAM_TAR"
-docker run -d --name gitlab-derive --hostname localhost --shm-size 1g "$UPSTREAM_TAG"
+# The upstream image is a docker-commit whose Cmd is literally ["bash"] (exits
+# instantly detached); WebArena's run instructions pass the service supervisor
+# explicitly, and runsvdir-start (unlike /assets/wrapper) skips reconfigure,
+# which the populated instance neither needs nor should get.
+docker run -d --name gitlab-derive --hostname localhost --shm-size 1g \
+  "$UPSTREAM_TAG" /opt/gitlab/embedded/bin/runsvdir-start
 trap 'docker rm -f gitlab-derive >/dev/null 2>&1 || true' EXIT
 for i in $(seq 1 90); do
   if [ "$(docker inspect -f '{{.State.Running}}' gitlab-derive)" != true ]; then
