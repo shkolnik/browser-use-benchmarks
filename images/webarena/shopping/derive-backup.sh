@@ -71,8 +71,24 @@ for i in $(seq 1 60); do
 done
 
 echo "=== mysqldump + pub/media + env.php ==="
+# Dump and compress as TWO steps, not `mysqldump | gzip > f`. This script's
+# own `set -o pipefail` does not reach into the pipeline: it runs inside the
+# container's `sh -c`, whose shell has no pipefail, so `docker exec` reports
+# only gzip's status. A mysqldump that dies mid-stream then yields a
+# valid-looking short .gz and a zero exit. That is exactly how ../reddit's
+# first derivation cached an empty dump and only failed 35 minutes later.
 docker exec shopping-derive sh -c \
-  "mysqldump -u$DB_USER -p$DB_PASS --single-transaction --routines --triggers $DB_NAME | gzip > /tmp/shopping_db.sql.gz"
+  "mysqldump -u$DB_USER -p$DB_PASS --single-transaction --routines --triggers $DB_NAME > /tmp/shopping_db.sql"
+# mysqldump writes this trailer only after every table is dumped, so it
+# asserts completeness at the source rather than inferring it from a size.
+# A byte floor would be the wrong instrument here: two legitimate Magento
+# dumps from this very pair of images measure 367,179,711 bytes (shopping)
+# and 900,148 (shopping-admin) gzipped — both complete, both 369 tables —
+# so no single threshold separates "sparse" from "truncated".
+docker exec shopping-derive sh -c \
+  "tail -c 200 /tmp/shopping_db.sql | grep -q '^-- Dump completed'" \
+  || { echo "derive: /tmp/shopping_db.sql has no mysqldump completion trailer — the dump was truncated; refusing to cache it" >&2; exit 1; }
+docker exec shopping-derive gzip -f /tmp/shopping_db.sql
 docker cp shopping-derive:/tmp/shopping_db.sql.gz "$DATASETS_DIR/"
 docker exec shopping-derive tar cf /tmp/shopping_media.tar -C /var/www/magento2/pub media
 docker cp shopping-derive:/tmp/shopping_media.tar "$DATASETS_DIR/"
