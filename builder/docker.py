@@ -122,15 +122,35 @@ def poll_health(url: str, timeout_s: int = 120,
             return False
         sleep(2)
 
+def compose_services(compose: Path, check_output=subprocess.check_output) -> list[str]:
+    out = check_output(
+        ["docker", "compose", "-f", str(compose), "config", "--services"], text=True)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
 def run_smoke(refs, repo_root: Path) -> None:
     benches = sorted({r.benchmark for r in refs})
     for bench in benches:
         compose = repo_root / "images" / bench / "compose.yml"
         if not compose.is_file():
             raise SystemExit(f"error: {compose} not found — every benchmark needs a compose.yml")
-        run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait"])
+        want = [r for r in refs if r.benchmark == bench]
+        # Only the TARGETED services come up. Bringing the whole file up is what
+        # kept this out of CI: images/webarena/compose.yml declares shopping,
+        # shopping-admin, reddit and gitlab, so smoke-testing a reddit build
+        # would try to pull ~75G of images the job never built and does not
+        # have. Compose service name == the image directory name, asserted
+        # rather than assumed, because a rename would otherwise silently smoke
+        # nothing at all.
+        declared = set(compose_services(compose))
+        missing = sorted(r.service for r in want if r.service not in declared)
+        if missing:
+            raise SystemExit(
+                f"error: {compose} declares no service named {', '.join(missing)} — "
+                f"a compose service must be named after its images/{bench}/<service>/ directory")
+        run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait",
+             *[r.service for r in want]])
         try:
-            for ref in [r for r in refs if r.benchmark == bench]:
+            for ref in want:
                 hc = load_manifest(ref.path).healthcheck
                 if hc is None:
                     raise SystemExit(f"error: {ref.name} has no [service].healthcheck in image.toml")
