@@ -26,27 +26,45 @@ import sys
 
 
 def du_kb(path):
-    return int(subprocess.check_output(['du', '-sk', path]).split()[0])
+    return int(subprocess.check_output(['du', '-sk', '--', path]).split()[0])
 
 
-def partition(path, limit_kb):
-    """Yield (path, kb) pieces each <= limit_kb, descending into oversized dirs."""
-    kb = du_kb(path)
-    if kb <= limit_kb:
-        yield path, kb
-        return
-    yield from children(path, kb, limit_kb)
+def du_kb_many(paths):
+    """Sizes for many paths, batched — one `du` per chunk, not one per path.
+
+    Measured on classifieds: oc-content/uploads holds 84,148 per-item
+    directories, so a subprocess each is ~84k spawns. Chunked well under
+    ARG_MAX, since 84k paths on one command line is E2BIG.
+    """
+    sizes = {}
+    for i in range(0, len(paths), 2000):
+        chunk = paths[i:i + 2000]
+        out = subprocess.check_output(['du', '-sk', '--'] + chunk, text=True)
+        for line in out.splitlines():
+            kb, path = line.split('\t', 1)
+            sizes[path] = int(kb)
+    missing = [p for p in paths if p not in sizes]
+    if missing:
+        raise SystemExit(f'du reported no size for {missing[0]} ({len(missing)} paths)')
+    return sizes
 
 
 def children(path, kb, limit_kb):
+    """Yield (path, kb) pieces each <= limit_kb, descending into oversized dirs."""
     entries = sorted(os.path.join(path, e) for e in os.listdir(path))
     if not entries:
         raise SystemExit(f'{path} is {kb}K with no children to descend into')
+    sizes = du_kb_many(entries)
     for entry in entries:
-        if os.path.isdir(entry) and not os.path.islink(entry):
-            yield from partition(entry, limit_kb)
+        # Sized in one batch above, so a directory that already fits is yielded
+        # whole without re-measuring it — the common case by far, and the reason
+        # 84k item directories partition in seconds rather than minutes.
+        if sizes[entry] <= limit_kb:
+            yield entry, sizes[entry]
+        elif os.path.isdir(entry) and not os.path.islink(entry):
+            yield from children(entry, sizes[entry], limit_kb)
         else:
-            yield entry, du_kb(entry)
+            yield entry, sizes[entry]
 
 
 def plan(root, limit_kb, max_buckets):

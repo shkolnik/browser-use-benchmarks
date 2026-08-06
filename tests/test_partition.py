@@ -40,6 +40,28 @@ def test_descends_into_oversized_directory(tmp_path):
     assert len(sizes) >= 3
 
 
+def test_du_batching_chunks_past_the_command_line_limit(tmp_path):
+    # 84,148 paths on one `du` command line is E2BIG, and one `du` per path is
+    # 84,148 subprocesses. Sizes must come back for every path either way, so
+    # this crosses the 2000-path chunk boundary rather than testing under it.
+    paths = []
+    for i in range(2500):
+        p = tmp_path / f"f{i}.bin"
+        p.write_bytes(b"\0" * 1024)
+        paths.append(str(p))
+    sizes = pt.du_kb_many(paths)
+    assert set(sizes) == set(paths)
+    assert all(kb > 0 for kb in sizes.values())
+
+
+def test_paths_with_spaces_survive_batching(tmp_path):
+    # du's output is split on the FIRST tab, so a name containing spaces (or
+    # anything but a tab) must round-trip intact.
+    p = tmp_path / "an item 84143.jpg"
+    p.write_bytes(b"\0" * 1024)
+    assert list(pt.du_kb_many([str(p)])) == [str(p)]
+
+
 def test_refuses_when_buckets_run_out(tmp_path):
     for i in range(4):
         write(tmp_path, f"d{i}/f.bin", 100)
