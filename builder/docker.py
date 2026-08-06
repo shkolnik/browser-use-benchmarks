@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import subprocess
 import time
@@ -45,12 +47,61 @@ def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
     return [["docker", "push", f"{registry}/{ref.name}:{version}"],
             ["docker", "push", f"{registry}/{ref.name}:latest"]]
 
-def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -> None:
+# Derived artifacts are expensive (reddit's is a ~41G media tar) so they are
+# cached on the runner between jobs — but "the file is there" was being used as
+# a proxy for "the file is right", and the two came apart. Run 31126802473
+# restored a 499.7 MB dump in SEVEN MILLISECONDS and failed audit with
+# `relation "users" does not exist`: the runner's datasets dir still held the
+# EMPTY dump produced back when the derive script dumped the wrong database.
+# That recipe was fixed and its cache key bumped r1 -> r2, which correctly
+# stranded the bad entry in the GHCR cache — but the bump never fired, because
+# a presence check meant the script never ran to consult its key. The GHCR
+# cache was keyed by recipe; the local datasets dir was keyed by nothing.
+#
+# So record what a successful derivation actually left behind, and reuse
+# artifacts only when they still match it. Hashing the script into the stamp
+# is what makes a recipe change self-enforcing: edit the derive script — bump
+# RECIPE, fix a dumped database name, anything — and every artifact it
+# previously produced stops being reusable, with no second place to remember.
+def prepare_stamp_path(datasets_dir: Path, ref: ImageRef) -> Path:
+    return datasets_dir / ".prepare" / f"{ref.name}.json"
+
+def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
+    script_bytes = (ref.path / m.prepare.script).read_bytes()
+    return {
+        "script": m.prepare.script,
+        "script_sha256": hashlib.sha256(script_bytes).hexdigest(),
+        "outputs": {o: (datasets_dir / o).stat().st_size for o in m.prepare.outputs},
+    }
+
+def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str | None:
+    """None if the cached artifacts may be reused, else why they may not be."""
     missing = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
-    if not missing:
-        print(f"{ref.name}: prepare outputs present, skipping {m.prepare.script}")
+    if missing:
+        return f"missing: {', '.join(missing)}"
+    stamp = prepare_stamp_path(datasets_dir, ref)
+    if not stamp.is_file():
+        return "no provenance stamp — artifacts of unknown origin"
+    try:
+        recorded = json.loads(stamp.read_text())
+    except (json.JSONDecodeError, OSError):
+        return "provenance stamp is unreadable"
+    current = prepare_fingerprint(ref, m, datasets_dir)
+    if recorded.get("script_sha256") != current["script_sha256"]:
+        return f"{m.prepare.script} changed since these artifacts were derived"
+    for name, size in current["outputs"].items():
+        was = recorded.get("outputs", {}).get(name)
+        if was != size:
+            return f"{name} is {size} bytes, was {was} when derived"
+    return None
+
+def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -> None:
+    reason = prepare_reuse_check(ref, m, datasets_dir)
+    if reason is None:
+        print(f"{ref.name}: prepare outputs verified against their stamp, "
+              f"skipping {m.prepare.script}")
         return
-    print(f"{ref.name}: running {m.prepare.script} (missing: {', '.join(missing)})")
+    print(f"{ref.name}: running {m.prepare.script} ({reason})")
     env = dict(os.environ, DATASETS_DIR=str(datasets_dir.resolve()), REGISTRY=registry)
     proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
     if proc.returncode != 0:
@@ -59,6 +110,10 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     if still:
         raise SystemExit(
             f"error: prepare for {ref.name} did not produce: {', '.join(still)}")
+    stamp = prepare_stamp_path(datasets_dir, ref)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(json.dumps(prepare_fingerprint(ref, m, datasets_dir), indent=2))
+    print(f"{ref.name}: stamped {stamp}")
 
 
 def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:

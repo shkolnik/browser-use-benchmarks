@@ -1,6 +1,7 @@
+import json
 from pathlib import Path
 from builder.discover import ImageRef
-from builder.manifest import Manifest, Source
+from builder.manifest import Manifest, Prepare, Source
 from builder import docker as docker_mod
 from builder.docker import build_cmd, push_cmds, poll_health
 
@@ -136,13 +137,18 @@ def test_run_clean_continues_past_failures(monkeypatch):
     assert any("warning" in l for l in logs)
 
 
-def test_run_prepare_skips_when_outputs_present(tmp_path, capsys):
-    from builder.docker import run_prepare
-    from builder.manifest import Manifest, Prepare
-    from builder.discover import ImageRef
+def test_run_prepare_skips_only_when_outputs_are_STAMPED(tmp_path, capsys):
+    # This used to assert that mere presence was enough to skip. It was not:
+    # an empty dump left by a superseded recipe satisfied it for days. The
+    # artifact must still match the stamp a successful derive wrote.
+    from builder.docker import run_prepare, prepare_fingerprint, prepare_stamp_path
+    (tmp_path / "derive.sh").write_text("echo derive\n")
     (tmp_path / "derived.tar").write_text("x")
     m = Manifest(prepare=Prepare("derive.sh", ["derived.tar"]))
     ref = ImageRef("bench", "svc", tmp_path)
+    stamp = prepare_stamp_path(tmp_path, ref)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(json.dumps(prepare_fingerprint(ref, m, tmp_path)))
     run_prepare(ref, m, "ghcr.io/x", tmp_path)  # must not try to run the script
     assert "skipping" in capsys.readouterr().out
 
@@ -271,3 +277,86 @@ def test_compose_services_parses_docker_output():
     got = docker_mod.compose_services(Path("/repo/images/webarena/compose.yml"),
                                       check_output=lambda cmd, text: out)
     assert got == ["shopping", "shopping-admin", "reddit", "gitlab"]
+
+# ==========
+# prepare provenance stamp — artifacts are reused only when they still match
+# what a successful derivation left behind. Presence alone let an empty dump
+# from a superseded recipe survive on the runner indefinitely.
+# ==========
+
+def _prep_image(tmp_path, script_body="echo hi\n"):
+    img = tmp_path / "images" / "webarena" / "reddit"
+    img.mkdir(parents=True)
+    (img / "derive-backup.sh").write_text(script_body)
+    ds = tmp_path / "datasets"
+    ds.mkdir()
+    ref = ImageRef("webarena", "reddit", img)
+    m = Manifest(prepare=Prepare("derive-backup.sh", ["reddit_db.sql.gz"]))
+    return ref, m, ds
+
+def _write_output(ds, size=1000):
+    (ds / "reddit_db.sql.gz").write_bytes(b"x" * size)
+
+def test_prepare_refuses_unstamped_artifacts(tmp_path):
+    # The exact production failure: the file is present, so the old code
+    # skipped the derive entirely and built on it.
+    ref, m, ds = _prep_image(tmp_path)
+    _write_output(ds)
+    assert docker_mod.prepare_reuse_check(ref, m, ds) == \
+        "no provenance stamp — artifacts of unknown origin"
+
+def test_prepare_reuses_stamped_artifacts(tmp_path):
+    ref, m, ds = _prep_image(tmp_path)
+    _write_output(ds)
+    stamp = docker_mod.prepare_stamp_path(ds, ref)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(json.dumps(docker_mod.prepare_fingerprint(ref, m, ds)))
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+
+def test_prepare_rederives_when_the_script_changes(tmp_path):
+    # This is the mechanism that failed in production: bumping RECIPE inside
+    # the derive script must invalidate everything it previously produced.
+    ref, m, ds = _prep_image(tmp_path, "RECIPE=r1\n")
+    _write_output(ds)
+    stamp = docker_mod.prepare_stamp_path(ds, ref)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(json.dumps(docker_mod.prepare_fingerprint(ref, m, ds)))
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+    (ref.path / "derive-backup.sh").write_text("RECIPE=r2\n")
+    assert docker_mod.prepare_reuse_check(ref, m, ds) == \
+        "derive-backup.sh changed since these artifacts were derived"
+
+def test_prepare_rederives_when_an_artifact_is_truncated(tmp_path):
+    ref, m, ds = _prep_image(tmp_path)
+    _write_output(ds, size=1000)
+    stamp = docker_mod.prepare_stamp_path(ds, ref)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(json.dumps(docker_mod.prepare_fingerprint(ref, m, ds)))
+    _write_output(ds, size=12)   # truncated after the fact
+    assert docker_mod.prepare_reuse_check(ref, m, ds) == \
+        "reddit_db.sql.gz is 12 bytes, was 1000 when derived"
+
+def test_run_prepare_stamps_after_a_successful_derive(tmp_path):
+    # A script that really produces the artifact, run through the real code
+    # path — then a second call must skip it.
+    ref, m, ds = _prep_image(
+        tmp_path, 'printf "%s" "$(head -c 500 /dev/zero | tr "\\0" "y")" '
+                  '> "$DATASETS_DIR/reddit_db.sql.gz"\n')
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    assert docker_mod.prepare_stamp_path(ds, ref).is_file()
+    assert (ds / "reddit_db.sql.gz").stat().st_size == 500
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+
+def test_run_prepare_RE_DERIVES_over_an_unstamped_artifact(tmp_path):
+    # The production failure, end to end at the level it actually happened:
+    # a stale artifact sits in the runner's datasets dir with no stamp, and
+    # run_prepare must run the derive script anyway rather than build on it.
+    # Asserting this through prepare_reuse_check alone does NOT pin it — the
+    # bug was in run_prepare's use of the check, and a regression that trusts
+    # presence again leaves every check-level test green.
+    ref, m, ds = _prep_image(
+        tmp_path, 'printf "%s" REDERIVED > "$DATASETS_DIR/reddit_db.sql.gz"\n')
+    (ds / "reddit_db.sql.gz").write_bytes(b"stale empty artifact")
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    assert (ds / "reddit_db.sql.gz").read_bytes() == b"REDERIVED", \
+        "run_prepare reused an unstamped artifact instead of re-deriving"
