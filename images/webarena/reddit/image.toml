@@ -1,3 +1,12 @@
+# Two datasets, and the distinction matters:
+# 1. the upstream docker-save tar — the ONLY source of the populated DATA, and
+#    the thing whose provenance we are removing (its top four layers are hand
+#    `docker commit`s whose history reads literally
+#    `supervisord -n -j /supervisord.pid`);
+# 2. Postmill's own source at the pinned commit — the CODE, fetched from the
+#    project rather than copied out of that opaque tar.
+# The rebuild therefore takes data from (1) and every executable byte from (2).
+
 [[datasets]]
 filename = "postmill-populated-exposed-withimg.tar"
 sha256 = "6ff70f73bc808b4cd9faf4e925dab2a4ae3cc5f9d0e9755360500607973a0dc5"
@@ -8,10 +17,33 @@ urls = [
 # sha256 computed at salvage time (docs/prior-download/sha256.computed); upstream md5 also
 # verified (docs/prior-download/md5.expected).
 
-[source]
-kind = "docker-save"
-dataset = "postmill-populated-exposed-withimg.tar"
-tag = "postmill-populated-exposed-withimg:latest"  # verified via `tar -xOf <tar> manifest.json`
+# Postmill source at commit a6a9bbc86f44 ("Merge branch 'support-php-8.2' into
+# 'main'", 2023-01-21) — established as the commit the WebArena authors checked
+# out by content-matching against upstream history: Dockerfile, composer.json,
+# composer.lock, docker-compose.yml, package.json AND real source files
+# (src/Entity/Forum.php, src/Controller/FrontController.php,
+# templates/base.html.twig) are all byte-identical between this archive and the
+# tree inside the upstream tar. The comparison was checked to DISCRIMINATE, not
+# to pass vacuously: the same method reports the Dockerfile as differing at
+# commits f281d414cd80 and 4b99b4b31897.
+#
+# ⚠️ Postmill is NOT on GitHub — github.com/postmill/Postmill 404s. Canonical
+# home is codeberg.org; gitlab.com is the official mirror and is listed first
+# only because codeberg's on-demand archive generation is slow enough to time
+# out a fetch. The pinned sha256 was confirmed byte-stable across three
+# separate fetches, so a forge regenerating the tarball would fail the hash
+# check loudly rather than silently substituting a different tree.
+[[datasets]]
+filename = "Postmill-a6a9bbc86f44.tar.gz"
+sha256 = "da33ff5429106cc668ed3c96ac78a085c6d830e5df8bbeff62df98c12e70d395"
+urls = [
+    "https://gitlab.com/postmill/Postmill/-/archive/a6a9bbc86f44/Postmill-a6a9bbc86f44.tar.gz",
+    "https://codeberg.org/Postmill/Postmill/archive/a6a9bbc86f44.tar.gz",
+]
+
+[prepare]
+script = "derive-backup.sh"
+outputs = ["reddit_db.sql.gz", "reddit_media.tar"]
 
 [service]
 healthcheck = "http://localhost:9999/forums"

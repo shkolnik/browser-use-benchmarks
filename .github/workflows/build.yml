@@ -69,7 +69,6 @@ jobs:
           # reports commit status.
           enabled=$(bin/build list "$target" | cut -f1 \
             | grep -v '^probe/' \
-            | grep -v '^webarena/reddit$' \
             | grep -v '^vwa/classifieds$')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
@@ -121,6 +120,17 @@ jobs:
         run: bin/build download '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
       - name: build
         run: bin/build build '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
+      # BEFORE push, deliberately: a green build proves the image assembled,
+      # not that it serves. The reddit rebuild assembled cleanly and 404'd on
+      # every page (a partitioner bug nested the document root one level
+      # deeper), and nothing in this pipeline would have noticed — it would
+      # have published, attested, and reported success. Each image's
+      # [service].healthcheck points at a real content page rather than a
+      # liveness stub, so poll_health's 200-399 window catches exactly that
+      # class. Smoke runs on every event, including the pull-request path that
+      # never pushes, because "does it boot" is worth knowing there too.
+      - name: smoke — boot the built image before publishing it
+        run: bin/build smoke '${{ matrix.image }}'
       - name: push
         if: github.event_name == 'push' || github.event.inputs.target != ''
         run: bin/build push '${{ matrix.image }}'
