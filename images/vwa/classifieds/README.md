@@ -1,5 +1,27 @@
 # VWA classifieds — scoped, not yet built (2026-08-06)
 
+> ## ⚠️ Correction: this image is **76.86 GB**, and that changes the build
+>
+> An earlier version of this file called classifieds a ~10-line Dockerfile away from
+> done. The provenance half of that was right; the size half was wrong, because the
+> image itself was never measured — only its code tree.
+>
+> Measured by running it: `docker image inspect` = **76,861,318,207 bytes**, of which
+> the single `COPY osclass-v8.1.2 /usr/src/myapp` layer is **77.8 GB**. Inside,
+> `oc-content/uploads` holds **73 GB across 336,634 files** (the item photos). The app
+> tree without uploads is **105 MB** — the figure the old text was quoting.
+>
+> So: a 77.8 GB layer is far past what GHCR accepts, meaning the uploads need
+> **staging-bucket partitioning** (~10 buckets) exactly like `../../webarena/shopping`
+> does for its media; and since the photos are in neither the upstream zip nor the
+> Osclass v8.1.2 source tag, they must be **derived from the upstream image** by a
+> prepare step. Pin for that: `jykoh/classifieds@sha256:a2a794da92f62a8d7ffd02314e4fab40ba6c7fc08f568371608f88f0ef605e43`.
+>
+> This is the fleet's **largest** media payload — bigger than shopping's 45 GB.
+> Everything below about provenance still holds: the layer history really is complete
+> buildkit down to `php:8.1.27-cli`. Classifieds has no provenance hole; it has a size
+> problem, which is a different and more tractable thing.
+
 Still carries no `image.toml` (discovery is by `image.toml` glob, so this directory stays
 invisible to the driver until the build lands). But the earlier framing here — "not
 buildable via either manifest kind, decision deferred" — was **wrong about the hard part**,
