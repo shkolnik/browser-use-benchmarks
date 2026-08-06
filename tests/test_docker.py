@@ -202,3 +202,72 @@ def test_version_tag_uses_commit_date_not_wall_clock(tmp_path):
     sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert docker_mod.version_tag(tmp_path) == f"20200102.{sha}"
+
+# ==========
+# smoke — the step that stands between "the image assembled" and "the image is
+# published". These pin the targeting, because a smoke that quietly brings up
+# the WRONG set of services is worse than no smoke: it reports success.
+# ==========
+
+def _smoke_repo(tmp_path, compose_body="services:\n  reddit:\n    image: x\n"):
+    d = tmp_path / "images" / "webarena"
+    (d / "reddit").mkdir(parents=True)
+    (d / "compose.yml").write_text(compose_body)
+    (d / "reddit" / "image.toml").write_text(
+        '[service]\nhealthcheck = "http://localhost:9999/forums"\n')
+    return tmp_path
+
+def test_smoke_brings_up_only_the_targeted_service(tmp_path, monkeypatch):
+    # webarena's compose declares four services; a reddit build has only built
+    # one of them. Bringing the file up wholesale would try to pull the other
+    # three (~75G) — so the `up` command must name reddit explicitly.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    cmds = []
+    monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
+    monkeypatch.setattr(docker_mod, "compose_services",
+                        lambda p: ["shopping", "shopping-admin", "reddit", "gitlab"])
+    monkeypatch.setattr(docker_mod, "poll_health", lambda url: True)
+    docker_mod.run_smoke([ref], repo)
+    up = cmds[0]
+    assert up[-1] == "reddit"
+    for other in ("shopping", "shopping-admin", "gitlab"):
+        assert other not in up
+    assert cmds[-1][-2:] == ["down", "-v"]
+
+def test_smoke_fails_loud_when_compose_lacks_the_service(tmp_path, monkeypatch):
+    # A renamed service would otherwise make `up` a no-op and smoke a rubber
+    # stamp — compose exits 0 when told to start nothing.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    monkeypatch.setattr(docker_mod, "run", lambda c: None)
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["postmill"])
+    monkeypatch.setattr(docker_mod, "poll_health", lambda url: True)
+    try:
+        docker_mod.run_smoke([ref], repo)
+    except SystemExit as e:
+        assert "declares no service named reddit" in str(e)
+    else:
+        raise AssertionError("run_smoke accepted a compose file missing the service")
+
+def test_smoke_fails_loud_when_image_never_becomes_healthy(tmp_path, monkeypatch):
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    cmds = []
+    monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "poll_health", lambda url: False)
+    try:
+        docker_mod.run_smoke([ref], repo)
+    except SystemExit as e:
+        assert "smoke FAILED" in str(e)
+    else:
+        raise AssertionError("run_smoke passed an image that never served")
+    # ...and it still tears the stack down, or the runner leaks a 73G container.
+    assert cmds[-1][-2:] == ["down", "-v"]
+
+def test_compose_services_parses_docker_output():
+    out = "shopping\nshopping-admin\nreddit\ngitlab\n"
+    got = docker_mod.compose_services(Path("/repo/images/webarena/compose.yml"),
+                                      check_output=lambda cmd, text: out)
+    assert got == ["shopping", "shopping-admin", "reddit", "gitlab"]
