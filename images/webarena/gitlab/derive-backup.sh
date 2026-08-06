@@ -41,6 +41,11 @@ docker load -i "$UPSTREAM_TAR"
 docker run -d --name gitlab-derive --hostname localhost --shm-size 1g "$UPSTREAM_TAG"
 trap 'docker rm -f gitlab-derive >/dev/null 2>&1 || true' EXIT
 for i in $(seq 1 90); do
+  if [ "$(docker inspect -f '{{.State.Running}}' gitlab-derive)" != true ]; then
+    echo "gitlab-derive exited (status: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' gitlab-derive)); last logs:" >&2
+    docker logs --tail 60 gitlab-derive >&2 || true
+    exit 1
+  fi
   code=$(docker exec gitlab-derive curl -s -o /dev/null -w '%{http_code}' http://localhost:8023/ || true)
   if [ "$code" = 302 ] || [ "$code" = 200 ]; then
     echo "up after ~$((i * 15))s"
