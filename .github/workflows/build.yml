@@ -140,6 +140,37 @@ jobs:
       # this repo's CI at a given commit, via
       #   gh attestation verify oci://<image> -R ${{ github.repository }}
       # push-to-registry also attaches it to the image as an OCI referrer.
+      # GHCR does not authorize a BRAND-NEW package the instant its first push
+      # completes, and attestation is the first thing to ask. Run 31095455745
+      # created the webarena-shopping package at 12:45:15Z and attestation died
+      # 5s later on `403` fetching a pull-scope token; shopping-admin survived
+      # the identical race only because it asked 11s after its own first push.
+      # Nothing was wrong with the token or its permissions. So wait for the
+      # registry to agree the package is readable, and fail loudly if it never
+      # does — a silently skipped attestation would leave an image published
+      # with no provenance, which is the one thing this pipeline exists to
+      # guarantee. Costs nothing on the every-other-run path: an already-known
+      # package answers 200 on the first poll.
+      - name: wait for ghcr to authorize the package
+        if: github.event_name == 'push' || github.event.inputs.target != ''
+        env:
+          SUBJECT_NAME: ${{ steps.digest.outputs.name }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo="${SUBJECT_NAME#ghcr.io/}"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -u "x:$GHCR_TOKEN" \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull")
+            if [ "$code" = 200 ]; then
+              echo "ghcr authorized ${repo} after $(( (i - 1) * 5 ))s"
+              exit 0
+            fi
+            echo "ghcr not ready for ${repo} (HTTP $code) — attempt $i/30"
+            sleep 5
+          done
+          echo "ghcr never authorized ${repo} within 150s (last HTTP $code)" >&2
+          exit 1
+
       - name: attest build provenance
         if: github.event_name == 'push' || github.event.inputs.target != ''
         uses: actions/attest-build-provenance@v4
