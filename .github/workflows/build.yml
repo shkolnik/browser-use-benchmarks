@@ -71,7 +71,6 @@ jobs:
             | grep -v '^probe/' \
             | grep -v '^webarena/reddit$' \
             | grep -v '^webarena/shopping-admin$' \
-            | grep -v '^webarena/shopping$' \
             | grep -v '^vwa/classifieds$')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
