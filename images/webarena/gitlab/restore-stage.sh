@@ -22,6 +22,17 @@ for i in $(seq 1 90); do
   sleep 15
 done
 
+# HTTP-up is not boot-done: the wrapper's first-boot reconfigure (cinc-client)
+# keeps running after puma answers, and restoring under it races rake tasks
+# against a half-configured instance (seen live: cache:clear at boot+142s vs
+# our restore at boot+127s). Wait for it to finish before touching services.
+echo "=== wait for first-boot reconfigure to finish ==="
+for i in $(seq 1 60); do
+  pgrep -f cinc-client >/dev/null || break
+  [ "$i" = 60 ] && { echo "first-boot reconfigure never finished" >&2; exit 1; }
+  sleep 15
+done
+
 echo "=== restore ==="
 gitlab-ctl stop puma
 gitlab-ctl stop sidekiq
