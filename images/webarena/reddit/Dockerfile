@@ -69,7 +69,12 @@ RUN set -eux; \
 # ==============
 FROM php:${PHP_VERSION}-fpm-alpine3.16 AS runtime
 
-COPY --from=mlocati/php-extension-installer /usr/bin/install-php-extensions /usr/bin
+# Pinned by digest, not by the floating :latest tag. A runner holding a stale
+# cached :latest failed this build with `No releases available for package
+# "pecl.php.net/apcu"` — old installer versions resolve extensions through
+# pecl.php.net, which has since been retired. A digest also makes this the only
+# third-party binary in the image traceable to one exact artifact.
+COPY --from=mlocati/php-extension-installer@sha256:b6d3fa381b9ba5cf051117c1c601d6a523b590e534bf3d56eb4fbe352949c138 /usr/bin/install-php-extensions /usr/bin
 
 RUN set -eux; \
     IPE_GD_WITHOUTAVIF=1 install-php-extensions \
@@ -135,7 +140,7 @@ COPY --from=assets /app/public/build /app/public/build
 
 ENV APP_ENV=prod \
     APP_SECRET="change this in prod or die" \
-    DATABASE_URL='pgsql://db_user:db_password@127.0.0.1:5432/db_name?serverVersion=14' \
+    DATABASE_URL='pgsql://postmill:secret@127.0.0.1:5432/postmill?serverVersion=14' \
     LOG_FILE='php://stderr'
 
 RUN set -eux; \
@@ -196,14 +201,23 @@ RUN /bin/sh /audit.sh
 # media tarballs that produced them.
 # =====
 FROM runtime
-COPY --from=audited /app /app
+# One layer per staging bucket keeps every pushed layer under ~10G: the app
+# tree is ~39G because public/submission_images is 38.5G of uploaded images.
+# Bucket count must match BUCKET_COUNT in restore-stage.sh.
+COPY --from=audited /staging/bucket-00/ /app/
+COPY --from=audited /staging/bucket-01/ /app/
+COPY --from=audited /staging/bucket-02/ /app/
+COPY --from=audited /staging/bucket-03/ /app/
+COPY --from=audited /staging/bucket-04/ /app/
+COPY --from=audited /staging/bucket-05/ /app/
+COPY --from=audited /staging/bucket-06/ /app/
 COPY --from=audited /var/lib/postgresql/data /var/lib/postgresql/data
 COPY nginx.conf /etc/nginx/http.d/default.conf
 COPY supervisord.conf /etc/supervisord.conf
 
 ENV APP_ENV=prod \
     APP_SECRET="change this in prod or die" \
-    DATABASE_URL='pgsql://db_user:db_password@127.0.0.1:5432/db_name?serverVersion=14' \
+    DATABASE_URL='pgsql://postmill:secret@127.0.0.1:5432/postmill?serverVersion=14' \
     LOG_FILE='php://stderr'
 
 RUN set -eux; \

@@ -14,7 +14,7 @@ set -eux
 
 PGDATA=/var/lib/postgresql/data
 PGBIN=/usr/libexec/postgresql14
-DB_NAME=db_name
+DB_NAME=postmill
 
 mkdir -p /run/postgresql
 chown -R postgres:postgres /run/postgresql
