@@ -70,8 +70,18 @@ def ensure_dataset(ds: Dataset, datasets_dir: Path, fetch=fetch_curl,
     raise SystemExit(
         f"error: all mirrors exhausted for {ds.filename}: " + "; ".join(errors))
 
-def run_download(refs, datasets_dir: Path, fetch=fetch_curl) -> None:
+def run_download(refs, datasets_dir: Path, fetch=fetch_curl,
+                 prepare_inputs: bool = False) -> None:
+    """Fetch declared datasets.
+
+    Default: everything EXCEPT prepare_input datasets — those are fetched
+    on demand by the prepare script, and only when its derived-inputs cache
+    misses. prepare_inputs=True selects exactly the complement, which is how
+    a derive script asks for its own upstream tar.
+    """
     from builder.manifest import load_manifest
     for ref in refs:
         for ds in load_manifest(ref.path).datasets:
+            if ds.prepare_input != prepare_inputs:
+                continue
             ensure_dataset(ds, datasets_dir, fetch=fetch)

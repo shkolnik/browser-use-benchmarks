@@ -202,3 +202,22 @@ def test_version_tag_uses_commit_date_not_wall_clock(tmp_path):
     sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert docker_mod.version_tag(tmp_path) == f"20200102.{sha}"
+
+
+def test_run_prepare_exports_repo_root_and_image(tmp_path):
+    # The derive script fetches its own upstream tar on a cache miss, so it
+    # needs to find bin/build and name itself as a target.
+    from builder.docker import run_prepare
+    from builder.manifest import Manifest, Prepare
+    from builder.discover import ImageRef
+    imgdir = tmp_path / "img"
+    dsdir = tmp_path / "ds"
+    imgdir.mkdir()
+    dsdir.mkdir()
+    (imgdir / "derive.sh").write_text(
+        '#!/bin/bash\necho "$IMAGE $REPO_ROOT" > "$DATASETS_DIR/derived.tar"\n')
+    m = Manifest(prepare=Prepare("derive.sh", ["derived.tar"]))
+    run_prepare(ImageRef("bench", "svc", imgdir), m, "ghcr.io/x", dsdir)
+    image, repo_root = (dsdir / "derived.tar").read_text().split()
+    assert image == "bench/svc"
+    assert (Path(repo_root) / "bin" / "build").is_file()
