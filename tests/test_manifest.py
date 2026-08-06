@@ -181,3 +181,13 @@ def test_prepare_input_without_prepare_section_fails_loud(tmp_path):
     bad = PREPARE_INPUT.split("[prepare]")[0]
     with pytest.raises(SystemExit, match="prepare_input"):
         load_manifest(write(tmp_path, bad))
+
+
+def test_two_prepare_inputs_rejected(tmp_path):
+    # run_prepare exports ONE PREPARE_INPUT_SHA256 for the derive script's cache
+    # key. A second prepare input would silently not be represented in that key.
+    two = PREPARE_INPUT.replace(
+        'filename = "plain.tar"\nsha256 = "%s"\nurls = ["https://metis/plain.tar"]' % ("b" * 64),
+        'filename = "plain.tar"\nsha256 = "%s"\nurls = ["https://metis/plain.tar"]\nprepare_input = true' % ("b" * 64))
+    with pytest.raises(SystemExit, match="one prepare_input"):
+        load_manifest(write_with_script(tmp_path, two))
