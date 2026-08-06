@@ -67,16 +67,8 @@ jobs:
           # to a provenance-clear build are excluded below; enabling one =
           # deleting its exclude line. Everything else builds on push and
           # reports commit status.
-          # webarena/shopping is the one image with NO derived cache in GHCR
-          # (webarena-shopping-derived does not exist), so it alone takes the
-          # cache-miss path and must re-derive from the 67.6G upstream tar.
-          # Images build sequentially, and shopping sits ahead of shopping-admin
-          # and webshop/server — if it exhausts the runner's disk it fails those
-          # too. Held out so it can run alone, as a dedicated dispatch, once
-          # there is headroom; that run seeds the cache and this line comes out.
           enabled=$(bin/build list "$target" | cut -f1 \
-            | grep -v '^probe/' \
-            | grep -v '^webarena/shopping$')
+            | grep -v '^probe/')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
           if [ '${{ github.event_name }}' = push ]; then
