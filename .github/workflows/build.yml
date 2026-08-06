@@ -30,11 +30,14 @@ on:
     branches: [main]
     paths: ["images/**", "builder/**", "bin/**", ".github/workflows/build.yml"]
 
-# v1 deliberately does NOT implement change-detection on push: the download
-# cache (datasets/ persists on the self-hosted runner) plus docker's own
-# layer cache make a no-change rebuild cheap, and skipping change-detection
-# keeps this workflow index-free (glob discovery only, per design.md).
-# Revisit only if rebuild time actually becomes a problem.
+# Push builds are change-scoped: an image rebuilds only when its own
+# images/<name>/ directory — or a shared input (builder/, bin/, this file) —
+# changed in the pushed range. The original "layer cache makes no-change
+# rebuilds cheap" premise broke on gitlab: its ~50G of build layers never
+# survive the post-job `builder prune --keep-storage 20GB`, so every push
+# paid the full ~70-minute restore stage. Consequence to be aware of: a
+# green push status now attests only the images that push touched.
+# workflow_dispatch keeps explicit-target semantics (`all` really means all).
 
 jobs:
   discover:
@@ -43,6 +46,10 @@ jobs:
       images: ${{ steps.ls.outputs.images }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Change-detection diffs against the pre-push SHA, which a
+          # depth-1 clone doesn't have.
+          fetch-depth: 0
       - id: ls
         run: |
           target='${{ github.event.inputs.target || 'all' }}'
@@ -57,19 +64,44 @@ jobs:
           # to a provenance-clear build are excluded below; enabling one =
           # deleting its exclude line. Everything else builds on push and
           # reports commit status.
-          images=$(bin/build list "$target" | cut -f1 \
+          enabled=$(bin/build list "$target" | cut -f1 \
             | grep -v '^probe/' \
             | grep -v '^webarena/reddit$' \
             | grep -v '^webarena/shopping-admin$' \
             | grep -v '^webarena/shopping$' \
-            | grep -v '^vwa/classifieds$' \
+            | grep -v '^vwa/classifieds$')
+          test -n "$enabled"   # fail loudly if discovery itself found nothing
+
+          if [ '${{ github.event_name }}' = push ]; then
+            before='${{ github.event.before }}'
+            # No usable diff base (branch's first push, or a force-push whose
+            # old tip is gone) → build everything rather than guess.
+            if [ "$before" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$before" 2>/dev/null; then
+              echo "no usable base '$before': building all"
+            else
+              changed=$(git diff --name-only "$before" '${{ github.sha }}')
+              if echo "$changed" | grep -qE '^(builder/|bin/|\.github/workflows/build\.yml)'; then
+                echo "shared build inputs changed: building all"
+              else
+                enabled=$(echo "$enabled" \
+                  | while read -r img; do
+                      echo "$changed" | grep -q "^images/$img/" && echo "$img"
+                    done; true)
+              fi
+            fi
+          fi
+
+          images=$(printf '%s\n' "$enabled" \
             | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
           echo "discovered: $images"
-          test "$images" != "[]"   # fail loudly instead of handing build an empty matrix
           echo "images=$images" >> "$GITHUB_OUTPUT"
 
   build:
     needs: discover
+    # A push can legitimately touch no enabled image (e.g. only an excluded
+    # one); skip instead of handing the matrix an empty list.
+    if: needs.discover.outputs.images != '[]'
     runs-on: self-hosted
     strategy:
       fail-fast: false
