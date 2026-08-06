@@ -63,7 +63,6 @@ jobs:
             | grep -v '^webarena/shopping-admin$' \
             | grep -v '^webarena/shopping$' \
             | grep -v '^vwa/classifieds$' \
-            | grep -v '^webshop/server$' \
             | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
           echo "discovered: $images"
           test "$images" != "[]"   # fail loudly instead of handing build an empty matrix
