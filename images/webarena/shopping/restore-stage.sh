@@ -123,6 +123,10 @@ def partition(path):
     if kb <= LIMIT_KB:
         yield path, kb
         return
+    yield from children(path, kb)
+
+
+def children(path, kb):
     entries = sorted(os.path.join(path, e) for e in os.listdir(path))
     if not entries:
         raise SystemExit(f'{path} is {kb}K with no children to descend into')
@@ -135,7 +139,13 @@ def partition(path):
 
 buckets = []  # list of (used_kb, index)
 assignments = []
-for piece, kb in partition(ROOT):
+# children(), never partition(): ROOT must not be yielded as a piece of
+# itself. relpath(ROOT, ROOT) is '.', so the move lands at bucket-NN/. and
+# shutil nests the whole tree as bucket-NN/<basename> — the final image then
+# gets /app/app/... and nginx's `root /app/public` points at nothing. It only
+# bites when the tree fits in ONE bucket, so a shrinking dataset is all it
+# takes; caught by booting a build made with an empty media tar.
+for piece, kb in children(ROOT, du_kb(ROOT)):
     if kb > LIMIT_KB:
         raise SystemExit(f'single file {piece} is {kb}K, over the layer limit')
     for b in buckets:
