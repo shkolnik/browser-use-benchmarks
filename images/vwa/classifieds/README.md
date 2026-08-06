@@ -1,8 +1,9 @@
 # VWA classifieds — Osclass 8.1.2 appliance
 
-Status **2026-08-06: provenance fully resolved and verified by reconstruction; the image
-is not built yet.** Everything below marked *measured* was read off the running upstream
-stack or a live fetch, not from upstream docs.
+Status **2026-08-06: authored, and booted-and-verified locally at reduced scale; the full
+73 GB build has not run yet** (GitHub Actions was in a major outage). Everything below
+marked *measured* was read off a running stack or a live fetch, not from upstream docs —
+see the last section for exactly what is verified and what only CI can prove.
 
 ## What the upstream image actually is
 
