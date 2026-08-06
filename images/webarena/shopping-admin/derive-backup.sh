@@ -16,11 +16,25 @@ set -euo pipefail
 UPSTREAM_TAR="$DATASETS_DIR/shopping_admin_final_0719.tar"
 UPSTREAM_TAG=shopping_admin_final_0719:latest
 UPSTREAM_SHA=ad607557a79f1bacf83c4661730802bbedc6bcbbf15078352ae59bcec74182b8
-CACHE="$REGISTRY/webarena-shopping-admin-derived:${UPSTREAM_SHA:0:12}"
+# See ../shopping/derive-backup.sh for why the key carries the recipe: without
+# it a recipe fix is inert, because the builder's stamp re-runs this script and
+# this script then cache-hits on an unchanged key and returns the OLD recipe's
+# artifacts before deriving anything.
+RECIPE=r2  # r2: mysqldump/gzip split into two steps (the pipeline hid failures)
+CACHE="$REGISTRY/webarena-shopping-admin-derived:${UPSTREAM_SHA:0:12}-$RECIPE"
 
 DB_NAME=magentodb
 DB_USER=magentouser
 DB_PASS=MyPassword
+
+# Above the cache branch on purpose — cached artifacts are checked too.
+assert_dump_complete() {
+  if ! gzip -dc "$DATASETS_DIR/$1" | tail -c 200 | grep -q '^-- Dump completed'; then
+    echo "derive: $1 carries no mysqldump completion trailer — the dump is truncated; refusing to use it" >&2
+    exit 1
+  fi
+  echo "derive: $1 completion trailer present"
+}
 
 extract_outputs_from_cache() {
   local cid
@@ -32,6 +46,7 @@ extract_outputs_from_cache() {
 echo "=== checking derived-inputs cache: $CACHE ==="
 if docker pull "$CACHE" 2>/dev/null; then
   extract_outputs_from_cache
+  assert_dump_complete shopping_admin_db.sql.gz
   echo "derive: cache hit, outputs extracted"
   exit 0
 fi
@@ -66,9 +81,22 @@ for i in $(seq 1 60); do
 done
 
 echo "=== mysqldump + pub/media + env.php ==="
+# Two steps, not `mysqldump | gzip > f` — see the same block in
+# ../shopping/derive-backup.sh for why the pipeline's exit code lies. This
+# image is the reason a byte floor cannot replace the trailer check: its
+# complete dump is 900,148 gzipped bytes, ~400x smaller than ../shopping's
+# from the same 369-table schema, because the admin benchmark seeds far less
+# row data. Small here is normal; incomplete is what must be caught.
 docker exec shopping-admin-derive sh -c \
-  "mysqldump -u$DB_USER -p$DB_PASS --single-transaction --routines --triggers $DB_NAME | gzip > /tmp/shopping_admin_db.sql.gz"
+  "mysqldump -u$DB_USER -p$DB_PASS --single-transaction --routines --triggers $DB_NAME > /tmp/shopping_admin_db.sql"
+docker exec shopping-admin-derive sh -c \
+  "tail -c 200 /tmp/shopping_admin_db.sql | grep -q '^-- Dump completed'" \
+  || { echo "derive: /tmp/shopping_admin_db.sql has no mysqldump completion trailer — the dump was truncated; refusing to cache it" >&2; exit 1; }
+docker exec shopping-admin-derive gzip -f /tmp/shopping_admin_db.sql
 docker cp shopping-admin-derive:/tmp/shopping_admin_db.sql.gz "$DATASETS_DIR/"
+# Same predicate as the cache-hit path, so both exits from this script are
+# gated identically.
+assert_dump_complete shopping_admin_db.sql.gz
 docker exec shopping-admin-derive tar cf /tmp/shopping_admin_media.tar -C /var/www/magento2/pub media
 docker cp shopping-admin-derive:/tmp/shopping_admin_media.tar "$DATASETS_DIR/"
 docker cp shopping-admin-derive:/var/www/magento2/app/etc/env.php "$DATASETS_DIR/shopping_admin_env.php"
