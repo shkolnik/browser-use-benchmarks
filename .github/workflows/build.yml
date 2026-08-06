@@ -19,6 +19,7 @@ permissions:
   packages: write
   id-token: write
   attestations: write
+  actions: read   # discover reads the last successful run's head SHA
 
 on:
   workflow_dispatch:
@@ -32,7 +33,7 @@ on:
 
 # Push builds are change-scoped: an image rebuilds only when its own
 # images/<name>/ directory — or a shared input (builder/, bin/, this file) —
-# changed in the pushed range. The original "layer cache makes no-change
+# changed since the last successful push build. The original "layer cache makes no-change
 # rebuilds cheap" premise broke on gitlab: its ~50G of build layers never
 # survive the post-job `builder prune --keep-storage 20GB`, so every push
 # paid the full ~70-minute restore stage. Consequence to be aware of: a
@@ -51,6 +52,8 @@ jobs:
           # depth-1 clone doesn't have.
           fetch-depth: 0
       - id: ls
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           target='${{ github.event.inputs.target || 'all' }}'
           # The probe benchmark (images/probe/synthetic) has no [[datasets]]
@@ -73,14 +76,18 @@ jobs:
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
           if [ '${{ github.event_name }}' = push ]; then
-            before='${{ github.event.before }}'
-            # No usable diff base (branch's first push, or a force-push whose
-            # old tip is gone) → build everything rather than guess.
-            if [ "$before" = "0000000000000000000000000000000000000000" ] \
-               || ! git cat-file -e "$before" 2>/dev/null; then
-              echo "no usable base '$before': building all"
+            # Diff against the last SUCCESSFUL push build, not event.before:
+            # the concurrency group keeps only one pending run, so a queued
+            # run can be superseded before it ever ran — its commits would
+            # vanish from an event.before diff and never build. Anchoring on
+            # the last green run keeps every change in scope until a run
+            # actually builds it (and retries failed images on the next push).
+            base=$(gh run list --workflow build-images --branch main --event push \
+              --status success --limit 1 --json headSha -q '.[0].headSha' || true)
+            if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
+              echo "no usable base '$base': building all"
             else
-              changed=$(git diff --name-only "$before" '${{ github.sha }}')
+              changed=$(git diff --name-only "$base" '${{ github.sha }}')
               if echo "$changed" | grep -qE '^(builder/|bin/|\.github/workflows/build\.yml)'; then
                 echo "shared build inputs changed: building all"
               else
