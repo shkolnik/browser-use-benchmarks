@@ -3,7 +3,6 @@ import subprocess
 import time
 import urllib.request
 import urllib.error
-from datetime import date
 from pathlib import Path
 from builder.discover import ImageRef
 from builder.manifest import Manifest, load_manifest
@@ -14,9 +13,13 @@ def run(cmd: list[str]) -> None:
         raise SystemExit(f"error: command failed: {' '.join(cmd)}")
 
 def version_tag(repo_root: Path) -> str:
-    sha = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
-                         capture_output=True, text=True, check=True).stdout.strip()
-    return f"{date.today():%Y%m%d}.{sha}"
+    # Pure function of HEAD — never wall clock. CI computes the tag
+    # independently in the build, push, and clean steps, and a build slow
+    # enough to cross midnight made push retry a tag that was never created.
+    out = subprocess.run(
+        ["git", "-C", str(repo_root), "show", "-s", "--format=%cs %h", "HEAD"],
+        capture_output=True, text=True, check=True).stdout.split()
+    return f"{out[0].replace('-', '')}.{out[1]}"
 
 def build_cmd(ref: ImageRef, m: Manifest, registry: str,
               datasets_dir: Path, version: str) -> list[str]:

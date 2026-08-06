@@ -182,3 +182,23 @@ def test_run_prepare_script_failure_fails_loud(tmp_path):
     m = Manifest(prepare=Prepare("derive.sh", ["x.tar"]))
     with pytest.raises(SystemExit, match="failed"):
         run_prepare(ImageRef("bench", "svc", tmp_path), m, "ghcr.io/x", tmp_path)
+
+
+def test_version_tag_uses_commit_date_not_wall_clock(tmp_path):
+    # The tag must be a pure function of HEAD: CI computes it independently in
+    # the build, push, and clean steps, and a slow build crossing midnight made
+    # push retry a tag that was never created (run 31071250255, webarena/gitlab).
+    import subprocess
+    env = {
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_AUTHOR_DATE": "2020-01-02T03:04:05Z",
+        "GIT_COMMITTER_DATE": "2020-01-02T03:04:05Z",
+        "TZ": "UTC",
+    }
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty",
+                    "-m", "x"], check=True, env=env)
+    sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert docker_mod.version_tag(tmp_path) == f"20200102.{sha}"
