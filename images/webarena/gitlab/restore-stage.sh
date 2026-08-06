@@ -52,6 +52,11 @@ kill "$WRAPPER_PID" 2>/dev/null || true
 echo "=== trim state not worth shipping ==="
 rm -f /var/opt/gitlab/backups/${BK}_gitlab_backup.tar
 rm -rf /var/log/gitlab/*
+# The build's gitlab-ctl stop leaves a root-owned redis dump.rdb (written by a
+# root-context save), which the shipped image's gitlab-redis user cannot read —
+# redis then crash-loops on every fresh boot and the API 500s. It's only
+# cache/queue state; drop it rather than chown it.
+rm -f /var/opt/gitlab/redis/dump.rdb
 
 echo "=== partition /var/opt/gitlab into staging buckets ==="
 # Greedy first-fit by du size; a subtree larger than the limit is descended
