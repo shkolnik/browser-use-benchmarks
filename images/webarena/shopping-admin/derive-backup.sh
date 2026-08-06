@@ -60,8 +60,18 @@ for i in $(seq 1 60); do
 done
 
 echo "=== mysqldump + pub/media + env.php ==="
+# Two steps, not `mysqldump | gzip > f` — see the same block in
+# ../shopping/derive-backup.sh for why the pipeline's exit code lies. This
+# image is the reason a byte floor cannot replace the trailer check: its
+# complete dump is 900,148 gzipped bytes, ~400x smaller than ../shopping's
+# from the same 369-table schema, because the admin benchmark seeds far less
+# row data. Small here is normal; incomplete is what must be caught.
 docker exec shopping-admin-derive sh -c \
-  "mysqldump -u$DB_USER -p$DB_PASS --single-transaction --routines --triggers $DB_NAME | gzip > /tmp/shopping_admin_db.sql.gz"
+  "mysqldump -u$DB_USER -p$DB_PASS --single-transaction --routines --triggers $DB_NAME > /tmp/shopping_admin_db.sql"
+docker exec shopping-admin-derive sh -c \
+  "tail -c 200 /tmp/shopping_admin_db.sql | grep -q '^-- Dump completed'" \
+  || { echo "derive: /tmp/shopping_admin_db.sql has no mysqldump completion trailer — the dump was truncated; refusing to cache it" >&2; exit 1; }
+docker exec shopping-admin-derive gzip -f /tmp/shopping_admin_db.sql
 docker cp shopping-admin-derive:/tmp/shopping_admin_db.sql.gz "$DATASETS_DIR/"
 docker exec shopping-admin-derive tar cf /tmp/shopping_admin_media.tar -C /var/www/magento2/pub media
 docker cp shopping-admin-derive:/tmp/shopping_admin_media.tar "$DATASETS_DIR/"
