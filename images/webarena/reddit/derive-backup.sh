@@ -41,6 +41,24 @@ CACHE="$REGISTRY/webarena-reddit-derived:${UPSTREAM_SHA:0:12}-$RECIPE"
 # `postgres --version` reports 14.7.
 DB_NAME=postmill
 
+# A derived artifact far below what was measured means the derivation
+# half-worked. These are FLOORS chosen well under the measured sizes (499.7 MB
+# gzipped dump, 41.3G media tar), not equality checks — the data may
+# legitimately grow, it may not collapse.
+assert_min() {
+  actual=$(stat -c %s "$DATASETS_DIR/$1")
+  if [ "$actual" -lt "$2" ]; then
+    echo "derive: $1 is $actual bytes, below the $2-byte floor — truncated or empty artifact; refusing to use it" >&2
+    exit 1
+  fi
+  echo "derive: $1 = $actual bytes (floor $2)"
+}
+
+check_floors() {
+  assert_min reddit_db.sql.gz 300000000
+  assert_min reddit_media.tar 30000000000
+}
+
 extract_outputs_from_cache() {
   local cid
   cid=$(docker create "$CACHE" true)
@@ -53,6 +71,11 @@ extract_outputs_from_cache() {
 echo "=== checking derived-inputs cache: $CACHE ==="
 if docker pull "$CACHE" 2>/dev/null; then
   extract_outputs_from_cache
+  # The floors apply to the CACHE path too. They used to guard only fresh
+  # derivation, so this branch returned unchecked artifacts — which is the one
+  # path that can serve a bad blob pushed by an older, buggier revision of this
+  # script. A cache is an input like any other; nothing arrives trusted.
+  check_floors
   echo "derive: cache hit, outputs extracted"
   exit 0
 fi
@@ -99,20 +122,8 @@ docker exec reddit-derive sh -c \
   'cd /var/www/html/public && tar cf /tmp/reddit_media.tar $(ls -d media submission_images 2>/dev/null)'
 docker cp reddit-derive:/tmp/reddit_media.tar "$DATASETS_DIR/"
 
-# Second net, behind the exit codes above: a derived artifact far below what was
-# measured means the derivation half-worked. These are FLOORS chosen well under
-# the measured sizes (499.7 MB gzipped dump, 41.3G media tar), not equality
-# checks — the data may legitimately grow, it may not collapse.
-assert_min() {
-  actual=$(stat -c %s "$DATASETS_DIR/$1")
-  if [ "$actual" -lt "$2" ]; then
-    echo "derive: $1 is $actual bytes, below the $2-byte floor — the derivation produced a truncated or empty artifact; refusing to cache it" >&2
-    exit 1
-  fi
-  echo "derive: $1 = $actual bytes (floor $2)"
-}
-assert_min reddit_db.sql.gz 300000000
-assert_min reddit_media.tar 30000000000
+# Second net, behind the exit codes above (same floors the cache path checks).
+check_floors
 
 docker rm -f reddit-derive
 trap - EXIT

@@ -26,7 +26,27 @@ su-exec postgres psql -v ON_ERROR_STOP=1 -c \
   "CREATE ROLE $DB_USER WITH LOGIN SUPERUSER PASSWORD '$DB_PASS';"
 su-exec postgres createdb -O "$DB_USER" "$DB_NAME"
 
-gzip -dc /tmp/reddit_db.sql.gz | su-exec postgres psql -v ON_ERROR_STOP=1 -q "$DB_NAME"
+# Decompress and load as TWO steps, not `gzip -dc … | psql`. This script is
+# `sh` with `set -eux` and no pipefail, so a pipeline reports only psql's
+# status — and psql exits 0 on an empty stream. Run 31126802473 "loaded" a
+# 499.7 MB dump in seven milliseconds that way and sailed on; the failure did
+# not surface until the audit stage asked for a table. Same lesson the derive
+# script learned about `pg_dump | gzip`, on the other end of the same file.
+gzip -dc /tmp/reddit_db.sql.gz > /tmp/reddit_db.sql
+
+# Third net, behind the builder's stamp and the derive floor: refuse to restore
+# from a dump that is obviously not the one that was measured. Measured here,
+# not estimated — 499,699,542 bytes gzipped expands to 1,333,264,689. The floor
+# is ~60% of that: data may grow, it may not collapse.
+sql_bytes=$(stat -c %s /tmp/reddit_db.sql)
+if [ "$sql_bytes" -lt 800000000 ]; then
+  echo "restore: /tmp/reddit_db.sql is $sql_bytes bytes — far below the measured dump; refusing to restore an empty database" >&2
+  exit 1
+fi
+echo "restore: dump = $sql_bytes bytes"
+
+su-exec postgres psql -v ON_ERROR_STOP=1 -q "$DB_NAME" -f /tmp/reddit_db.sql
+rm -f /tmp/reddit_db.sql
 
 su-exec postgres "$PGBIN/pg_ctl" -D "$PGDATA" -w stop
 
