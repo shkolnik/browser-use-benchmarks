@@ -80,3 +80,44 @@ exactly as `../shopping` handles its 45 GB of media.
 `audit.sh` runs in its own layer and fails the build unless the restored database
 matches the counts measured in the upstream container: `users` **661,782**,
 `forums` **95**, `submissions` **127,391**, `comments` **2,551,513**.
+
+## Task-level A/B against the upstream container — result
+
+Run 2026-08-06, upstream `postmill-populated-exposed-withimg` on :9999 against the rebuilt
+image, comparing rendered HTML with host:port normalised **symmetrically on both sides**
+(an asymmetric `sed` in the first attempt manufactured a `<link rel="canonical">`
+difference that did not exist).
+
+**The `APP_ENV=dev` → `prod` deviation changes nothing an agent sees.** Upstream renders
+**no** web debug toolbar at all — `grep -ci 'sfToolbar|WebProfiler|_wdt'` on a full forum
+page returns 0 — so the concern that motivated flagging this deviation does not
+materialise. Eleven pages (`/`, `/forums`, `/f/AskReddit`, `/f/AskReddit/{new,top}`,
+`?page=2`, `/f/nyc`, `/f/gaming/hot`, `/forums/by_submissions`, `/user/AutoModerator`,
+`/login`) are identical except for two lines that appear on every page:
+
+1. `<meta name="generator" content="Postmill ">` → `content="Postmill a6a9bbc86f44"`.
+   Ours is populated because the build bakes `APP_VERSION`; upstream's is empty because its
+   `.env` holds an unexpanded `$(git …)` snippet. Same ruling as the `apc.enable_cli`
+   redirect: reproducing an artefact of a broken command is cargo cult, not parity.
+2. `routing.js?<hash>` — a content hash, and the content genuinely differs by one route:
+   upstream exposes `bazinga_jstranslation_js`, a dev-environment route. Nothing uses it —
+   pages load the statically dumped `/js/translations/en.js` instead, and the dynamic path
+   `/translations/en.js` **404s on upstream too**. The four assets that pages actually load
+   (`en.js`, `config.js`, `main.*.js`, `translator.min.js`) are byte-identical.
+
+### ⚠️ One real difference, and it is not ours: search ties order non-deterministically
+
+`/search?q=music` returned the same twelve results in the same order **except positions 8
+and 9, which swap**. Both databases are identical (127,391 submissions; the same ranked ID
+list with the same `ts_rank` values), and the two swapped rows are **exactly tied** at
+`ts_rank = 0.7745836`. Postmill's search has no deterministic tiebreak, so tied rows come
+back in whatever order the plan yields — and a cluster restored from `pg_dump` has a
+different physical layout than one that grew row by row.
+
+So this is inherent to rebuilding from a dump rather than a defect in this image, and it is
+**fleet-wide**: any benchmark task whose expected answer depends on the relative order of
+equally-ranked search results is unstable across a rebuild. It is not fixable here without
+changing upstream's query. Recorded rather than papered over.
+
+`submission_images` was empty in the container used for this A/B (it was built with an
+empty media tar), so this compares DOM and text, not image rendering.
