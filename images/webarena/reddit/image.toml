@@ -14,6 +14,7 @@ urls = [
     "http://sandbox-1.lab.jshkol.com:8098/postmill-populated-exposed-withimg.tar",
     "https://archive.org/download/postmill-populated-exposed-withimg/postmill-populated-exposed-withimg.tar",
 ]
+prepare_input = true
 # sha256 computed at salvage time (docs/prior-download/sha256.computed); upstream md5 also
 # verified (docs/prior-download/md5.expected).
 
