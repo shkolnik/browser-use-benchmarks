@@ -306,6 +306,35 @@ def test_smoke_fails_loud_when_image_never_becomes_healthy(tmp_path, monkeypatch
     # ...and it still tears the stack down, or the runner leaks a 73G container.
     assert cmds[-1][-2:] == ["down", "-v"]
 
+def test_smoke_dumps_logs_and_tears_down_when_up_wait_itself_fails(tmp_path, monkeypatch):
+    # The failure mode the rest of this observability work MISSED. `up --wait`
+    # treats a container going unhealthy as terminal, so it — not poll_health —
+    # is what fails when an image never comes up, which is the likeliest smoke
+    # failure there is. It used to run outside the try, so that one case dumped
+    # no logs and left the container running for the next job. gitlab, twice,
+    # 2026-08-07: 1023s of waiting and not a line of evidence either time.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    cmds, dumped = [], []
+
+    def fake_run(cmd):
+        cmds.append(cmd)
+        if "--wait" in cmd:
+            raise SystemExit("error: command failed: docker compose up -d --wait")
+
+    monkeypatch.setattr(docker_mod, "run", fake_run)
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "dump_service_logs",
+                        lambda compose, service, **kw: dumped.append(service))
+    try:
+        docker_mod.run_smoke([ref], repo)
+    except SystemExit as e:
+        assert "--wait" in str(e)
+    else:
+        raise AssertionError("run_smoke swallowed a failing `up --wait`")
+    assert dumped == ["reddit"], "a failing `up --wait` must still leave evidence"
+    assert cmds[-1][-2:] == ["down", "-v"], "a failing `up --wait` must still tear down"
+
 def test_smoke_honours_the_images_own_healthcheck_timeout(tmp_path, monkeypatch):
     # A blanket 120s is what killed shopping: Magento compiles DI on its first
     # request. The per-image budget must actually reach poll_health.
