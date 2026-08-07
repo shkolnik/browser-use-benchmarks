@@ -85,12 +85,11 @@ def load_manifest(image_dir: Path) -> Manifest:
             _die(image_dir, "prepare.outputs is empty")
         prepare = Prepare(prep["script"], list(prep["outputs"]))
     lazy = [d.filename for d in datasets if d.prepare_input]
-    if len(lazy) > 1:
-        _die(image_dir,
-             f"at most one prepare_input dataset is supported, got {len(lazy)} "
-             f"({', '.join(lazy)}): run_prepare exports a single "
-             "PREPARE_INPUT_SHA256 that the derive script keys its cache on, so a "
-             "second one would not be represented in that key")
+    # More than one is allowed: a cache that still sends you back to the
+    # upstream mirror for a second file is not a checkpoint you can rebuild
+    # forward from, however small that file is. run_prepare represents the
+    # whole set in PREPARE_INPUTS_DIGEST (and withholds the singular
+    # PREPARE_INPUT_SHA256), so no key can name a partial identity.
     if lazy and prepare is None:
         _die(image_dir,
              f"datasets marked prepare_input ({', '.join(lazy)}) but there is no "

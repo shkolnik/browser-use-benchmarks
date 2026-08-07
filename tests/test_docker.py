@@ -410,3 +410,90 @@ def test_changing_the_pin_invalidates_the_on_disk_stamp(tmp_path):
     _, m2, _ = _pinned(tmp_path, "d" * 64)
     assert docker_mod.prepare_reuse_check(ref, m2, ds) == \
         "up.tar's pinned sha256 changed since these artifacts were derived"
+
+
+# ==========
+# Multiple prepare inputs. The cache is a checkpoint the build resumes from, so
+# every pinned input must be inside it: one file left out puts a third-party
+# mirror back on the critical path however small it is. The identity of that
+# checkpoint is therefore the WHOLE set, not any one member.
+# ==========
+
+def _pinned_multi(tmp_path, pins, script='env > "$DATASETS_DIR/env.txt"\n'
+                                          'touch "$DATASETS_DIR/out.bin"\n'):
+    from builder.manifest import Dataset
+    img = tmp_path / "images" / "b" / "s"
+    img.mkdir(parents=True, exist_ok=True)
+    (img / "derive.sh").write_text(script)
+    ds = tmp_path / "datasets"
+    ds.mkdir(exist_ok=True)
+    m = Manifest(datasets=[Dataset(n, s, [f"http://x/{n}"], prepare_input=True)
+                           for n, s in pins],
+                 prepare=Prepare("derive.sh", ["out.bin"]))
+    return ImageRef("b", "s", img), m, ds
+
+def _env_of(ds):
+    return dict(l.split("=", 1) for l in (ds / "env.txt").read_text().splitlines()
+                if "=" in l)
+
+def test_multi_input_withholds_the_singular_pin_so_a_partial_key_fails_loud(tmp_path):
+    # The dangerous failure is a script copy-pasted from a single-input image
+    # keying its cache on one pin out of three: the tag would not distinguish
+    # its own artifacts, and a changed second pin would silently re-serve them.
+    # Withholding the variable turns that into a `: "${...:?}"` abort.
+    ref, m, ds = _pinned_multi(tmp_path, [("a.json", "a" * 64), ("b.json", "b" * 64)])
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    env = _env_of(ds)
+    assert "PREPARE_INPUT_SHA256" not in env
+    assert env["PREPARE_INPUTS_DIGEST"]
+
+def test_single_input_keeps_the_pin_and_gets_no_digest(tmp_path):
+    # Generalising must not change the identity of the four images that already
+    # have working GHCR caches — a new key would strand every one of them.
+    ref, m, ds = _pinned_multi(tmp_path, [("a.json", "a" * 64)])
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    env = _env_of(ds)
+    assert env["PREPARE_INPUT_SHA256"] == "a" * 64
+    assert "PREPARE_INPUTS_DIGEST" not in env
+    assert docker_mod.prepare_inputs_digest(m) is None
+
+def test_digest_is_order_independent_but_pin_sensitive(tmp_path):
+    _, m1, _ = _pinned_multi(tmp_path, [("a.json", "a" * 64), ("b.json", "b" * 64)])
+    _, m2, _ = _pinned_multi(tmp_path, [("b.json", "b" * 64), ("a.json", "a" * 64)])
+    _, m3, _ = _pinned_multi(tmp_path, [("a.json", "a" * 64), ("b.json", "c" * 64)])
+    # Reordering the manifest is not a change of inputs...
+    assert docker_mod.prepare_inputs_digest(m1) == docker_mod.prepare_inputs_digest(m2)
+    # ...but republishing any one of them is.
+    assert docker_mod.prepare_inputs_digest(m1) != docker_mod.prepare_inputs_digest(m3)
+
+def test_changing_any_one_pin_invalidates_the_multi_input_stamp(tmp_path):
+    # The single-input equivalent of this is covered above; the multi-input
+    # hazard is that a change to the SMALLEST input is the easiest to miss.
+    ref, m, ds = _pinned_multi(tmp_path, [("a.json", "a" * 64), ("b.json", "b" * 64)])
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+    _, m2, _ = _pinned_multi(tmp_path, [("a.json", "a" * 64), ("b.json", "z" * 64)])
+    assert docker_mod.prepare_reuse_check(ref, m2, ds) == \
+        "the pinned prepare_input set changed since these artifacts were derived"
+
+def test_stamps_written_before_multi_input_support_stay_valid(tmp_path):
+    # Every stamp on the runner predates the new field. If its absence read as
+    # a mismatch, landing this would re-derive the whole fleet — 63G+ per image
+    # for a format change that did not alter a single byte of their inputs.
+    ref, m, ds = _pinned_multi(tmp_path, [("a.json", "a" * 64)])
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    stamp = docker_mod.prepare_stamp_path(ds, ref)
+    old = json.loads(stamp.read_text())
+    del old["prepare_inputs_digest"]
+    stamp.write_text(json.dumps(old))
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+
+def test_exported_pins_are_sha256sum_check_format(tmp_path):
+    # webshop's derive script pipes this straight into `sha256sum -c` to verify
+    # a cache hit, which only works if the format is exactly right.
+    ref, m, ds = _pinned_multi(tmp_path, [("a.json", "a" * 64), ("b.json", "b" * 64)])
+    (ds / "a.json").write_bytes(b"")
+    docker_mod.run_prepare(ref, m, "ghcr.io/x", ds)
+    lines = _env_of(ds)["PREPARE_INPUT_PINS"].split("\n") if "\n" in _env_of(ds).get(
+        "PREPARE_INPUT_PINS", "") else [_env_of(ds)["PREPARE_INPUT_PINS"]]
+    assert lines[0] == "a" * 64 + "  a.json"
