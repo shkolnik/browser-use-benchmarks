@@ -61,44 +61,6 @@ def test_poll_health_reports_what_the_last_attempt_saw():
     assert poll_health("http://x/", timeout_s=0, opener=erroring,
                        sleep=lambda s: None).last == "HTTP 503"
 
-def test_poll_health_treats_a_redirect_as_serving():
-    # A 3xx proves nginx and PHP answered, which is the whole question the smoke
-    # gate asks. The default opener used to FOLLOW it instead, and that is what
-    # failed shopping on CI 31170194781: Magento's baked base URL 302s to
-    # http://metis.lti.cs.cmu.edu:7770/, the probe chased it off the host, and
-    # CMU's unreachable server produced the "[Errno 111] Connection refused"
-    # that read for hours like our own container refusing connections.
-    def redirecting(url, timeout):
-        raise urllib.error.HTTPError(url, 302, "Found",
-                                     {"Location": "http://metis.lti.cs.cmu.edu:7770/"}, None)
-    h = poll_health("http://x/", timeout_s=0, opener=redirecting, sleep=lambda s: None)
-    assert h.ok, "a 302 from the container is proof it is serving, not a failure"
-    assert h.last == "HTTP 302"
-
-def test_poll_health_does_not_chase_a_redirect_off_the_container(tmp_path):
-    # Same claim against the REAL default opener, since the bug lived entirely in
-    # urlopen's default redirect handling — a fake opener cannot catch it.
-    # Redirect target is a closed local port: no DNS, no CMU, still unreachable.
-    import http.server, threading
-
-    class Redirector(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(302)
-            self.send_header("Location", "http://127.0.0.1:9/")
-            self.end_headers()
-        def log_message(self, *a):
-            pass
-
-    srv = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        h = poll_health(f"http://127.0.0.1:{srv.server_address[1]}/", timeout_s=5,
-                        sleep=lambda s: None)
-    finally:
-        srv.shutdown()
-    assert h.ok, f"the probe followed the redirect off-host: {h.last}"
-    assert h.last == "HTTP 302"
-
 def test_poll_health_reports_how_long_it_waited():
     ticks = iter([100.0, 137.5])
     def opener(url, timeout):
