@@ -19,7 +19,7 @@ script = "derive-backup.sh"
 outputs = ["shopping_db.sql.gz", "shopping_media.tar", "shopping_env.php"]
 
 [service]
-healthcheck = "http://localhost:7770/"
+healthcheck = "http://127.0.0.1:7770/"
 # The build deliberately never runs setup:di:compile (see the Dockerfile banner:
 # the dataset has no core setup_module rows), so the generated/ classes do not
 # exist in the image and Magento compiles them on the FIRST request. Boot itself

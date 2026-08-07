@@ -79,6 +79,10 @@ do
 done
 runuser -u app -- php bin/magento cache:flush
 
+# nginx is autostart=false (entrypoint.sh starts it at runtime once
+# HTTP_HOST/HTTP_PORT are known); the in-build validation still needs it.
+sctl start nginx
+
 echo "=== in-build validation ==="
 # localhost, not 127.0.0.1: per the note above, adminhtml answers only under the
 # host in base_url. The storefront check below is the one that proves the redirect

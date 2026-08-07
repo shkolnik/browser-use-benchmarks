@@ -51,7 +51,13 @@ RUN sed -i 's/^;user = app/user = app/; s/^;group = app/group = app/' /usr/local
  && chown -R elasticsearch:elasticsearch /etc/elasticsearch
 
 EXPOSE 7770
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+# --chmod so the mode is a property of the build, not of the checkout: a COPY
+# that inherited a non-executable file failed with "Permission denied" before
+# any of the validation below could run.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+# Not supervisord directly: HTTP_HOST/HTTP_PORT have to be validated before any
+# service starts, and base_url written before nginx serves its first page.
+CMD ["/entrypoint.sh"]
 
 # --- Magento 2.4.6 code tree, deterministically from the committed lockfile ---
 FROM runtime AS code
