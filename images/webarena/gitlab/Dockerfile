@@ -34,6 +34,13 @@ COPY --from=restore /etc/gitlab /etc/gitlab
 # away from being silently incomplete again, and this is the failure mode that
 # produces a container which looks up and does nothing.
 COPY --from=restore /opt/gitlab /opt/gitlab
+# And the log tree, for the same reason: reconfigure creates a directory per
+# service (plus gitlab-rails and gitlab-shell) with the right owner, the base
+# image ships only /var/log/gitlab/reconfigure, and this image never
+# reconfigures at boot. Without it svlogd cannot start, nginx will not run, and
+# puma crash-loops opening gitlab-rails/log/grpc.log. Carries no log content —
+# restore-stage.sh deletes the files and keeps the directories.
+COPY --from=restore /var/log/gitlab /var/log/gitlab
 # One layer per staging bucket keeps every pushed layer under ~10G (GHCR's
 # comfortable ceiling). Bucket count must match BUCKET_COUNT in restore-stage.sh.
 COPY --from=restore /staging/bucket-00/ /var/opt/gitlab/
