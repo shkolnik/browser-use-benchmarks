@@ -21,7 +21,11 @@ set -euo pipefail
 
 UPSTREAM_TAR="$DATASETS_DIR/postmill-populated-exposed-withimg.tar"
 UPSTREAM_TAG=postmill-populated-exposed-withimg:latest
-UPSTREAM_SHA=6ff70f73bc808b4cd9faf4e925dab2a4ae3cc5f9d0e9755360500607973a0dc5
+# The pin comes from image.toml via run_prepare — never a second copy here.
+# It is the cache tag AND part of the on-disk provenance stamp, so updating the
+# manifest alone is enough to strand every artifact derived from the old tar.
+: "${PREPARE_INPUT_SHA256:?run_prepare must export the pinned upstream sha256}"
+UPSTREAM_SHA="$PREPARE_INPUT_SHA256"
 # The cache key covers the RECIPE as well as the input. Keying on the upstream
 # tar's sha alone is wrong twice over: this script decides which database it
 # dumps (it dumped the wrong one at r1, and cached the empty result), so two
