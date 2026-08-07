@@ -23,7 +23,7 @@ for i in $(seq 1 60); do
 done
 for i in $(seq 1 120); do
   curl -fs http://127.0.0.1:9200/ >/dev/null 2>&1 && break
-  [ "$i" = 120 ] && { echo "elasticsearch never came up" >&2; tail -50 /var/log/supervisor/elasticsearch.log >&2 || true; exit 1; }
+  [ "$i" = 120 ] && { echo "elasticsearch never came up" >&2; tail -n 50 /var/log/supervisor/elasticsearch.log >&2 || true; exit 1; }
   sleep 2
 done
 echo "mariadb + elasticsearch up"
@@ -54,11 +54,37 @@ runuser -u app -- php bin/magento module:enable --all
 runuser -u app -- php bin/magento app:config:import -n
 test -f app/etc/config.php
 runuser -u app -- php bin/magento indexer:reindex
+
+# Rebase the restored dataset off CMU's deployment. core_config_data still names
+# metis.lti.cs.cmu.edu:7770, and Magento answers any other host with a 302 to it,
+# so the image demanded to be reached under a hostname that does not resolve here.
+# redirect_to_base=0 is what actually stops the bounce: it disables the base-URL
+# comparison, after which the storefront serves whatever Host it is given
+# (verified live — localhost, 127.0.0.1 and an invented domain all return the
+# home page). base_url still has to name something reachable, because it is what
+# generated links and static asset URLs point at.
+#
+# This is deliberately DB config, not app/etc/env.php. Magento hashes env.php's
+# `system` section and compares it against the hash stored in the `flag` table on
+# EVERY request, so a `system` block that varies per request — say, one computing
+# base_url from $_SERVER['HTTP_HOST'] — recomputes a different hash each time and
+# answers 500 with "The configuration file has changed". That failure mode was
+# real, not hypothetical; DB config is not policed by that check.
+for setting in \
+  "web/unsecure/base_url http://localhost:7770/" \
+  "web/secure/base_url http://localhost:7770/" \
+  "web/url/redirect_to_base 0"
+do
+  # shellcheck disable=SC2086 # deliberate word split: path and value are separate args
+  runuser -u app -- php bin/magento config:set $setting
+done
 runuser -u app -- php bin/magento cache:flush
 
 echo "=== in-build validation ==="
+# Deliberately 127.0.0.1 rather than the configured localhost base_url: this
+# asserts the host-agnostic serving above, and would fail if the 302 came back.
 code=$(curl -s -o /tmp/home.html -w '%{http_code}' http://127.0.0.1:7770/)
-[ "$code" = 200 ] || { echo "storefront returned $code" >&2; tail -50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
+[ "$code" = 200 ] || { echo "storefront returned $code" >&2; tail -n 50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
 grep -q "One Stop Market" /tmp/home.html || { echo "storefront 200 but no 'One Stop Market'" >&2; exit 1; }
 scode=$(curl -s -o /tmp/search.html -w '%{http_code}' 'http://127.0.0.1:7770/catalogsearch/result/?q=toothbrush')
 [ "$scode" = 200 ] && grep -q 'product-item-link' /tmp/search.html \
@@ -73,7 +99,7 @@ sctl stop mariadb
 # shut-down datadir, not one that looks like a crash.
 if pgrep -x mariadbd >/dev/null; then echo "mariadbd still running after stop" >&2; exit 1; fi
 grep -q "Shutdown complete" /var/log/supervisor/mariadb.log \
-  || { echo "no 'Shutdown complete' in mariadb log" >&2; tail -20 /var/log/supervisor/mariadb.log >&2; exit 1; }
+  || { echo "no 'Shutdown complete' in mariadb log" >&2; tail -n 20 /var/log/supervisor/mariadb.log >&2; exit 1; }
 sctl shutdown || true
 wait "$SUP_PID" 2>/dev/null || true
 
