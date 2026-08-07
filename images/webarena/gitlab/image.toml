@@ -2,14 +2,13 @@
 filename = "gitlab-populated-final-port8023.tar"
 sha256 = "6269a90527a63c12d86fa4a5da8c5404553b78e75c5123712818c1b6d9f0972d"
 urls = [
-    "http://sandbox-1.lab.jshkol.com:8098/gitlab-populated-final-port8023.tar",
     "http://metis.lti.cs.cmu.edu/webarena-images/gitlab-populated-final-port8023.tar",
 ]
 prepare_input = true
-# sha256 computed at salvage time (docs/prior-download/sha256.computed). The lab mirror
-# (a sha256-identical copy of the metis download) is listed first: metis serves at
-# ~3.6MB/s (~6h for this tar) and is flaky — see docs/prior-download/fetch.sh for the
-# historical retry approach. The pinned hash makes the mirrors interchangeable.
+# sha256 computed at salvage time (docs/prior-download/sha256.computed). metis is the
+# only source now that the lab mirror is gone, and it serves at ~3.6MB/s (~6h for this
+# tar) and is flaky — see docs/prior-download/fetch.sh for the historical retry
+# approach. Reaching it at all means the derived-inputs cache missed.
 
 # Rebuilt from the official gitlab-ce release + a gitlab-backup restore instead
 # of shipping the upstream docker-save image verbatim: provenance-clear layers,
