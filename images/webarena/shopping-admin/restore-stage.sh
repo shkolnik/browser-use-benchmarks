@@ -60,7 +60,7 @@ runuser -u app -- php bin/magento indexer:reindex
 runuser -u app -- php bin/magento cache:flush
 
 echo "=== in-build validation ==="
-code=$(curl -s -o /tmp/admin.html -w '%{http_code}' http://127.0.0.1:7780/admin)
+code=$(curl -s -o /tmp/admin.html -w '%{http_code}' -H 'Host: metis.lti.cs.cmu.edu:7780' http://127.0.0.1:7780/admin)
 [ "$code" = 200 ] || { echo "admin panel returned $code" >&2; tail -50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
 # name="login[username]" is Magento core's admin login field (stable across
 # 2.x — referenced by the form's own JS validation), a more reliable marker
