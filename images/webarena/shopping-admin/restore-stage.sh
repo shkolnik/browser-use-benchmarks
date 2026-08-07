@@ -23,7 +23,7 @@ for i in $(seq 1 60); do
 done
 for i in $(seq 1 120); do
   curl -fs http://127.0.0.1:9200/ >/dev/null 2>&1 && break
-  [ "$i" = 120 ] && { echo "elasticsearch never came up" >&2; tail -50 /var/log/supervisor/elasticsearch.log >&2 || true; exit 1; }
+  [ "$i" = 120 ] && { echo "elasticsearch never came up" >&2; tail -n 50 /var/log/supervisor/elasticsearch.log >&2 || true; exit 1; }
   sleep 2
 done
 echo "mariadb + elasticsearch up"
@@ -57,11 +57,38 @@ runuser -u app -- php bin/magento module:enable --all
 runuser -u app -- php bin/magento app:config:import -n
 test -f app/etc/config.php
 runuser -u app -- php bin/magento indexer:reindex
+
+# Rebase the restored dataset off CMU's deployment — see ../shopping/restore-stage.sh
+# for the full reasoning, including why this is DB config and NOT app/etc/env.php
+# (a per-request-varying `system` block fails Magento's config-hash check with a
+# 500 on every request; that was measured, not theorised).
+#
+# One honest limitation, measured on this image: redirect_to_base=0 makes the
+# STOREFRONT serve any Host, but the ADMIN panel remains reachable only under the
+# host named in base_url — every other Host falls through to the frontend area and
+# renders its 404 instead of the login form. So the admin panel is pinned to
+# localhost:7780 here, which is the port compose publishes and the URL
+# image.toml's healthcheck uses. Making adminhtml host-agnostic is unsolved.
+for setting in \
+  "web/unsecure/base_url http://localhost:7780/" \
+  "web/secure/base_url http://localhost:7780/" \
+  "web/url/redirect_to_base 0"
+do
+  # shellcheck disable=SC2086 # deliberate word split: path and value are separate args
+  runuser -u app -- php bin/magento config:set $setting
+done
 runuser -u app -- php bin/magento cache:flush
 
 echo "=== in-build validation ==="
-code=$(curl -s -o /tmp/admin.html -w '%{http_code}' http://127.0.0.1:7780/admin)
-[ "$code" = 200 ] || { echo "admin panel returned $code" >&2; tail -50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
+# localhost, not 127.0.0.1: per the note above, adminhtml answers only under the
+# host in base_url. The storefront check below is the one that proves the redirect
+# to CMU is gone.
+code=$(curl -s -o /tmp/admin.html -w '%{http_code}' http://localhost:7780/admin)
+[ "$code" = 200 ] || { echo "admin panel returned $code" >&2; tail -n 50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
+# Any Host must reach the app rather than being bounced to CMU. The storefront is
+# the surface that can prove it, since adminhtml is host-pinned.
+scode=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7780/)
+[ "$scode" = 200 ] || { echo "storefront on 127.0.0.1 returned $scode (host-agnostic serving broken)" >&2; exit 1; }
 # name="login[username]" is Magento core's admin login field (stable across
 # 2.x — referenced by the form's own JS validation), a more reliable marker
 # than any theme-rendered copy text.
@@ -82,7 +109,7 @@ sctl stop mariadb
 # shut-down datadir, not one that looks like a crash.
 if pgrep -x mariadbd >/dev/null; then echo "mariadbd still running after stop" >&2; exit 1; fi
 grep -q "Shutdown complete" /var/log/supervisor/mariadb.log \
-  || { echo "no 'Shutdown complete' in mariadb log" >&2; tail -20 /var/log/supervisor/mariadb.log >&2; exit 1; }
+  || { echo "no 'Shutdown complete' in mariadb log" >&2; tail -n 20 /var/log/supervisor/mariadb.log >&2; exit 1; }
 sctl shutdown || true
 wait "$SUP_PID" 2>/dev/null || true
 

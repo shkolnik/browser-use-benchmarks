@@ -94,16 +94,8 @@ return [
     'directories' => [
         'document_root_is_pub' => true
     ],
-    // Serve whatever HTTP host the request arrived on. The restored dataset's
-    // core_config_data still names CMU's original deployment, and Magento
-    // answers any other host with a 302 to it — the image demanded to be
-    // reached as metis.lti.cs.cmu.edu or not at all, which is why the smoke
-    // gate could only ever reach it by spoofing a Host header. Deployment
-    // config outranks the database, so this overrides the baked host without
-    // rewriting the data. We run no name-based virtual hosts, so there is no
-    // hostname for this image to have an opinion about.
     'downloadable_domains' => [
-        $_SERVER['HTTP_HOST'] ?? 'localhost:7780'
+        'metis.lti.cs.cmu.edu'
     ],
     'system' => [
         'default' => [
@@ -112,24 +104,6 @@ return [
                     'engine' => 'elasticsearch7',
                     'elasticsearch7_server_hostname' => '127.0.0.1',
                     'elasticsearch7_server_port' => '9200'
-                ]
-            ],
-            'web' => [
-                // Generated absolute URLs follow the caller's own host, so a
-                // page fetched over localhost, an IP or a container name links
-                // back to the same place it was fetched from. The fallback
-                // covers CLI bootstraps (bin/magento, cron), which have no
-                // request and never emit links.
-                'unsecure' => [
-                    'base_url' => 'http://' . ($_SERVER['HTTP_HOST'] ?? 'localhost:7780') . '/'
-                ],
-                'secure' => [
-                    'base_url' => 'http://' . ($_SERVER['HTTP_HOST'] ?? 'localhost:7780') . '/'
-                ],
-                // ...and never bounce a request to base_url for arriving under
-                // a different name. This is the setting that emitted the 302.
-                'url' => [
-                    'redirect_to_base' => 0
                 ]
             ]
         ]
