@@ -57,10 +57,10 @@ runuser -u app -- php bin/magento indexer:reindex
 runuser -u app -- php bin/magento cache:flush
 
 echo "=== in-build validation ==="
-code=$(curl -s -o /tmp/home.html -w '%{http_code}' -H 'Host: metis.lti.cs.cmu.edu:7770' http://127.0.0.1:7770/)
+code=$(curl -s -o /tmp/home.html -w '%{http_code}' http://127.0.0.1:7770/)
 [ "$code" = 200 ] || { echo "storefront returned $code" >&2; tail -50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
 grep -q "One Stop Market" /tmp/home.html || { echo "storefront 200 but no 'One Stop Market'" >&2; exit 1; }
-scode=$(curl -s -o /tmp/search.html -w '%{http_code}' -H 'Host: metis.lti.cs.cmu.edu:7770' 'http://127.0.0.1:7770/catalogsearch/result/?q=toothbrush')
+scode=$(curl -s -o /tmp/search.html -w '%{http_code}' 'http://127.0.0.1:7770/catalogsearch/result/?q=toothbrush')
 [ "$scode" = 200 ] && grep -q 'product-item-link' /tmp/search.html \
   || { echo "catalog search not working (code $scode)" >&2; exit 1; }
 echo "storefront + search OK in-build"
