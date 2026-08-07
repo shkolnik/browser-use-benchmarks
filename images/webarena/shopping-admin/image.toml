@@ -17,3 +17,7 @@ outputs = ["shopping_admin_db.sql.gz", "shopping_admin_media.tar", "shopping_adm
 
 [service]
 healthcheck = "http://localhost:7780/admin"
+# Same Magento first-request DI compile as shopping — and shopping-admin has
+# never been through the smoke gate at all (it was built before that gate
+# landed), so this is a prediction the next build gets to falsify.
+healthcheck_timeout_s = 900
