@@ -6,6 +6,7 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+from typing import NamedTuple
 from builder.discover import ImageRef
 from builder.manifest import Manifest, load_manifest
 
@@ -233,24 +234,56 @@ def run_push(refs, registry: str, repo_root: Path) -> None:
         for cmd in push_cmds(ref, registry, version):
             run_with_retry(cmd)
 
+class Health(NamedTuple):
+    """Outcome of polling a healthcheck URL.
+
+    Truthy on success so callers read as before, but it also carries how long
+    the wait took and what the LAST attempt saw. A bare False cannot tell a
+    container that never opened the port from one that answered 503 the whole
+    time, and those want opposite fixes.
+    """
+    ok: bool
+    elapsed_s: float
+    last: str
+
+    def __bool__(self) -> bool:
+        return self.ok
+
 def poll_health(url: str, timeout_s: int = 120,
-                opener=urllib.request.urlopen, sleep=time.sleep) -> bool:
-    deadline = time.monotonic() + timeout_s
+                opener=urllib.request.urlopen, sleep=time.sleep,
+                clock=time.monotonic) -> Health:
+    start = clock()
+    deadline = start + timeout_s
+    last = "no attempt completed"
     while True:
         try:
             with opener(url, timeout=10) as resp:
+                last = f"HTTP {resp.status}"
                 if 200 <= resp.status < 400:
-                    return True
-        except (urllib.error.URLError, ConnectionError, OSError, TimeoutError):
-            pass
-        if time.monotonic() >= deadline:
-            return False
+                    return Health(True, clock() - start, last)
+        except (urllib.error.URLError, ConnectionError, OSError, TimeoutError) as e:
+            # urllib raises HTTPError (a URLError) for >=400, so an error PAGE
+            # lands here too — keep the status rather than the exception text.
+            last = f"HTTP {e.code}" if getattr(e, "code", None) else f"{type(e).__name__}: {e}"
+        if clock() >= deadline:
+            return Health(False, clock() - start, last)
         sleep(2)
 
 def compose_services(compose: Path, check_output=subprocess.check_output) -> list[str]:
     out = check_output(
         ["docker", "compose", "-f", str(compose), "config", "--services"], text=True)
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+def dump_service_logs(compose: Path, service: str, tail: str = "400",
+                      runner=subprocess.run) -> None:
+    # Best-effort: this runs on a path that is already failing, so it must not
+    # replace the real error with one of its own.
+    print(f"=== docker compose logs (last {tail} lines) for {service} ===")
+    try:
+        runner(["docker", "compose", "-f", str(compose), "logs",
+                "--tail", tail, service])
+    except Exception as e:
+        print(f"(could not collect logs: {e})")
 
 def run_smoke(refs, repo_root: Path) -> None:
     benches = sorted({r.benchmark for r in refs})
@@ -276,11 +309,21 @@ def run_smoke(refs, repo_root: Path) -> None:
              *[r.service for r in want]])
         try:
             for ref in want:
-                hc = load_manifest(ref.path).healthcheck
+                man = load_manifest(ref.path)
+                hc = man.healthcheck
                 if hc is None:
                     raise SystemExit(f"error: {ref.name} has no [service].healthcheck in image.toml")
-                if not poll_health(hc):
-                    raise SystemExit(f"error: smoke FAILED — {ref.name} never became healthy at {hc}")
-                print(f"{ref.name}: healthy at {hc}")
+                health = poll_health(hc, timeout_s=man.healthcheck_timeout_s)
+                if not health:
+                    # Dump the container's own logs BEFORE the finally-block
+                    # tears it down with `down -v`. Without this a smoke failure
+                    # destroys the only evidence of why it failed, and the image
+                    # is deleted by the cleanup step straight after — so the
+                    # next diagnosis costs a full rebuild.
+                    dump_service_logs(compose, ref.service)
+                    raise SystemExit(
+                        f"error: smoke FAILED — {ref.name} never became healthy at {hc} "
+                        f"after {health.elapsed_s:.0f}s (last attempt: {health.last})")
+                print(f"{ref.name}: healthy at {hc} after {health.elapsed_s:.0f}s")
         finally:
             run(["docker", "compose", "-f", str(compose), "down", "-v"])

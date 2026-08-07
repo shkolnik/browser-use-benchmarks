@@ -33,6 +33,11 @@ class Prepare:
 class Manifest:
     datasets: list[Dataset] = field(default_factory=list)
     healthcheck: str | None = None
+    # How long the image gets to answer that URL after `compose up`. The default
+    # suits an app that only has to open a listening socket; an image that does
+    # real work on its first request declares its own budget rather than every
+    # image paying for the slowest one.
+    healthcheck_timeout_s: int = 120
     build_args: dict[str, str] = field(default_factory=dict)
     source: Source = Source(kind="build")
     prepare: Prepare | None = None
@@ -97,6 +102,8 @@ def load_manifest(image_dir: Path) -> Manifest:
     return Manifest(
         datasets=datasets,
         healthcheck=data.get("service", {}).get("healthcheck"),
+        healthcheck_timeout_s=int(
+            data.get("service", {}).get("healthcheck_timeout_s", 120)),
         build_args={k: str(v) for k, v in data.get("build", {}).get("args", {}).items()},
         source=Source(kind=kind, dataset=src.get("dataset"), tag=src.get("tag")),
         prepare=prepare,
