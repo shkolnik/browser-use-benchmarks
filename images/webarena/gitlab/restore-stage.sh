@@ -51,7 +51,18 @@ kill "$WRAPPER_PID" 2>/dev/null || true
 
 echo "=== trim state not worth shipping ==="
 rm -f /var/opt/gitlab/backups/${BK}_gitlab_backup.tar
-rm -rf /var/log/gitlab/*
+# Log CONTENT is not worth shipping; the log DIRECTORY TREE is load-bearing.
+# `gitlab-ctl reconfigure` creates /var/log/gitlab/<name> for each service AND
+# for non-service consumers (gitlab-rails, gitlab-shell), owned by the account
+# that writes there. A pristine gitlab-ce ships only /var/log/gitlab/reconfigure
+# and this image never reconfigures at boot, so whatever this stage deletes is
+# gone for good. Deleting the tree wedges the image three ways, each verified
+# live 2026-08-07: svlogd cannot start, so every service sits `down: log`;
+# nginx refuses to run at all and binds nothing; and puma crash-loops on
+# ENOENT for gitlab-rails/log/grpc.log. Recreating the directories afterwards
+# is NOT equivalent — they come back root-owned and puma then fails the same
+# way with EACCES.
+find /var/log/gitlab -type f -delete
 # The build's gitlab-ctl stop leaves a root-owned redis dump.rdb (written by a
 # root-context save), which the shipped image's gitlab-redis user cannot read —
 # redis then crash-loops on every fresh boot and the API 500s. It's only
