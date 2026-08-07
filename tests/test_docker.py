@@ -1,4 +1,5 @@
 import json
+import urllib.error
 from pathlib import Path
 from builder.discover import ImageRef
 from builder.manifest import Manifest, Prepare, Source
@@ -46,6 +47,27 @@ def test_poll_health_times_out():
     def opener(url, timeout):
         raise ConnectionRefusedError()
     assert not poll_health("http://x/", timeout_s=0, opener=opener, sleep=lambda s: None)
+
+def test_poll_health_reports_what_the_last_attempt_saw():
+    # "not healthy" is not a diagnosis. A refused connection (nothing listening)
+    # and a 503 (listening, still warming up) want opposite fixes.
+    def refused(url, timeout):
+        raise ConnectionRefusedError()
+    assert "ConnectionRefusedError" in poll_health(
+        "http://x/", timeout_s=0, opener=refused, sleep=lambda s: None).last
+
+    def erroring(url, timeout):
+        raise urllib.error.HTTPError("http://x/", 503, "Service Unavailable", {}, None)
+    assert poll_health("http://x/", timeout_s=0, opener=erroring,
+                       sleep=lambda s: None).last == "HTTP 503"
+
+def test_poll_health_reports_how_long_it_waited():
+    ticks = iter([100.0, 137.5])
+    def opener(url, timeout):
+        return FakeResp(200)
+    h = poll_health("http://x/", timeout_s=900, opener=opener,
+                    sleep=lambda s: None, clock=lambda: next(ticks))
+    assert h.ok and h.elapsed_s == 37.5
 
 from builder.docker import run_with_retry
 import pytest
@@ -233,7 +255,8 @@ def test_smoke_brings_up_only_the_targeted_service(tmp_path, monkeypatch):
     monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
     monkeypatch.setattr(docker_mod, "compose_services",
                         lambda p: ["shopping", "shopping-admin", "reddit", "gitlab"])
-    monkeypatch.setattr(docker_mod, "poll_health", lambda url: True)
+    monkeypatch.setattr(docker_mod, "poll_health",
+                        lambda url, timeout_s=120: docker_mod.Health(True, 1.0, "HTTP 200"))
     docker_mod.run_smoke([ref], repo)
     up = cmds[0]
     assert up[-1] == "reddit"
@@ -248,7 +271,8 @@ def test_smoke_fails_loud_when_compose_lacks_the_service(tmp_path, monkeypatch):
     ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
     monkeypatch.setattr(docker_mod, "run", lambda c: None)
     monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["postmill"])
-    monkeypatch.setattr(docker_mod, "poll_health", lambda url: True)
+    monkeypatch.setattr(docker_mod, "poll_health",
+                        lambda url, timeout_s=120: docker_mod.Health(True, 1.0, "HTTP 200"))
     try:
         docker_mod.run_smoke([ref], repo)
     except SystemExit as e:
@@ -262,15 +286,41 @@ def test_smoke_fails_loud_when_image_never_becomes_healthy(tmp_path, monkeypatch
     cmds = []
     monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
     monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
-    monkeypatch.setattr(docker_mod, "poll_health", lambda url: False)
+    dumped = []
+    monkeypatch.setattr(docker_mod, "poll_health",
+                        lambda url, timeout_s=120: docker_mod.Health(False, 42.0, "HTTP 503"))
+    monkeypatch.setattr(docker_mod, "dump_service_logs",
+                        lambda compose, service, **kw: dumped.append((compose, service)))
     try:
         docker_mod.run_smoke([ref], repo)
     except SystemExit as e:
         assert "smoke FAILED" in str(e)
+        # The failure must say what it SAW. "never became healthy" alone sent a
+        # real diagnosis to the back of a multi-hour rebuild.
+        assert "HTTP 503" in str(e) and "42s" in str(e)
     else:
         raise AssertionError("run_smoke passed an image that never served")
+    # The logs are the evidence, and `down -v` destroys them — so the dump has
+    # to have already happened by the time we tear down.
+    assert [s for _, s in dumped] == ["reddit"]
     # ...and it still tears the stack down, or the runner leaks a 73G container.
     assert cmds[-1][-2:] == ["down", "-v"]
+
+def test_smoke_honours_the_images_own_healthcheck_timeout(tmp_path, monkeypatch):
+    # A blanket 120s is what killed shopping: Magento compiles DI on its first
+    # request. The per-image budget must actually reach poll_health.
+    repo = _smoke_repo(tmp_path)
+    toml = repo / "images" / "webarena" / "reddit" / "image.toml"
+    toml.write_text(toml.read_text() + "\nhealthcheck_timeout_s = 900\n")
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    seen = []
+    monkeypatch.setattr(docker_mod, "run", lambda c: None)
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "poll_health",
+                        lambda url, timeout_s=120: seen.append(timeout_s)
+                        or docker_mod.Health(True, 1.0, "HTTP 200"))
+    docker_mod.run_smoke([ref], repo)
+    assert seen == [900]
 
 def test_compose_services_parses_docker_output():
     out = "shopping\nshopping-admin\nreddit\ngitlab\n"

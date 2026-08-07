@@ -11,7 +11,6 @@
 filename = "postmill-populated-exposed-withimg.tar"
 sha256 = "6ff70f73bc808b4cd9faf4e925dab2a4ae3cc5f9d0e9755360500607973a0dc5"
 urls = [
-    "http://sandbox-1.lab.jshkol.com:8098/postmill-populated-exposed-withimg.tar",
     "https://archive.org/download/postmill-populated-exposed-withimg/postmill-populated-exposed-withimg.tar",
 ]
 prepare_input = true

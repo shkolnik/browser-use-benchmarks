@@ -10,7 +10,6 @@
 filename = "classifieds_docker_compose.zip"
 sha256 = "25b560fd0e1d7a8944ab3bb21916ffa2fe63e6272316d22d7bc43da9e7c0bc24"
 urls = [
-    "http://sandbox-1.lab.jshkol.com:8098/classifieds_docker_compose.zip",
     "https://archive.org/download/classifieds_docker_compose/classifieds_docker_compose.zip",
 ]
 # sha256 computed at salvage time (docs/prior-download/sha256.computed) and
@@ -34,7 +33,6 @@ urls = [
 filename = "osclass-v8.1.2.zip"
 sha256 = "89a1b31effca164fd81b68a38937764042893c17fa40f8c52289c3ff33b64083"
 urls = [
-    "http://sandbox-1.lab.jshkol.com:8098/osclass-v8.1.2.zip",
     "https://downloads.sourceforge.net/project/osclass-by-osclasspoint/osclass-v8.1.2.zip",
 ]
 
