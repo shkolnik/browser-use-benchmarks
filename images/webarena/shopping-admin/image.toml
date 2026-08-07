@@ -15,7 +15,7 @@ script = "derive-backup.sh"
 outputs = ["shopping_admin_db.sql.gz", "shopping_admin_media.tar", "shopping_admin_env.php"]
 
 [service]
-healthcheck = "http://localhost:7780/admin"
+healthcheck = "http://127.0.0.1:7780/admin"
 # Same Magento first-request DI compile as shopping — and shopping-admin has
 # never been through the smoke gate at all (it was built before that gate
 # landed), so this is a prediction the next build gets to falsify.

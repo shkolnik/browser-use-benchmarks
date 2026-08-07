@@ -80,6 +80,10 @@ do
 done
 runuser -u app -- php bin/magento cache:flush
 
+# nginx is autostart=false (entrypoint.sh starts it at runtime once
+# HTTP_HOST/HTTP_PORT are known); the in-build validation still needs it.
+sctl start nginx
+
 echo "=== in-build validation ==="
 # Deliberately 127.0.0.1 rather than the configured localhost base_url: this
 # asserts the host-agnostic serving above, and would fail if the 302 came back.
