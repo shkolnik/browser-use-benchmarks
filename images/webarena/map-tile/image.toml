@@ -1,0 +1,25 @@
+# WebArena map backend — OpenStreetMap raster tile server.
+# Provenance, the version-dating evidence, and the upstream-yaml divergences: README.md.
+
+[[datasets]]
+filename = "osm_tile_server.tar"
+sha256 = "2d802a915af14a13bcf393e9abd23d0de003eb043137736a54876410e05c4df2"
+urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/osm_tile_server.tar"]
+# 41,280,327,680 bytes. No upstream checksum exists for this object, so the hash was
+# COMPUTED AT IMPORT in this repo (2026-08-07) by streaming it and hashing and counting
+# bytes in one pass, recording the pin only because the count matched Content-Length
+# exactly — a stream that dies mid-transfer otherwise yields a plausible hash of a
+# prefix. Same posture as webarena/shopping's tar and the sibling map-osrm image.
+#
+# Region is us-east-1. The upstream cloud-init's own aws config says us-east-2, which is
+# wrong; this URL is the region that actually serves the object.
+
+[service]
+# Upstream's own readiness check (webarena-map-backend-boot-init.yaml): a real rendered
+# tile, not a liveness stub. The `smoke` step polls this BEFORE push, so an image that
+# assembles but cannot render never reaches the registry.
+#
+# ⚠️ Zoom-0 is the whole world and renders from a cold 40G cluster on first request. If
+# smoke proves flaky here, the fix is a longer poll_health timeout — NOT a cheaper URL,
+# which would stop proving the thing worth proving.
+healthcheck = "http://localhost:8080/tile/0/0/0.png"
