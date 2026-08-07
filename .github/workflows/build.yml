@@ -106,6 +106,14 @@ jobs:
     # one); skip instead of handing the matrix an empty list.
     if: needs.discover.outputs.images != '[]'
     runs-on: self-hosted
+    # Without this the job inherits GitHub's 6h default. Twice on 2026-08-06 a
+    # job stopped making progress and kept the `build-images` concurrency slot,
+    # so every queued image waited on a job that was doing nothing — once as a
+    # server-side kill, once as a ghost whose runner was gone entirely. The
+    # ceiling is generous on purpose: the longest legitimate build measured is
+    # classifieds at 85min, and shopping's first uncached derive is expected to
+    # run longer still, so this bounds the stall without threatening real work.
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       max-parallel: 1   # one huge build at a time; the disk is the constraint
