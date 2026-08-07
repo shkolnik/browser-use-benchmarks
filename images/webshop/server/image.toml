@@ -19,6 +19,7 @@ urls = [
   "https://huggingface.co/datasets/HongbangYuan/webshop/resolve/main/items_shuffle.json",
   "https://huggingface.co/datasets/Yuxuan13/webshop_dataset/resolve/main/items_shuffle.json",
 ]
+prepare_input = true
 # ~5.1G (5,479,720,229 bytes). Upstream canonical source is Google Drive (gdown id
 # 1A2whVgOO0euk5O13n2iYDM0bQRkkRduB in WebShop's setup.sh) — not curl-fetchable. The
 # sha256 here is the LFS oid reported identically by all three independent HF mirrors,
@@ -33,6 +34,7 @@ urls = [
   "https://huggingface.co/datasets/HongbangYuan/webshop/resolve/main/items_ins_v2.json",
   "https://huggingface.co/datasets/Yuxuan13/webshop_dataset/resolve/main/items_ins_v2.json",
 ]
+prepare_input = true
 # ~178M (186,295,270 bytes). Same provenance story as items_shuffle.json (upstream gdown
 # id 1s2j6NgHljiZzQNL3veZaAiyW_qDEgBNi); sha256 = LFS oid, identical on all three
 # mirrors, confirmed by a completed local download on 2026-08-05.
@@ -44,6 +46,7 @@ urls = [
   "https://huggingface.co/datasets/YWZBrandon/webshop-data/resolve/main/items_human_ins.json",
   "https://huggingface.co/datasets/HongbangYuan/webshop/resolve/main/items_human_ins.json",
 ]
+prepare_input = true
 # ~4.9M. Computed in this repo after downloading from BOTH mirrors — byte-identical.
 # Upstream gdown id 14Kb5SPBk_jfdLZ_CDBNitW98QLDlKR5O.
 
@@ -54,6 +57,19 @@ urls = ["https://github.com/explosion/spacy-models/releases/download/en_core_web
 # ~12M, computed in this repo. goal.py does spacy.load("en_core_web_sm") at import time
 # (setup.sh downloads en_core_web_lg, but the served app only loads _sm). Shipping it as
 # a checksummed dataset keeps the model install off the network path.
+
+# webshop derives nothing — its data is published as data — so this step is a
+# verified GHCR mirror of the bulk input rather than a derivation. It buys the
+# same two things a derive step buys elsewhere: a cold runner pulls from the
+# registry we control instead of a third-party mirror, and the runner's copy
+# becomes reclaimable. ALL THREE product files are covered deliberately:
+# leaving even the 4.9M one outside would keep HuggingFace on the critical path
+# and make this not a checkpoint you can rebuild forward from. See
+# derive-backup.sh for what is NOT cached (the Lucene index the Dockerfile
+# builds over all ~1.18M products).
+[prepare]
+script = "derive-backup.sh"
+outputs = ["items_shuffle.json", "items_ins_v2.json", "items_human_ins.json"]
 
 [service]
 healthcheck = "http://localhost:3000/"
