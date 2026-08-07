@@ -86,6 +86,14 @@ A dataset marked `prepare_input` with no `[prepare]` section is a load error: no
 download it. Note that the count of upstream fetches, not their size, is the metric this is
 optimizing; it should trend to zero as derived caches stay valid.
 
+**The `*-derived` GHCR packages are not a cache you may prune.** As of 2026-08-07 the local
+copies of both the upstream tars and the derived artifacts have been deleted to reclaim disk, so
+those packages hold the only fast copy of ~180 GB of derived inputs. Losing one is recoverable —
+re-derive from upstream — but that means a ~6 h fetch from a flaky university mirror plus the
+derivation itself. A sweep that deletes untagged or old GHCR versions must exclude them. Two
+tags per image already look stale and are not: bumping `RECIPE` strands the previous revision's
+entry on purpose (see below), so an old-looking tag may be the live one for an older commit.
+
 ### Cache invalidation: the pin IS the key
 
 There is no time-based expiry, and none is needed — the derived cache is content-addressed.
