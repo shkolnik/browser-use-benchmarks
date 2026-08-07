@@ -285,6 +285,28 @@ def dump_service_logs(compose: Path, service: str, tail: str = "400",
     except Exception as e:
         print(f"(could not collect logs: {e})")
 
+def dump_service_diagnostics(compose: Path, service: str,
+                             runner=subprocess.run) -> None:
+    # Logs alone could not explain shopping (CI 31170194781): supervisord said
+    # nginx was RUNNING and the host still got ECONNREFUSED for 901s. ECONNREFUSED
+    # means nothing is bound on the container end of the DNAT, so the two facts
+    # that separate "the server never bound" from "publishing is broken" are the
+    # port bindings and the listener table — neither of which is in any log.
+    # Best-effort, like the log dump: this runs on an already-failing path.
+    probes = [
+        (["docker", "compose", "-f", str(compose), "ps", service],
+         "what compose published"),
+        (["docker", "compose", "-f", str(compose), "exec", "-T", service,
+          "sh", "-c", "ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null"],
+         "listeners inside the container"),
+    ]
+    for cmd, what in probes:
+        print(f"=== {what} for {service} ===")
+        try:
+            runner(cmd)
+        except Exception as e:
+            print(f"(could not collect: {e})")
+
 def run_smoke(refs, repo_root: Path) -> None:
     benches = sorted({r.benchmark for r in refs})
     for bench in benches:
@@ -334,6 +356,7 @@ def run_smoke(refs, repo_root: Path) -> None:
             # here reports failure, and it is not an Exception.
             for ref in want:
                 dump_service_logs(compose, ref.service)
+                dump_service_diagnostics(compose, ref.service)
             raise
         finally:
             run(["docker", "compose", "-f", str(compose), "down", "-v"])
