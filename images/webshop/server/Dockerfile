@@ -83,4 +83,21 @@ RUN cd search_engine \
 EXPOSE 3000
 CMD ["python", "-m", "web_agent_site.app"]
 
+# The app binds port 3000 immediately but loads nothing until the first request
+# reaches a real page: `all_products` is a module global and web_agent_site/app.py's
+# index() populates it behind `if search_engine is None`. That first request parses
+# the 5.1G items_shuffle.json, builds the goal set and attaches the Lucene index —
+# measured here at 57s and 14.3G RSS — while the dev server, single-threaded,
+# answers nothing else. So a probe must be allowed to WAIT OUT one whole load: the
+# per-probe --timeout is the parameter that matters, and every earlier failure came
+# from a 10s-per-attempt probe against a 57s first request, which no total budget
+# can rescue. --interval keeps a slow probe from being followed immediately by
+# another; docker already never overlaps probes.
+#
+# -L is load-bearing. `/` is served by home(), which only redirects to /abc and
+# touches no data, and -f fails only on >=400 — so without -L this check exits 0
+# against a container that has loaded nothing at all.
+HEALTHCHECK --start-period=120s --interval=10s --timeout=115s --retries=3 \
+  CMD curl -fsS -L --max-time 110 http://localhost:3000/ >/dev/null || exit 1
+
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
