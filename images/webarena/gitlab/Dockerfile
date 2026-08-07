@@ -17,6 +17,23 @@ RUN tar xzf /tmp/etc-gitlab.tar.gz -C / \
 
 FROM gitlab/gitlab-ce:15.7.5-ce.0
 COPY --from=restore /etc/gitlab /etc/gitlab
+# /opt/gitlab too, and not for the software — for the runit service tree.
+# `gitlab-ctl reconfigure` is what ENABLES services, by writing /opt/gitlab/sv/<svc>
+# and symlinking them into /opt/gitlab/service/. A pristine gitlab-ce ships that
+# tree empty (service/ has no entries, sv/ has only sshd), because upstream's
+# entrypoint reconfigures on every boot. This image doesn't: it runs
+# runsvdir-start directly (webarena's documented command, and what keeps boot
+# fast), so it must ship the enabled tree the restore stage built. Without this
+# COPY the container comes up, supervises nothing, answers nothing, and
+# `gitlab-ctl status` prints an empty list with exit 0 — seen live 2026-08-07.
+#
+# The whole directory rather than a curated list: reconfigure writes into five
+# separate trees under it (sv/, service/, init/, etc/, embedded/{cookbooks,etc,
+# nodes,service,ssl} — measured with `docker diff` on a 15.7.5 first boot). A
+# hand-maintained subset of another project's internals is one upstream change
+# away from being silently incomplete again, and this is the failure mode that
+# produces a container which looks up and does nothing.
+COPY --from=restore /opt/gitlab /opt/gitlab
 # One layer per staging bucket keeps every pushed layer under ~10G (GHCR's
 # comfortable ceiling). Bucket count must match BUCKET_COUNT in restore-stage.sh.
 COPY --from=restore /staging/bucket-00/ /var/opt/gitlab/
@@ -26,3 +43,13 @@ COPY --from=restore /staging/bucket-03/ /var/opt/gitlab/
 COPY --from=restore /staging/bucket-04/ /var/opt/gitlab/
 COPY --from=restore /staging/bucket-05/ /var/opt/gitlab/
 EXPOSE 8023
+
+# Upstream's own healthcheck test, restated only to add a start period. The
+# base image declares interval 60s / retries 5 and NO start_period, so any
+# GitLab that takes longer than ~5 minutes to boot — all of them — is marked
+# unhealthy while it is still coming up correctly. That matters beyond
+# cosmetics: `docker compose up --wait`, which the smoke gate runs, treats a
+# container going unhealthy as a terminal failure, so the gate would fail a
+# perfectly good image mid-boot.
+HEALTHCHECK --interval=30s --timeout=30s --start-period=900s --retries=5 \
+    CMD /opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10
