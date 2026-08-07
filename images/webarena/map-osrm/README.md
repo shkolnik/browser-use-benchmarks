@@ -59,7 +59,13 @@ one path. Don't copy the number to the sibling images; count the components per 
 Two layers, deliberately separated:
 
 - **In-build, structural** (its own `RUN`, after the extraction layer so a failure doesn't re-run the
-  21G extract): every profile has `us-northeast-latest.osrm.mldgr` and it is over 100MB.
+  21G extract): every profile has the **full file set `osrm-routed` requires** — `.mldgr`, `.ramIndex`,
+  `.fileIndex`, `.edges`, `.geometry`, `.names`, `.properties`, `.timestamp`, `.datasource_names`,
+  `.icd`, `.maneuver_overrides`, `.turn_weight_penalties`, `.turn_duration_penalties` — plus a size
+  floor of 100MB on `.mldgr`. That list is not a guess: it is what the binary itself prints as
+  *"Required files are missing, cannot continue"*, observed by running the base image against a
+  directory holding only `.mldgr`. An earlier version checked `.mldgr` alone, which would have passed
+  a tar missing every sibling and deferred the failure to the smoke step.
 - **Pre-push, behavioural**: the pipeline's `smoke` step boots this image and polls
   `[service].healthcheck` — a real route request — *before* the push step. An image that assembles but
   cannot route never reaches the registry.

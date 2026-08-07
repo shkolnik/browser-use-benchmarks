@@ -20,13 +20,22 @@ RUN mkdir -p /data \
 # extraction above. Behavioural validation (does it actually route?) is the
 # pipeline's `smoke` step, which boots this image and polls the healthcheck in
 # image.toml BEFORE anything is pushed.
+# The file set below is not a guess: it is what osrm-routed itself names as
+# "Required files are missing" when they are absent (observed by running the
+# base image against a directory holding ONLY .mldgr). Checking .mldgr alone
+# would pass a tar that is missing every sibling and defer the failure to the
+# smoke step — a build-time check that claims more than it verifies.
 RUN set -eu; \
     for p in car bike foot; do \
-      f="/data/$p/us-northeast-latest.osrm.mldgr"; \
-      [ -f "$f" ] || { echo "restore: $f missing — tar layout changed" >&2; exit 1; }; \
-      sz=$(stat -c %s "$f"); \
-      [ "$sz" -gt 100000000 ] || { echo "restore: $f is only $sz bytes — truncated" >&2; exit 1; }; \
-      echo "restore: $p ok ($sz bytes)"; \
+      base="/data/$p/us-northeast-latest.osrm"; \
+      for ext in mldgr ramIndex fileIndex edges geometry names properties \
+                 timestamp datasource_names icd maneuver_overrides \
+                 turn_weight_penalties turn_duration_penalties; do \
+        [ -f "$base.$ext" ] || { echo "restore: $base.$ext missing — tar layout changed" >&2; exit 1; }; \
+      done; \
+      sz=$(stat -c %s "$base.mldgr"); \
+      [ "$sz" -gt 100000000 ] || { echo "restore: $base.mldgr is only $sz bytes — truncated" >&2; exit 1; }; \
+      echo "restore: $p ok (mldgr $sz bytes, full file set present)"; \
     done
 
 FROM ghcr.io/project-osrm/osrm-backend:v5.27.1
