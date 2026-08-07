@@ -1,0 +1,21 @@
+# WebArena map backend — OSRM routing (car/bike/foot) served from one image.
+# Provenance, the upstream-yaml divergences, and the one-image decision: README.md.
+
+[[datasets]]
+filename = "osrm_routing.tar"
+sha256 = "99a4d10aae831fb3410b7d4743be03d9e02691283ec5105952839b84b9204806"
+urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/osrm_routing.tar"]
+# 21,278,935,040 bytes. No upstream checksum exists for this object, so the hash was
+# COMPUTED AT IMPORT in this repo (2026-08-07) by streaming it and hashing and counting
+# bytes in one pass, recording the pin only because the count matched Content-Length
+# exactly — a stream that dies mid-transfer otherwise yields a plausible hash of a
+# prefix. Same posture as webarena/shopping's tar.
+#
+# Region is us-east-1. The upstream cloud-init's own aws config says us-east-2, which is
+# wrong; this URL is the region that actually serves the object.
+
+[service]
+# A real route request, not a liveness stub: Pittsburgh CMU -> a point east, on the car
+# profile. This is what the `smoke` step polls BEFORE the push step, so an image that
+# assembles but cannot route never reaches the registry.
+healthcheck = "http://localhost:5000/route/v1/driving/-79.9959,40.4406;-79.9,40.45?overview=false"
