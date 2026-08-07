@@ -1,0 +1,56 @@
+# The WebArena wikipedia service is a kiwix-serve appliance over one ZIM
+# archive — no database, no application code, so unlike shopping/reddit/gitlab
+# there is nothing here whose provenance needs rebuilding. The upstream ZIM is
+# a published Kiwix release consumed verbatim; what this image adds is that the
+# 88.7 GiB archive is baked in rather than bind-mounted, which is what makes it
+# a single pullable artifact like the rest of the fleet.
+[[datasets]]
+filename = "wikipedia_en_all_maxi_2022-05.zim"
+sha256 = "f12163513307893c87fd75009b1d61677bae675627eaadf4cb0fa63953eea021"
+urls = [
+    "https://archive.org/download/wikipedia_en_all_maxi_2022-05/wikipedia_en_all_maxi_2022-05.zim",
+    "http://metis.lti.cs.cmu.edu/webarena-images/wikipedia_en_all_maxi_2022-05.zim",
+]
+prepare_input = true
+# sha256 computed here (sha256sum, 2026-08-07) over the copy James supplied.
+# That copy was cross-checked against an independent authority before being
+# pinned: archive.org's item metadata records md5 054c8bd86af847d2a8f9c832db26a038
+# and 95199730590 bytes for this file, and the local copy matches both, so the
+# sha256 below describes upstream's bytes and not a truncated transfer.
+#
+# archive.org is listed first deliberately: it serves the same byte count over
+# HTTP/2 with range support, where metis (WebArena's own host, kept as the
+# fallback) runs at ~3.6 MB/s and is flaky — that is ~7 h for this file.
+
+[prepare]
+script = "split-zim.sh"
+# libzim's split-archive convention: parts named <stem>.zimaa, .zimab, ... are
+# opened as one archive via a <stem>.zim path that has no file at it. Ten parts
+# because the archive is split at 9 GiB (see split-zim.sh for why it must be
+# split at all): nine full parts plus an 8226642846-byte remainder. They are
+# listed individually rather than globbed so that a split which produced the
+# wrong set fails the builder's output check instead of silently shipping a
+# truncated archive.
+outputs = [
+    "wikipedia_en_all_maxi_2022-05.zimaa",
+    "wikipedia_en_all_maxi_2022-05.zimab",
+    "wikipedia_en_all_maxi_2022-05.zimac",
+    "wikipedia_en_all_maxi_2022-05.zimad",
+    "wikipedia_en_all_maxi_2022-05.zimae",
+    "wikipedia_en_all_maxi_2022-05.zimaf",
+    "wikipedia_en_all_maxi_2022-05.zimag",
+    "wikipedia_en_all_maxi_2022-05.zimah",
+    "wikipedia_en_all_maxi_2022-05.zimai",
+    "wikipedia_en_all_maxi_2022-05.zimaj",
+]
+
+[service]
+# WebArena's own landing URL for this service (environment_docker/README.md),
+# so the smoke gate exercises the path the benchmark tasks actually start from
+# rather than just the library index — a kiwix-serve whose archive failed to
+# open still answers / with a page. Verified live against the real ZIM on
+# 2026-08-07: 200, <title>User:The other Kiwix guy/Landing</title>.
+healthcheck = "http://localhost:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
+# The default budget is ample — kiwix-serve opened the full 88.7 GiB archive
+# and answered this URL 2 s after `docker run` in that same check. It does no
+# first-request work: the archive is mmap'd, not loaded.
