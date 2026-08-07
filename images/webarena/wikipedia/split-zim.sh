@@ -57,7 +57,7 @@ SRC_BYTES=$(stat -c %s "$ZIM")
 # split with a truncated last part on disk. The parts are a second full copy of
 # the archive: the input is kept, because deleting it would send the next
 # re-derive back to the mirror for 88.7 GiB.
-AVAIL_BYTES=$(($(df -P --output=avail -B1 "$DATASETS_DIR" | tail -1)))
+AVAIL_BYTES=$(df --output=avail -B1 "$DATASETS_DIR" | tail -1 | tr -d ' ')
 if [ "$AVAIL_BYTES" -lt "$SRC_BYTES" ]; then
   echo "split-zim: need $SRC_BYTES bytes free in $DATASETS_DIR for the parts," \
        "have $AVAIL_BYTES; refusing to start a split that cannot finish" >&2
