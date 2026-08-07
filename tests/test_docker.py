@@ -306,6 +306,88 @@ def test_smoke_fails_loud_when_image_never_becomes_healthy(tmp_path, monkeypatch
     # ...and it still tears the stack down, or the runner leaks a 73G container.
     assert cmds[-1][-2:] == ["down", "-v"]
 
+def test_smoke_dumps_logs_and_tears_down_when_up_wait_itself_fails(tmp_path, monkeypatch):
+    # The failure mode the rest of this observability work MISSED. `up --wait`
+    # treats a container going unhealthy as terminal, so it — not poll_health —
+    # is what fails when an image never comes up, which is the likeliest smoke
+    # failure there is. It used to run outside the try, so that one case dumped
+    # no logs and left the container running for the next job. gitlab, twice,
+    # 2026-08-07: 1023s of waiting and not a line of evidence either time.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    cmds, dumped = [], []
+
+    def fake_run(cmd):
+        cmds.append(cmd)
+        if "--wait" in cmd:
+            raise SystemExit("error: command failed: docker compose up -d --wait")
+
+    monkeypatch.setattr(docker_mod, "run", fake_run)
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "dump_service_logs",
+                        lambda compose, service, **kw: dumped.append(service))
+    try:
+        docker_mod.run_smoke([ref], repo)
+    except SystemExit as e:
+        assert "--wait" in str(e)
+    else:
+        raise AssertionError("run_smoke swallowed a failing `up --wait`")
+    assert dumped == ["reddit"], "a failing `up --wait` must still leave evidence"
+    assert cmds[-1][-2:] == ["down", "-v"], "a failing `up --wait` must still tear down"
+
+def test_smoke_dumps_network_diagnostics_alongside_the_logs(tmp_path, monkeypatch):
+    # Container logs alone cannot explain shopping (CI 31170194781): supervisord
+    # said nginx was RUNNING on 7770 and the host still got ECONNREFUSED for the
+    # whole 901s. "Refused" means nothing is bound on the container end of the
+    # DNAT, which the logs flatly contradict — so the failure path has to record
+    # the port bindings and the in-container listeners too, or the next rebuild
+    # is just as blind as this one.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    cmds, dumped, probed = [], [], []
+    monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "poll_health",
+                        lambda url, timeout_s=120: docker_mod.Health(False, 42.0, "refused"))
+    monkeypatch.setattr(docker_mod, "dump_service_logs",
+                        lambda compose, service, **kw: dumped.append(service))
+    monkeypatch.setattr(docker_mod, "dump_service_diagnostics",
+                        lambda compose, service, **kw: probed.append(service))
+    try:
+        docker_mod.run_smoke([ref], repo)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("run_smoke passed an image that never served")
+    assert probed == ["reddit"], "a smoke failure must record the network facts"
+    # Same reason the log dump is ordered: `down -v` destroys the container the
+    # diagnostics have to run INSIDE.
+    assert cmds[-1][-2:] == ["down", "-v"]
+
+def test_diagnostics_record_port_bindings_and_in_container_listeners(tmp_path):
+    calls = []
+
+    def fake_runner(cmd, **kw):
+        calls.append(cmd)
+        return None
+
+    docker_mod.dump_service_diagnostics(Path("/x/compose.yml"), "shopping",
+                                        runner=fake_runner)
+    flat = [" ".join(c) for c in calls]
+    assert any(" ps" in c for c in flat), "must record what compose thinks is published"
+    listeners = [c for c in flat if "exec" in c]
+    assert listeners, "must look for listeners INSIDE the container"
+    assert "ss -ltn" in listeners[0] or "netstat -ltn" in listeners[0]
+
+def test_diagnostics_never_replace_the_real_failure(tmp_path):
+    # This runs on a path that is already failing. A diagnostic that raises would
+    # bury the error it was collected to explain.
+    def boom(cmd, **kw):
+        raise OSError("docker is gone")
+
+    docker_mod.dump_service_diagnostics(Path("/x/compose.yml"), "shopping",
+                                        runner=boom)
+
 def test_smoke_honours_the_images_own_healthcheck_timeout(tmp_path, monkeypatch):
     # A blanket 120s is what killed shopping: Magento compiles DI on its first
     # request. The per-image budget must actually reach poll_health.

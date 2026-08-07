@@ -285,6 +285,28 @@ def dump_service_logs(compose: Path, service: str, tail: str = "400",
     except Exception as e:
         print(f"(could not collect logs: {e})")
 
+def dump_service_diagnostics(compose: Path, service: str,
+                             runner=subprocess.run) -> None:
+    # Logs alone could not explain shopping (CI 31170194781): supervisord said
+    # nginx was RUNNING and the host still got ECONNREFUSED for 901s. ECONNREFUSED
+    # means nothing is bound on the container end of the DNAT, so the two facts
+    # that separate "the server never bound" from "publishing is broken" are the
+    # port bindings and the listener table — neither of which is in any log.
+    # Best-effort, like the log dump: this runs on an already-failing path.
+    probes = [
+        (["docker", "compose", "-f", str(compose), "ps", service],
+         "what compose published"),
+        (["docker", "compose", "-f", str(compose), "exec", "-T", service,
+          "sh", "-c", "ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null"],
+         "listeners inside the container"),
+    ]
+    for cmd, what in probes:
+        print(f"=== {what} for {service} ===")
+        try:
+            runner(cmd)
+        except Exception as e:
+            print(f"(could not collect: {e})")
+
 def run_smoke(refs, repo_root: Path) -> None:
     benches = sorted({r.benchmark for r in refs})
     for bench in benches:
@@ -305,9 +327,19 @@ def run_smoke(refs, repo_root: Path) -> None:
             raise SystemExit(
                 f"error: {compose} declares no service named {', '.join(missing)} — "
                 f"a compose service must be named after its images/{bench}/<service>/ directory")
-        run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait",
-             *[r.service for r in want]])
+        # `up --wait` goes INSIDE the try, and every failure dumps logs on the
+        # way out. It used to sit outside, which left the single most likely
+        # smoke failure — a container that never reports healthy — as the one
+        # failure this whole observability path could not see: `--wait` treats
+        # unhealthy as terminal, so it raised past both the log dump and the
+        # teardown, printing nothing but its own exit code and leaving the
+        # container running for the next job to trip over. Twice on gitlab,
+        # 2026-08-07. The dump moved out here for the same reason: whatever
+        # fails between here and the last healthcheck, the evidence is the
+        # container's logs, and the finally-block is about to delete them.
         try:
+            run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait",
+                 *[r.service for r in want]])
             for ref in want:
                 man = load_manifest(ref.path)
                 hc = man.healthcheck
@@ -315,15 +347,16 @@ def run_smoke(refs, repo_root: Path) -> None:
                     raise SystemExit(f"error: {ref.name} has no [service].healthcheck in image.toml")
                 health = poll_health(hc, timeout_s=man.healthcheck_timeout_s)
                 if not health:
-                    # Dump the container's own logs BEFORE the finally-block
-                    # tears it down with `down -v`. Without this a smoke failure
-                    # destroys the only evidence of why it failed, and the image
-                    # is deleted by the cleanup step straight after — so the
-                    # next diagnosis costs a full rebuild.
-                    dump_service_logs(compose, ref.service)
                     raise SystemExit(
                         f"error: smoke FAILED — {ref.name} never became healthy at {hc} "
                         f"after {health.elapsed_s:.0f}s (last attempt: {health.last})")
                 print(f"{ref.name}: healthy at {hc} after {health.elapsed_s:.0f}s")
+        except BaseException:
+            # BaseException, not Exception: SystemExit is how everything in
+            # here reports failure, and it is not an Exception.
+            for ref in want:
+                dump_service_logs(compose, ref.service)
+                dump_service_diagnostics(compose, ref.service)
+            raise
         finally:
             run(["docker", "compose", "-f", str(compose), "down", "-v"])
