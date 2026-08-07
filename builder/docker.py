@@ -72,12 +72,54 @@ def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
 def prepare_stamp_path(datasets_dir: Path, ref: ImageRef) -> Path:
     return datasets_dir / ".prepare" / f"{ref.name}.json"
 
+def prepare_input_datasets(m: Manifest) -> list:
+    """Every upstream artifact the prepare script fetches for itself.
+
+    The manifest is the ONE place their sha256s are written down. They are both
+    the GHCR cache tag and part of the on-disk provenance stamp, so a script
+    that hardcoded its own copy could serve artifacts derived from a superseded
+    input after the pin was updated in only one of the two places.
+    """
+    return [ds for ds in m.datasets if ds.prepare_input]
+
+def prepare_input_dataset(m: Manifest):
+    """The pin, when the image has EXACTLY ONE — else None.
+
+    Deliberately None for a multi-input image rather than "the first one": a
+    script that keyed its cache on one pin out of several would name an
+    identity that does not distinguish its own artifacts. run_prepare exports
+    PREPARE_INPUT_SHA256 only from this, so such a script fails loud on the
+    `: "${PREPARE_INPUT_SHA256:?}"` line instead of caching under a partial key.
+    """
+    pins = prepare_input_datasets(m)
+    return pins[0] if len(pins) == 1 else None
+
+def prepare_inputs_digest(m: Manifest) -> str | None:
+    """Order-independent identity of the WHOLE pinned input set, or None if <2.
+
+    None below two so single-input images keep the exact stamp and cache key
+    they already have — generalising the mechanism must not strand four
+    working GHCR caches.
+    """
+    pins = prepare_input_datasets(m)
+    if len(pins) < 2:
+        return None
+    lines = sorted(f"{ds.filename}:{ds.sha256}" for ds in pins)
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
 def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
     script_bytes = (ref.path / m.prepare.script).read_bytes()
     return {
         "script": m.prepare.script,
         "script_sha256": hashlib.sha256(script_bytes).hexdigest(),
         "outputs": {o: (datasets_dir / o).stat().st_size for o in m.prepare.outputs},
+        # Without this the artifacts survive a pin change untouched: the script
+        # is unchanged, the sizes are unchanged, so the derive is skipped and
+        # the build silently uses data derived from the previous upstream tar.
+        "prepare_input_sha256": (pin.sha256 if (pin := prepare_input_dataset(m)) else None),
+        # Absent from every stamp written before multi-input support, which is
+        # why it is read with .get(): None == None keeps those stamps valid.
+        "prepare_inputs_digest": prepare_inputs_digest(m),
     }
 
 def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str | None:
@@ -95,6 +137,12 @@ def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str |
     current = prepare_fingerprint(ref, m, datasets_dir)
     if recorded.get("script_sha256") != current["script_sha256"]:
         return f"{m.prepare.script} changed since these artifacts were derived"
+    if recorded.get("prepare_input_sha256") != current["prepare_input_sha256"]:
+        pin = prepare_input_dataset(m)
+        return f"{pin.filename}'s pinned sha256 changed since these artifacts were derived"
+    if recorded.get("prepare_inputs_digest") != current["prepare_inputs_digest"]:
+        return ("the pinned prepare_input set changed since these artifacts "
+                "were derived")
     for name, size in current["outputs"].items():
         was = recorded.get("outputs", {}).get(name)
         if was != size:
@@ -114,6 +162,17 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     env = dict(os.environ, DATASETS_DIR=str(datasets_dir.resolve()), REGISTRY=registry,
                REPO_ROOT=str(Path(__file__).resolve().parents[1]),
                IMAGE=f"{ref.benchmark}/{ref.service}")
+    # The pin, from the manifest, so the script never keeps its own copy.
+    if pin := prepare_input_dataset(m):
+        env["PREPARE_INPUT_SHA256"] = pin.sha256
+        env["PREPARE_INPUT_FILE"] = pin.filename
+    if digest := prepare_inputs_digest(m):
+        env["PREPARE_INPUTS_DIGEST"] = digest
+    if pins := prepare_input_datasets(m):
+        # `sha256sum -c` format, so a script can verify a cache hit in one
+        # line. Only pinned inputs can be checked this way — a derived
+        # artifact has no pin, which is why the other scripts cannot.
+        env["PREPARE_INPUT_PINS"] = "\n".join(f"{d.sha256}  {d.filename}" for d in pins)
     proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
     if proc.returncode != 0:
         raise SystemExit(f"error: prepare script failed for {ref.name}")

@@ -85,6 +85,11 @@ def load_manifest(image_dir: Path) -> Manifest:
             _die(image_dir, "prepare.outputs is empty")
         prepare = Prepare(prep["script"], list(prep["outputs"]))
     lazy = [d.filename for d in datasets if d.prepare_input]
+    # More than one is allowed: a cache that still sends you back to the
+    # upstream mirror for a second file is not a checkpoint you can rebuild
+    # forward from, however small that file is. run_prepare represents the
+    # whole set in PREPARE_INPUTS_DIGEST (and withholds the singular
+    # PREPARE_INPUT_SHA256), so no key can name a partial identity.
     if lazy and prepare is None:
         _die(image_dir,
              f"datasets marked prepare_input ({', '.join(lazy)}) but there is no "

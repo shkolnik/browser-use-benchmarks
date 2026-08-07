@@ -181,3 +181,16 @@ def test_prepare_input_without_prepare_section_fails_loud(tmp_path):
     bad = PREPARE_INPUT.split("[prepare]")[0]
     with pytest.raises(SystemExit, match="prepare_input"):
         load_manifest(write(tmp_path, bad))
+
+
+def test_two_prepare_inputs_accepted(tmp_path):
+    # Once rejected, because run_prepare exported ONE PREPARE_INPUT_SHA256 and a
+    # second pin could not be represented in the cache key. webshop needs three:
+    # a cache that still sends the build to a third-party mirror for the last
+    # 4.9M file is not a checkpoint it can rebuild forward from. The key is now
+    # PREPARE_INPUTS_DIGEST over the whole set — see test_docker.py.
+    two = PREPARE_INPUT.replace(
+        'filename = "plain.tar"\nsha256 = "%s"\nurls = ["https://metis/plain.tar"]' % ("b" * 64),
+        'filename = "plain.tar"\nsha256 = "%s"\nurls = ["https://metis/plain.tar"]\nprepare_input = true' % ("b" * 64))
+    m = load_manifest(write_with_script(tmp_path, two))
+    assert [d.filename for d in m.datasets if d.prepare_input] == ["upstream.tar", "plain.tar"]
