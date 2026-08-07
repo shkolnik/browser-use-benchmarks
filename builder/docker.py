@@ -249,8 +249,20 @@ class Health(NamedTuple):
     def __bool__(self) -> bool:
         return self.ok
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # The probe asks one question: is this container serving? A 3xx already
+    # answers it — nginx and the app both ran. Following the redirect asks a
+    # DIFFERENT question, about a host that is not under test: Magento bakes
+    # http://metis.lti.cs.cmu.edu:<port>/ into its base URL, so urlopen's default
+    # handler chased shopping's 302 to CMU and reported CMU's unreachability as
+    # our container refusing connections (CI 31170194781, 901s of it).
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+_probe = urllib.request.build_opener(_NoRedirect).open
+
 def poll_health(url: str, timeout_s: int = 120,
-                opener=urllib.request.urlopen, sleep=time.sleep,
+                opener=_probe, sleep=time.sleep,
                 clock=time.monotonic) -> Health:
     start = clock()
     deadline = start + timeout_s
@@ -264,7 +276,12 @@ def poll_health(url: str, timeout_s: int = 120,
         except (urllib.error.URLError, ConnectionError, OSError, TimeoutError) as e:
             # urllib raises HTTPError (a URLError) for >=400, so an error PAGE
             # lands here too — keep the status rather than the exception text.
-            last = f"HTTP {e.code}" if getattr(e, "code", None) else f"{type(e).__name__}: {e}"
+            code = getattr(e, "code", None)
+            last = f"HTTP {code}" if code else f"{type(e).__name__}: {e}"
+            # A refused redirect surfaces here as an HTTPError carrying the 3xx,
+            # and 3xx means served — same verdict as the 2xx branch above.
+            if code and 200 <= code < 400:
+                return Health(True, clock() - start, last)
         if clock() >= deadline:
             return Health(False, clock() - start, last)
         sleep(2)
