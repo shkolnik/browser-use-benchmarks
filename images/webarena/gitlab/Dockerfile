@@ -60,3 +60,12 @@ EXPOSE 8023
 # perfectly good image mid-boot.
 HEALTHCHECK --interval=30s --timeout=30s --start-period=900s --retries=5 \
     CMD /opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10
+
+# --chmod so the mode is a property of the BUILD, not of the checkout.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+# The entrypoint ends by exec'ing (or waiting on) runsvdir-start, which is what
+# this image used to be given as a compose `command:`. That override is removed
+# in compose.yml: a `command:` would replace this CMD wholesale and silently
+# skip the HTTP_HOST/HTTP_PORT validation — the contract would be declared and
+# never run.
+CMD ["/entrypoint.sh"]
