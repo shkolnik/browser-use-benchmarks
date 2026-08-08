@@ -69,6 +69,10 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=150s --retries=5 \
     CMD /opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10
 
 # --chmod so the mode is a property of the BUILD, not of the checkout.
+# Installed into every runit service directory by the entrypoint: gitlab's
+# implementation of the fleet contract that a dead service fails the
+# container (#73), using runit's own per-service hook.
+COPY --chmod=755 runit-finish.sh /runit-finish.sh
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 # The entrypoint ends by exec'ing (or waiting on) runsvdir-start, which is what
 # this image used to be given as a compose `command:`. That override is removed
