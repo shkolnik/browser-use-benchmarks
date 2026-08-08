@@ -74,8 +74,10 @@ EXPOSE 80
 #
 # The start period is long for one reason, and it is not slack: entrypoint.sh
 # concatenates the 14.91 GiB fulltext part from its sub-files before the server
-# starts. That was ~106 s at the 144 MiB/s this host sustains under a parallel
-# build, so 1200 s is roughly a 10x margin for slower storage. `docker compose
+# starts. Measured on the real archive: **24 s** (~640 MiB/s on an idle host; an
+# earlier ~106 s figure was extrapolated from a host busy with a parallel build,
+# which is the number to plan for). 1200 s is a wide margin for slower storage,
+# and costs nothing when the check passes on the first probe. `docker compose
 # up --wait` treats UNHEALTHY as terminal but keeps waiting through `starting`,
 # so this number, not a driver timeout, is what a first boot is allowed.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=1200s --retries=5 \

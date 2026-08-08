@@ -92,6 +92,10 @@ into more ZIM parts (which would cut the index) but into `.partNN` sub-files tha
 libzim. `entrypoint.sh` concatenates them back into `part 9` before kiwix-serve opens the archive,
 so what libzim sees is exactly the layout above.
 
+> ⚠️ **And it still does not restore search on this archive — measured, 2026-08-08.** See
+> "Containment is not enough at 88.7 GiB" below. The machinery above works exactly as described and
+> is verified; what it buys is a publishable layout, NOT working full-text search.
+
 ```
 wikipedia_en_all_maxi_2022-05.zimaj.part00   7.45 GiB  ─┐ concatenated at container start
 wikipedia_en_all_maxi_2022-05.zimaj.part01   7.45 GiB  ─┘ into ...zimaj (14.91 GiB)
@@ -112,6 +116,49 @@ benchmark is one `docker pull`.
 
 Enabling this image in CI is not an action, it is the *absence* of an exclude line in `build.yml`'s
 discover step, so merging this directory to main is what turns it on.
+
+## Containment is not enough at 88.7 GiB — the model does not survive its own scale test
+
+Everything above about *where* to cut was established on a 332 MB fixture, where it is exactly
+right: cut the index and search 404s, cut just before it and search is byte-identical to the whole
+archive. On the real archive it is **not sufficient**. Measured against the whole file served side
+by side (`/wikipedia_en_all_maxi_2022-05/...`, kiwix-serve 3.3.0, same host):
+
+| layout | articles | `/search` | `/suggest` |
+|---|---|---|---|
+| whole 88.7 GiB file | 200 | **200**, 26,160 B | Xapian ranking |
+| 10 uniform 9 GiB parts (index cut) | identical | 404 | degraded |
+| **11 placed parts, both indexes provably whole** | **identical** | **404 "Fulltext search unavailable"** | **degraded** |
+
+The third row is the one that refutes the model. Ruled out, by running:
+
+- **not corrupt bytes** — the reassembled 14.91 GiB part hashes identical to the source region
+  `77,599,387,200..93,605,531,200` (sha256 `e1e42aa08b336ac8e8437c7b...`), and every part is a
+  contiguous slice whose sizes sum to the source exactly;
+- **not the `.partNN` files confusing part enumeration** — moved out of the directory, container
+  restarted with exactly eleven `.zimaa`..`.zimak` files present: still 404;
+- **not the boundary** — `X/fulltext/xapian` occupies part 9 exactly, end to end, and
+  `X/title/xapian` sits whole inside part 8, both re-derived from the files actually written.
+
+`/suggest` degrades the same silent way as before: 200, plausible, alphabetically ordered
+(`Ger`, `Ger "Redser" O'Grady`, `Ger (Hasidic dynasty)`) instead of ranked. A check that asserted
+"200 and non-empty" would call this working.
+
+Two split layouts of this archive now lose search, one of them with every index whole. The small
+fixture shows splits *can* preserve search, so the difference is scale, not principle — the exact
+libzim bound is not established here, and this document does not claim one. What is established is
+the part that matters for shipping: **no boundary placement recovers search for this archive.**
+
+That leaves three ways forward, and the choice is a fidelity-vs-footprint trade rather than a
+technical unknown:
+
+- **ship without full-text search**, loudly documented — cheapest, and WebArena's wiki tasks use
+  search, so it is a real fidelity loss;
+- **bind-mount the archive** as upstream WebArena does — search works, one-pull is given up;
+- **reassemble the whole 88.7 GiB archive at boot** from the parts — search works (a whole file is
+  the one layout proven to serve it), one-pull survives, and it costs a second full copy: ~89 GiB of
+  writable disk per container on top of the image, and roughly 140 s at the 640 MiB/s measured here
+  (14.91 GiB concatenated in 24 s).
 
 ## Ports and the health check
 
