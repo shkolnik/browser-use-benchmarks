@@ -39,4 +39,25 @@ esac
 # the whole configuration step — there is no cached copy to invalidate.
 export CLASSIFIEDS="http://${HTTP_HOST}:${HTTP_PORT}/"
 echo "serving ${CLASSIFIEDS} (listening on 9980 in-container)"
-exec supervisord -c /etc/supervisor/supervisord.conf -n
+
+# Two services, no supervisor daemon: if either exits, so does this container,
+# with that service's exit code (#73). Both were `autorestart=true` under
+# supervisord, which meant a crashed mysqld came back as an empty-ish server
+# while the container still reported healthy.
+. /run-services.sh
+
+# The datadir was populated at BUILD time, so this is a plain start: no initdb,
+# no dump load. mysqld drops to the mysql user itself, hence no --user here.
+svc_start mysqld -- /usr/sbin/mysqld --user=mysql --datadir=/var/lib/mysql \
+  --skip-networking
+
+# PHP's built-in server, which is what upstream serves with — no nginx or
+# apache anywhere in the upstream image. It handles one request at a time;
+# upstream has the same property, and PHP_CLI_SERVER_WORKERS is the knob if
+# that ever needs revisiting. `-t` states the document root that supervisord's
+# `directory=` used to set as the working directory; for `php -S` those are the
+# same thing, and naming it beats depending on an inherited cwd.
+svc_start php --user www-data -- \
+  /usr/local/bin/php -S 0.0.0.0:9980 -t /usr/src/myapp
+
+svc_supervise

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Every image in this fleet takes the same two variables, and none of them
 # defaults: HTTP_HOST and HTTP_PORT say how CLIENTS reach this container. They
 # are NOT the address the server binds — nginx listens on 80 inside this image,
@@ -27,4 +27,22 @@ case "$HTTP_PORT" in
 esac
 
 echo "serving http://${HTTP_HOST}:${HTTP_PORT}/ (listening on 80 in-container)"
-exec supervisord -c /etc/supervisord.conf -n
+
+# Exactly the three programs the upstream image ran, established by
+# `supervisorctl status` inside it rather than by reading its base image's
+# config: nginx, php-fpm, postgres. The upstream base (adhocore/phpfpm) also
+# carried elasticsearch, redis, memcached, beanstalkd and mailcatcher, none of
+# which were ever started — :9200 answered nothing — so none are shipped here.
+#
+# No supervisor daemon: if any one of them exits, so does this container, with
+# that service's exit code (#73).
+. /run-services.sh
+
+# Postgres runs as the postgres user against the data directory the restore
+# stage populated at build time; no initdb or dump load happens at boot.
+svc_start postgres --user postgres -- \
+  /usr/libexec/postgresql14/postgres -D /var/lib/postgresql/data
+svc_start php-fpm -- /usr/local/sbin/php-fpm --nodaemonize
+svc_start nginx -- /usr/sbin/nginx -g "daemon off;"
+
+svc_supervise

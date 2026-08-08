@@ -42,17 +42,18 @@ esac
 BASE_URL="http://${HTTP_HOST}:${HTTP_PORT}/"
 MAGE=/opt/magento
 
-# nginx is autostart=false in supervisord.conf so that nothing can be served
-# under the wrong base_url: the config below has to land first. Everything else
-# starts normally, because the config is applied through Magento's CLI, which
-# needs mariadb and redis up to do its work.
-/usr/bin/supervisord -c /etc/supervisord.conf &
-SUP_PID=$!
-sctl() { supervisorctl -c /etc/supervisord.conf "$@"; }
+# nginx is held back so that nothing can be served under the wrong base_url:
+# the config below has to land first. Everything else starts normally, because
+# the config is applied through Magento's CLI, which needs mariadb and redis up
+# to do its work. If any service exits from here on, so does this container,
+# with that service's exit code (#73).
+. /run-services.sh
+. /services.sh
+svc_start_stack
 
 for i in $(seq 1 60); do
   mariadb-admin --socket=/run/mysqld/mysqld.sock ping >/dev/null 2>&1 && break
-  [ "$i" = 60 ] && { echo "mariadb never came up" >&2; sctl status >&2 || true; exit 1; }
+  [ "$i" = 60 ] && { echo "mariadb never came up" >&2; svc_status >&2 || true; exit 1; }
   sleep 1
 done
 
@@ -77,6 +78,6 @@ else
 fi
 
 # Only now is it safe to accept traffic.
-sctl start nginx
+svc_start_nginx
 echo "serving $BASE_URL"
-wait "$SUP_PID"
+svc_supervise
