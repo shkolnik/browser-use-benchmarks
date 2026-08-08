@@ -78,6 +78,12 @@ SRC_BYTES=$(stat -c %s "$ZIM")
 # the archive: the input is kept, because deleting it would send the next
 # re-derive back to the mirror for 88.7 GiB.
 AVAIL_BYTES=$(df --output=avail -B1 "$DATASETS_DIR" | tail -1 | tr -d ' ')
+# Always logged, not only on failure. This is the largest artifact the fleet
+# builds and the runner's disk is its scarce resource, so the headroom at this
+# moment is the number to look at first when a wikipedia job dies — and the one
+# nobody can reconstruct afterwards.
+echo "split-zim: $DATASETS_DIR has $((AVAIL_BYTES / 1073741824)) GiB free;" \
+     "the parts need $((SRC_BYTES / 1073741824)) GiB beside the $((SRC_BYTES / 1073741824)) GiB input"
 if [ "$AVAIL_BYTES" -lt "$SRC_BYTES" ]; then
   echo "split-zim: need $SRC_BYTES bytes free in $DATASETS_DIR for the parts," \
        "have $AVAIL_BYTES; refusing to start a split that cannot finish" >&2
