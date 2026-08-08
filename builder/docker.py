@@ -249,9 +249,18 @@ class Health(NamedTuple):
     def __bool__(self) -> bool:
         return self.ok
 
-def poll_health(url: str, timeout_s: int = 120,
+def poll_health(url: str, timeout_s: int = 30,
                 opener=urllib.request.urlopen, sleep=time.sleep,
                 clock=time.monotonic) -> Health:
+    """Is the service REACHABLE at its published address?
+
+    NOT a readiness check — the image's own HEALTHCHECK owns that, and
+    `up --wait` has already blocked on it before this runs. This answers the one
+    question the in-container check structurally cannot: does the port mapping
+    work? shopping was healthy inside its container while the host got
+    ECONNREFUSED on 7770 for 901s (#66), and no HEALTHCHECK could ever have seen
+    that.
+    """
     start = clock()
     deadline = start + timeout_s
     last = "no attempt completed"
@@ -273,6 +282,26 @@ def compose_services(compose: Path, check_output=subprocess.check_output) -> lis
     out = check_output(
         ["docker", "compose", "-f", str(compose), "config", "--services"], text=True)
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+def compose_service_image(compose: Path, service: str,
+                          check_output=subprocess.check_output) -> str:
+    """The image a compose service resolves to, with variables interpolated."""
+    cfg = json.loads(check_output(
+        ["docker", "compose", "-f", str(compose), "config", "--format", "json"],
+        text=True))
+    return cfg["services"][service]["image"]
+
+def image_healthcheck(image: str, check_output=subprocess.check_output) -> dict | None:
+    """The image's declared HEALTHCHECK, or None if it declares none.
+
+    `docker image inspect` prints the literal `null` in the absent case
+    (verified 2026-08-07), which is why this parses json rather than reading a
+    dotted template — the dotted form is what fails outright on the container
+    side, and matching shapes here keeps the two readers honest.
+    """
+    out = check_output(["docker", "image", "inspect", "--format",
+                        "{{json .Config.Healthcheck}}", image], text=True).strip()
+    return None if out in ("", "null") else json.loads(out)
 
 def dump_service_logs(compose: Path, service: str, tail: str = "400",
                       runner=subprocess.run) -> None:
@@ -386,6 +415,19 @@ def run_smoke(refs, repo_root: Path) -> None:
         # fails between here and the last healthcheck, the evidence is the
         # container's logs, and the finally-block is about to delete them.
         try:
+            # Before the boot, not after: a missing HEALTHCHECK is a defect in
+            # the image, and finding it costs seconds here instead of a full
+            # start-period. `up --wait` on an image with none silently degrades
+            # to waiting for RUNNING, which a container that never serves a
+            # byte also reaches.
+            for ref in want:
+                image = compose_service_image(compose, ref.service)
+                if image_healthcheck(image) is None:
+                    raise SystemExit(
+                        f"error: {ref.name}'s image {image} declares no HEALTHCHECK — "
+                        f"`docker compose up --wait` would only wait for the container to "
+                        f"be RUNNING, which a container that never serves a byte also is. "
+                        f"Add a HEALTHCHECK to images/{ref.benchmark}/{ref.service}/Dockerfile.")
             run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait",
                  *[r.service for r in want]])
             for ref in want:
@@ -393,12 +435,16 @@ def run_smoke(refs, repo_root: Path) -> None:
                 hc = man.healthcheck
                 if hc is None:
                     raise SystemExit(f"error: {ref.name} has no [service].healthcheck in image.toml")
-                health = poll_health(hc, timeout_s=man.healthcheck_timeout_s)
+                # `up --wait` proved it healthy from the INSIDE. This is the
+                # other half: reachable from the host, through the published
+                # port mapping.
+                health = poll_health(hc, timeout_s=man.reachability_timeout_s)
                 if not health:
                     raise SystemExit(
-                        f"error: smoke FAILED — {ref.name} never became healthy at {hc} "
-                        f"after {health.elapsed_s:.0f}s (last attempt: {health.last})")
-                print(f"{ref.name}: healthy at {hc} after {health.elapsed_s:.0f}s")
+                        f"error: smoke FAILED — {ref.name} reports healthy in-container but "
+                        f"is not reachable at its published address {hc} after "
+                        f"{health.elapsed_s:.0f}s (last attempt: {health.last})")
+                print(f"{ref.name}: healthy and reachable at {hc} after {health.elapsed_s:.0f}s")
         except BaseException:
             # BaseException, not Exception: SystemExit is how everything in
             # here reports failure, and it is not an Exception.

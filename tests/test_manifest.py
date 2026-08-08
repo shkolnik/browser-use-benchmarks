@@ -194,3 +194,23 @@ def test_two_prepare_inputs_accepted(tmp_path):
         'filename = "plain.tar"\nsha256 = "%s"\nurls = ["https://metis/plain.tar"]\nprepare_input = true' % ("b" * 64))
     m = load_manifest(write_with_script(tmp_path, two))
     assert [d.filename for d in m.datasets if d.prepare_input] == ["upstream.tar", "plain.tar"]
+
+def test_retired_healthcheck_timeout_fails_loud(tmp_path):
+    # Silently ignoring it would leave a 900 in the file doing nothing while
+    # everyone assumed it was still the budget.
+    (tmp_path / "image.toml").write_text(
+        '[service]\nhealthcheck = "http://x/"\nhealthcheck_timeout_s = 900\n')
+    try:
+        load_manifest(tmp_path)
+    except SystemExit as e:
+        assert "healthcheck_timeout_s" in str(e)
+        assert "HEALTHCHECK" in str(e)
+    else:
+        raise AssertionError("a retired key was accepted silently")
+
+def test_reachability_timeout_defaults_and_overrides(tmp_path):
+    (tmp_path / "image.toml").write_text('[service]\nhealthcheck = "http://x/"\n')
+    assert load_manifest(tmp_path).reachability_timeout_s == 30
+    (tmp_path / "image.toml").write_text(
+        '[service]\nhealthcheck = "http://x/"\nreachability_timeout_s = 90\n')
+    assert load_manifest(tmp_path).reachability_timeout_s == 90
