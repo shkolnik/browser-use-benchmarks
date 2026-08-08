@@ -35,7 +35,7 @@ on:
 # images/<name>/ directory — or a shared input (builder/, bin/, this file) —
 # changed since the last successful push build. The original "layer cache makes no-change
 # rebuilds cheap" premise broke on gitlab: its ~50G of build layers never
-# survive the post-job `builder prune --keep-storage 20GB`, so every push
+# survive the post-job `builder prune --reserved-space 20GB`, so every push
 # paid the full ~70-minute restore stage. Consequence to be aware of: a
 # green push status now attests only the images that push touched.
 # workflow_dispatch keeps explicit-target semantics (`all` really means all).
@@ -203,9 +203,13 @@ jobs:
       - name: clean up images
         if: always()
         run: bin/build clean '${{ matrix.image }}'
+      # No `docker system df` here. It reported nothing the job acted on, and
+      # it walks every image, volume and cache entry to size them — which on
+      # this runner's ~400G of images intermittently hung, failing jobs at the
+      # finish line after the build and smoke had already passed. A step that
+      # only logs must not be able to fail a job.
       - name: clean up docker leftovers
         if: always()
         run: |
           docker image prune -f
-          docker builder prune -f --keep-storage 20GB
-          docker system df
+          docker builder prune -f --reserved-space 20GB
