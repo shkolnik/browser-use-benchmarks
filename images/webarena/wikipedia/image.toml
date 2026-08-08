@@ -8,6 +8,15 @@
 filename = "wikipedia_en_all_maxi_2022-05.zim"
 sha256 = "f12163513307893c87fd75009b1d61677bae675627eaadf4cb0fa63953eea021"
 urls = [
+    # ⚠️ TEMPORARY — a LAN mirror on sandbox-1, up only to SEED the derived-inputs
+    # cache, and to be removed in the follow-up PR once that cache exists. It is
+    # first because both public mirrors are unusably slow to the build runner:
+    # run 31256297478 moved its disk 264G -> 268G in 65 minutes, ~1.05 MB/s,
+    # about 24 HOURS for this file. Nothing depends on this host staying up —
+    # ensure_dataset falls through to the mirrors below on any connect failure
+    # (curl --connect-timeout 30), and after the seed the cache means no mirror
+    # is consulted at all.
+    "http://192.168.21.151:8099/wikipedia_en_all_maxi_2022-05.zim",
     "https://archive.org/download/wikipedia_en_all_maxi_2022-05/wikipedia_en_all_maxi_2022-05.zim",
     "http://metis.lti.cs.cmu.edu/webarena-images/wikipedia_en_all_maxi_2022-05.zim",
 ]

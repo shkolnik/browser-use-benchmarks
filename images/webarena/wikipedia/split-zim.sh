@@ -26,17 +26,26 @@
 # ranking. Neither is visible in a build log, so the containment check below is
 # the gate. See README.md for the measurements.
 #
-# NO GHCR derived cache here, unlike every other prepare script in this fleet.
-# Those scripts derive small artifacts from a huge tar, so caching turns a ~6 h
-# metis fetch into a fast pull. Here the outputs are a byte-for-byte partition
-# of the input: caching them would trade an 88.7 GiB download for an 88.7 GiB
-# download while permanently doubling this benchmark's GHCR footprint. On a
-# miss we re-fetch from archive.org, which is fast and range-resumable.
+# THIS SCRIPT USED TO SAY there was no GHCR derived cache here, because the
+# outputs are a byte-for-byte partition of the input: caching them trades an
+# 88.7 GiB download for an 88.7 GiB download while permanently doubling this
+# benchmark's GHCR footprint. That reasoning rested on one factual claim — "on a
+# miss we re-fetch from archive.org, which is fast" — and the first CI run
+# measured it false. Run 31256297478 moved the runner's disk 264G -> 268G in
+# 65 minutes: ~1.05 MB/s, about 24 HOURS for this file. Both public mirrors are
+# slow to this runner, so the cache is now the only path that makes a cold
+# rebuild finish in a working day, and the doubled footprint is the price.
+#
+# The cache holds the PARTS, not the archive: they are what the build consumes,
+# they are already layer-sized, and a cache hit therefore never needs the whole
+# 88.7 GiB file on disk at all — it skips the split as well as the download.
 #
 # Inputs (env, set by builder/docker.py's run_prepare):
 #   DATASETS_DIR          where the verified upstream ZIM lives and outputs must land
 #   REPO_ROOT, IMAGE      to fetch the lazy prepare_input dataset
 #   PREPARE_INPUT_FILE    the pinned ZIM's filename, from the manifest
+#   PREPARE_INPUT_SHA256  the pinned ZIM's sha256 — half the cache key
+#   REGISTRY              e.g. ghcr.io/shkolnik
 set -euo pipefail
 
 : "${DATASETS_DIR:?run_prepare must export DATASETS_DIR}"
@@ -45,6 +54,17 @@ set -euo pipefail
 # The filename comes from the manifest via run_prepare, never a second copy
 # here — same single-source-of-truth rule as the pinned sha256 elsewhere.
 : "${PREPARE_INPUT_FILE:?run_prepare must export PREPARE_INPUT_FILE}"
+: "${PREPARE_INPUT_SHA256:?run_prepare must export PREPARE_INPUT_SHA256}"
+: "${REGISTRY:?run_prepare must export REGISTRY}"
+
+# builder/docker.py calls `bin/build download` as a child python process whose
+# stdout is a pipe, so it is block-buffered: when the first wikipedia run was
+# cancelled mid-fetch, the buffer died with it and the log never said WHICH
+# mirror it had been talking to for an hour. That is the one line needed to tell
+# a fast mirror from a slow one, so make the child unbuffered. Exported here
+# rather than fixed in builder/ deliberately — builder/ is a shared input, and
+# editing it rebuilds all eight images to fix a wikipedia log line.
+export PYTHONUNBUFFERED=1
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ZIM="$DATASETS_DIR/$PREPARE_INPUT_FILE"
@@ -65,6 +85,62 @@ MAX_PART_BYTES=$((10 * 1024 * 1024 * 1024 + 3 * 1024 * 1024))
 # entrypoint concatenates back into the part before kiwix-serve starts. The
 # archive on disk is unchanged; only its delivery is. See README.md.
 SUB_BYTES=$((8 * 1024 * 1024 * 1024))
+
+# Bump RECIPE whenever what this script EMITS changes — different boundaries,
+# different sub-file sizes, different names. It strands the previous revision's
+# entries instead of silently re-serving parts that no longer match the split
+# this script would now produce.
+RECIPE=r1
+CACHE="$REGISTRY/webarena-wikipedia-derived:${PREPARE_INPUT_SHA256:0:12}-$RECIPE"
+# Written into the cache image at push time and checked on pull. `docker export`
+# piped into tar under `set -o pipefail` already fails loudly on a truncated
+# stream, but that only proves the transfer ended cleanly, not that the parts
+# add up to an archive. This is the cheap version of the containment check for
+# the path where the source ZIM is never downloaded and so cannot be re-read.
+SIZES=.zim-parts.sizes
+
+echo "=== checking derived-inputs cache: $CACHE ==="
+if docker pull "$CACHE" 2>/dev/null; then
+  cid=$(docker create "$CACHE" true)
+  # Filtered, because `docker export` of a `FROM scratch` container is NOT just
+  # the files that were COPYed in: docker injects /dev, /etc, /proc, /sys and
+  # /.dockerenv into every container, and an unfiltered extract drops all of
+  # them into the datasets directory. ONE pattern, not one per shape: tar exits
+  # 2 on "Not found in archive", so listing `*.zim??` and `*.zim??.part??`
+  # separately would fail for a split whose parts all fit a layer and which
+  # therefore has no sub-files at all. `*.zim*` covers parts, sub-files and the
+  # sizes manifest, and cannot match anything docker injects.
+  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards "*.zim*"
+  docker rm "$cid" >/dev/null
+  if [ ! -f "$DATASETS_DIR/$SIZES" ]; then
+    echo "split-zim: cache entry has no $SIZES manifest — refusing to trust it" >&2
+    exit 1
+  fi
+  # `du`-style two-column compare rather than trusting the tar: a part that
+  # arrived short is the failure this catches, and it is invisible to both the
+  # builder's existence check and the size check in prepare_reuse_check, which
+  # compares against a stamp this run has not written yet.
+  if ! (cd "$DATASETS_DIR" && while read -r want name; do
+          got=$(stat -c %s "$name" 2>/dev/null || echo missing)
+          if [ "$got" != "$want" ]; then
+            echo "split-zim: $name is $got bytes, cache manifest says $want" >&2
+            exit 1
+          fi
+        done < "$SIZES"); then
+    echo "split-zim: cached parts do not match their manifest — discarding them" >&2
+    # Leaving them would let the NEXT run reuse them through prepare_reuse_check,
+    # which cannot see content and would stamp them as good.
+    rm -f -- "$DATASETS_DIR/$STEM".zim??  "$DATASETS_DIR/$STEM".zim??.part?? \
+             "$DATASETS_DIR/$SIZES"
+    exit 1
+  fi
+  rm -f -- "$DATASETS_DIR/$SIZES"
+  echo "split-zim: cache hit — parts extracted and verified against their manifest;"
+  echo "           the 88.7 GiB upstream fetch and the split are both skipped"
+  ls -l "$DATASETS_DIR/$STEM".zim??*
+  exit 0
+fi
+echo "cache miss — fetching from the pinned upstream mirrors"
 
 # The download step skips prepare_input datasets, so fetch it here. This is a
 # no-op when a sha256-verified copy is already in DATASETS_DIR.
@@ -233,3 +309,29 @@ for p in "$STAGING/$STEM.zim"??*; do
 done
 echo "=== parts in place ==="
 ls -l "$DATASETS_DIR/$STEM".zim??*
+
+# Publish them, so no later rebuild ever pays the ~24 h upstream fetch again.
+# This runs only on the miss path — a cache hit exited long before here.
+echo "=== push derived-inputs cache: $CACHE ==="
+work=$(mktemp -d "$DATASETS_DIR/.derive-work.XXXXXX")
+# Replaces the STAGING trap rather than adding to it: STAGING was already moved
+# away piece by piece above, and its directory is removed here too.
+trap 'rm -rf "$work" "$STAGING"' EXIT
+{
+  echo "FROM scratch"
+  for p in "$DATASETS_DIR/$STEM.zim"??*; do
+    n=$(basename "$p")
+    # Hardlink, not copy: same filesystem, and a second 88.7 GiB copy is disk
+    # and tens of minutes on a runner that has neither to spare.
+    ln "$p" "$work/$n"
+    echo "COPY $n /"
+    printf '%s %s\n' "$(stat -c %s "$p")" "$n" >> "$work/$SIZES"
+  done
+  echo "COPY $SIZES /"
+} > "$work/Dockerfile"
+docker build -t "$CACHE" "$work"
+# A failed push must not fail the build: the parts are already on disk and the
+# image can be built from them. The cost of losing this is the NEXT cold
+# rebuild, which is worth a loud warning and not a thrown-away split.
+docker push "$CACHE" || echo "warning: cache push failed (continuing; the parts are built)"
+echo "split-zim: complete"
