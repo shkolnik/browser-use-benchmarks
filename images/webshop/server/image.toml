@@ -1,14 +1,18 @@
-# WebShop (princeton-nlp/WebShop) — Flask app over ~1.18M scraped Amazon products.
-# Upstream pinned at commit 64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd (master, 2024-09-06).
-# Dataset provenance + deviations: see README.md in this directory.
+# WebShop — Flask app over ~1.18M scraped Amazon products.
+# Built from OUR FORK, shkolnik/WebShop, pinned at d8c8dc1b0605f86a5d734b37245abff857da38aa
+# (master, 2026-08-07 = upstream princeton-nlp 64fa2a5 plus shkolnik/WebShop#1, which moves
+# the corpus parse to build time). Dataset provenance + deviations: see README.md.
 
 [[datasets]]
-filename = "webshop-src-64fa2a5.tar.gz"
-sha256 = "2e3e671ad76ee5dd1b143f1a060f91386b9699602bee794259b5de79ebfaea8a"
-urls = ["https://github.com/princeton-nlp/WebShop/archive/64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd.tar.gz"]
+filename = "webshop-src-d8c8dc1.tar.gz"
+sha256 = "bc0e4d2f526dea4290dbcbf2f225c7a1c631eeb5bc09e49082877b7d22acd5ab"
+urls = ["https://github.com/shkolnik/WebShop/archive/d8c8dc1b0605f86a5d734b37245abff857da38aa.tar.gz"]
 # Computed in this repo (curl + sha256sum). GitHub commit archives are stable per commit
 # in practice; a checksum break means GitHub changed its tar generation — investigate,
 # don't bump this value blindly. (Same caveat as miniwob's tag archive.)
+# Fetching a fork rather than upstream changes nothing about the trust model: the pin is a
+# commit hash either way, and `git remote -v` in the fork still names princeton-nlp as
+# upstream. Rebasing onto a newer upstream is a normal fork merge + a new pin here.
 
 [[datasets]]
 filename = "items_shuffle.json"
@@ -71,15 +75,12 @@ outputs = ["items_shuffle.json", "items_ins_v2.json", "items_human_ins.json"]
 
 [service]
 healthcheck = "http://localhost:3000/"
-# The app does its data loading at IMPORT time — web_agent_site.app parses
-# items_shuffle.json (5.1G of JSON, ~1.18M products), loads the spaCy model and
-# attaches to the Lucene index — so nothing is listening on 3000 until all of
-# that finishes. That is a slow first LISTEN rather than Magento's slow first
-# REQUEST, but the gate cannot tell them apart: both read as "never became
-# healthy". PROVISIONAL — this number is reasoned from what the module does at
-# import, not measured, because this image has never been booted here. The
-# smoke failure message now reports elapsed and last status, so the next run
-# replaces this with a measurement. Erring high is the safe direction: a
-# too-generous budget only delays noticing a genuinely hung image, while a
-# too-tight one fails a correct one, which is what has been happening.
-healthcheck_timeout_s = 900
+# 900s was sized for the pre-fork app, whose first product-touching request parsed
+# the 5.1G corpus — measured at 57s and ~19G before the OOM killer got involved.
+# The fork reads a prebuilt LMDB instead: measured 1.5s to first response and 5.2s
+# to docker-healthy. This is the HOST-side reachability budget (the in-container
+# HEALTHCHECK owns readiness), so it only has to cover the container's own
+# start-period plus its retries; 120s leaves an order of magnitude of headroom over
+# what was measured, while no longer hiding a genuinely hung image for a quarter of
+# an hour.
+healthcheck_timeout_s = 120
