@@ -169,3 +169,13 @@ def test_migration_pushes_only_the_entry_it_read(tmp_path):
     assert "someone-elses-40gb-upstream.tar" not in push[0], (
         f"the migration swept up an unrelated dataset: {push[0]}")
     assert "entry.dat" in push[0], push[0]
+
+
+def test_no_migrate_leaves_the_entry_alone(tmp_path):
+    """wikipedia's ~88 GB entry must not convert as a side effect of a build."""
+    r, calls = run('DCACHE_NO_MIGRATE=1 dcache_pull reg/x:t out "*.dat" && echo HIT',
+                   tmp_path, fake_oras=ORAS_LEGACY_TAG,
+                   fake_docker=fake_docker_serving(tmp_path, "a.dat"))
+    assert "HIT" in r.stdout, r.stderr
+    assert not any(c.startswith("oras push") for c in calls), (
+        f"an opted-out entry was migrated anyway: {calls}")
