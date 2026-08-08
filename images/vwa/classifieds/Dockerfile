@@ -40,7 +40,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         libfreetype6-dev libjpeg62-turbo-dev libpng-dev \
-        ca-certificates curl gnupg unzip patch supervisor python3; \
+        ca-certificates curl gnupg unzip patch python3; \
     mkdir -p /etc/apt/keyrings; \
     docker-php-ext-configure gd --with-freetype --with-jpeg; \
     docker-php-ext-install -j"$(nproc)" gd mysqli; \
@@ -71,7 +71,7 @@ RUN set -eux; \
     # usrmerged /usr/lib/… path, so every lookup missed — and `2>/dev/null`
     # ate the complaint. Three named packages beat a pipeline that can fail
     # to zero without saying so.
-    apt-mark manual $savedAptMark mysql-server supervisor unzip patch python3 \
+    apt-mark manual $savedAptMark mysql-server unzip patch python3 \
         ca-certificates curl libpng16-16 libjpeg62-turbo libfreetype6 > /dev/null; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
     rm -rf /var/lib/apt/lists/*; \
@@ -170,7 +170,8 @@ COPY --from=audited /staging/bucket-09/ /usr/src/myapp/
 COPY --from=audited /staging/bucket-10/ /usr/src/myapp/
 COPY --from=audited /staging/bucket-11/ /usr/src/myapp/
 COPY --from=audited /var/lib/mysql /var/lib/mysql
-COPY supervisord.conf /etc/supervisor/conf.d/classifieds.conf
+# The shared supervisor (#73): any service that exits fails the container.
+COPY --from=stagelib run-services.sh /run-services.sh
 
 # ⚠️ No `chown -R` here, and that is not a style preference. A recursive chown
 # over the app tree touches all 336,634 photo files, and every touched file is
@@ -193,12 +194,12 @@ ENV RESET_TOKEN=4b61655535e7ed388f0d40a93600254c
 EXPOSE 9980
 # --chmod so the mode is a property of the BUILD, not of the checkout.
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
-# Not supervisord directly: HTTP_HOST/HTTP_PORT are validated, and CLASSIFIEDS
-# derived, before anything serves a page.
+# HTTP_HOST/HTTP_PORT are validated, and CLASSIFIEDS derived, before anything
+# serves a page; the entrypoint then starts the services and supervises them.
 CMD ["/entrypoint.sh"]
 
-# localhost:9980 is the IN-CONTAINER address. Osclass boots MySQL and PHP-FPM
-# under supervisord, so give it a real start period; the per-probe --timeout is
+# localhost:9980 is the IN-CONTAINER address. Osclass boots MySQL and PHP
+# behind the entrypoint's supervisor, so give it a real start period; the per-probe --timeout is
 # the parameter that decides whether a slow first page reads as unhealthy.
 HEALTHCHECK --start-period=90s --interval=10s --timeout=15s --retries=3 \
   CMD curl -fsS -L --max-time 14 http://localhost:9980/ >/dev/null || exit 1
