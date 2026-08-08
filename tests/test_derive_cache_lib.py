@@ -14,7 +14,27 @@ import pytest
 LIB = Path(__file__).resolve().parent.parent / "builder" / "stage-lib" / "derive-cache.sh"
 
 
-def run(body, tmp_path, fake_oras="exit 0", fake_docker="exit 1", env=None):
+# The default fake answers `manifest fetch` the way a real artifact pushed by
+# this library does. That is the signal dcache_pull decides on, so a fake that
+# stayed silent would model a tag that exists in no registry.
+ORAS_ARTIFACT = (
+    'if [ "$1 $2" = "manifest fetch" ]; then\n'
+    '  echo \'{"artifactType":"application/vnd.beep.derived.v1","layers":[]}\'\n'
+    'fi\n'
+    'exit 0\n'
+)
+# A legacy `FROM scratch` image: no artifactType, and — measured live against a
+# real registry with oras 1.3.3 on 2026-08-08 — `oras pull` still exits 0 while
+# writing nothing at all. Treating that as a hit is the false-hit bug.
+ORAS_LEGACY_TAG = (
+    'if [ "$1 $2" = "manifest fetch" ]; then\n'
+    '  echo \'{"mediaType":"application/vnd.oci.image.index.v1+json"}\'\n'
+    'fi\n'
+    'exit 0\n'
+)
+
+
+def run(body, tmp_path, fake_oras=ORAS_ARTIFACT, fake_docker="exit 1", env=None):
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
     for name, script in (("oras", fake_oras), ("docker", fake_docker)):
@@ -37,7 +57,9 @@ def test_the_library_exists():
 def test_a_pull_prefers_the_oras_artifact(tmp_path):
     r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path)
     assert "HIT" in r.stdout, r.stderr
-    assert calls[0].startswith("oras pull"), calls
+    assert any(c.startswith("oras pull") for c in calls), calls
+    # The whole point of preferring the artifact: no legacy image is fetched,
+    # so the ~2x local-storage cost of holding a cache image is never paid.
     assert not any(c.startswith("docker pull") for c in calls), calls
 
 
@@ -79,3 +101,18 @@ def test_an_extract_filter_is_required(tmp_path):
     """#79: an unfiltered docker export drops /dev,/etc,/proc,/sys into datasets."""
     r, _ = run('dcache_pull reg/x:t out; echo "rc=$?"', tmp_path)
     assert r.returncode != 0 or "rc=0" not in r.stdout
+
+
+def test_a_legacy_tag_is_not_mistaken_for_an_oras_hit(tmp_path):
+    """The false-hit bug: real oras exits 0 on a legacy image and writes nothing.
+
+    Measured 2026-08-08 against a local registry:2 with oras 1.3.3 —
+    `oras pull` of a `FROM scratch` image printed "Skipped pulling layers
+    without file name", wrote 0 files, and exited 0. Deciding on the exit code
+    would report a hit with nothing extracted, and nothing downstream would
+    know to fall back to the legacy reader.
+    """
+    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+                   tmp_path, fake_oras=ORAS_LEGACY_TAG, fake_docker="exit 0")
+    assert "FORMAT=legacy" in r.stdout, (
+        f"a legacy tag was read as an oras hit: {r.stdout!r} {r.stderr!r}")
