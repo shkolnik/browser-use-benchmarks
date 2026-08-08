@@ -70,69 +70,16 @@ find /var/log/gitlab -type f -delete
 rm -f /var/opt/gitlab/redis/dump.rdb
 
 echo "=== partition /var/opt/gitlab into staging buckets ==="
-# Greedy first-fit by du size; a subtree larger than the limit is descended
-# into rather than split blindly, so bucket contents stay whole directories.
+# Shared implementation: builder/stage-lib/partition-tree.py, reached through
+# the `stagelib` build context. It preserves each recreated parent directory's
+# owner and mode, which is load-bearing HERE and nowhere else in the fleet: the
+# sibling images run one app user and can follow the partition with a blanket
+# `chown -R`, while this tree belongs to git, gitlab-psql, gitlab-redis and
+# gitlab-www at once. A root-owned git-data/repositories/@hashed is invisible in
+# the build log and leaves gitaly unable to write, which reaches the smoke gate
+# as nginx serving 502 over a dead upstream.
 mkdir -p /staging
-for i in $(seq 0 $((BUCKET_COUNT - 1))); do mkdir -p "/staging/bucket-0$i"; done
-python3 - "$BUCKET_LIMIT_KB" "$BUCKET_COUNT" <<'EOF'
-import os
-import shutil
-import subprocess
-import sys
-
-LIMIT_KB = int(sys.argv[1])
-MAX_BUCKETS = int(sys.argv[2])
-ROOT = '/var/opt/gitlab'
-
-
-def du_kb(path):
-    return int(subprocess.check_output(['du', '-sk', path]).split()[0])
-
-
-def partition(path):
-    """Yield (path, kb) pieces each <= LIMIT_KB, descending into oversized dirs."""
-    kb = du_kb(path)
-    if kb <= LIMIT_KB:
-        yield path, kb
-        return
-    entries = sorted(os.path.join(path, e) for e in os.listdir(path))
-    if not entries:
-        raise SystemExit(f'{path} is {kb}K with no children to descend into')
-    for entry in entries:
-        if os.path.isdir(entry) and not os.path.islink(entry):
-            yield from partition(entry)
-        else:
-            yield entry, du_kb(entry)
-
-
-buckets = []  # list of (used_kb, index)
-assignments = []
-for piece, kb in partition(ROOT):
-    if kb > LIMIT_KB:
-        raise SystemExit(f'single file {piece} is {kb}K, over the layer limit')
-    for b in buckets:
-        if b[0] + kb <= LIMIT_KB:
-            b[0] += kb
-            assignments.append((piece, b[1]))
-            break
-    else:
-        if len(buckets) == MAX_BUCKETS:
-            raise SystemExit('state outgrew BUCKET_COUNT buckets; '
-                             'raise it and add COPY lines in the Dockerfile')
-        buckets.append([kb, len(buckets)])
-        assignments.append((piece, len(buckets) - 1))
-
-for piece, idx in assignments:
-    rel = os.path.relpath(piece, ROOT)
-    dest = os.path.join('/staging', f'bucket-{idx:02d}', rel)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    # Not os.rename: paths from the base image live in a lower overlayfs
-    # layer, and overlay returns EXDEV for cross-layer directory renames.
-    shutil.move(piece, dest)
-
-print(f'{len(buckets)} buckets:')
-for used, idx in buckets:
-    print(f'  bucket-{idx:02d}: {used / 2**20:.1f}G')
-EOF
+for i in $(seq 0 $((BUCKET_COUNT - 1))); do mkdir -p "$(printf '/staging/bucket-%02d' "$i")"; done
+python3 /partition-tree.py "$BUCKET_LIMIT_KB" "$BUCKET_COUNT" /var/opt/gitlab /staging
 
 echo "restore stage complete"

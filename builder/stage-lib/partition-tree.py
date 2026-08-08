@@ -1,14 +1,16 @@
 """Split one big directory tree into N staging buckets, one per image layer.
 
-Three images in this fleet ship a small app tree glued to an enormous media
-payload — shopping 45G of pub/media, reddit 38.5G of submission_images,
-classifieds 73G of oc-content/uploads. A registry rejects a layer that size, so
-the tree is partitioned at build time into buckets under a fixed byte target and
-the final stage takes one COPY per bucket.
+Four images in this fleet ship a tree too big for one layer — shopping 45G of
+pub/media, reddit 38.5G of submission_images, classifieds 73G of
+oc-content/uploads, gitlab 30G of /var/opt/gitlab. A registry rejects a layer
+that size, so the tree is partitioned at build time into buckets under a fixed
+byte target and the final stage takes one COPY per bucket.
 
 It lives here, in a build context shared by every image, because the same bug
 was fixed in two separate copies of it on one afternoon (the ROOT-nesting trap
-below). A third copy was the next thing about to be written.
+below). The copy that was not shared went on to ship a fourth bug of its own:
+gitlab kept a private fork of this file and lost directory ownership through it
+for three CI runs (the mkdir_mirroring note below).
 
 Usage, from an image's restore stage:
     COPY --from=stagelib partition-tree.py /partition-tree.py
@@ -21,6 +23,7 @@ build that would push an oversized layer fails here rather than at push time.
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -94,15 +97,48 @@ def plan(root, limit_kb, max_buckets):
     return assignments, [used for used, _ in buckets]
 
 
+def mkdir_mirroring(root, bucket, rel_dir):
+    """Create <bucket>/<rel_dir>, each level owned and moded like <root>/<rel_dir>.
+
+    os.makedirs would create them 0755 root-owned. Buckets become COPY layers,
+    so that loss ships, and nothing downstream can tell it happened: the piece
+    that MOVED keeps its owner, and only the directories recreated here lose
+    theirs. It bites exactly the trees big enough to be descended into, which
+    are the ones worth shipping.
+
+    gitlab is the case that cannot be swept up afterwards. Its siblings each run
+    one app user and follow the partition with `chown -R <user> /staging`, but
+    gitlab's tree is split across git, gitlab-psql, gitlab-redis and gitlab-www,
+    so there is no single owner to re-assert — the owner has to be preserved
+    rather than restored.
+    """
+    dest, src = bucket, root
+    os.makedirs(dest, exist_ok=True)
+    if rel_dir in ('', os.curdir):
+        return
+    for part in rel_dir.split(os.sep):
+        dest, src = os.path.join(dest, part), os.path.join(src, part)
+        if not os.path.isdir(dest):
+            os.mkdir(dest)
+        # The source parent still exists: plan() only ever yields leaves, so a
+        # directory it descended into is never itself moved.
+        st = os.stat(src)
+        os.chown(dest, st.st_uid, st.st_gid)
+        # After chown, which clears setuid/setgid on some systems. git-data is
+        # 2770 — dropping the setgid bit is the same class of silent breakage.
+        os.chmod(dest, stat.S_IMODE(st.st_mode))
+
+
 def main(argv):
     limit_kb, max_buckets, root, staging = int(argv[1]), int(argv[2]), argv[3], argv[4]
     assignments, sizes = plan(root, limit_kb, max_buckets)
     for piece, idx in assignments:
-        dest = os.path.join(staging, f'bucket-{idx:02d}', os.path.relpath(piece, root))
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        rel = os.path.relpath(piece, root)
+        bucket = os.path.join(staging, f'bucket-{idx:02d}')
+        mkdir_mirroring(root, bucket, os.path.dirname(rel))
         # Not os.rename: paths from lower overlayfs layers EXDEV on cross-layer
         # directory renames; shutil.move falls back to copy+delete there.
-        shutil.move(piece, dest)
+        shutil.move(piece, os.path.join(bucket, rel))
     print(f'{len(sizes)} buckets:')
     for idx, used in enumerate(sizes):
         print(f'  bucket-{idx:02d}: {used / 2**20:.1f}G')

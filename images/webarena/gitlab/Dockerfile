@@ -10,6 +10,7 @@
 FROM gitlab/gitlab-ce:15.7.5-ce.0 AS restore
 COPY --from=datasets etc-gitlab.tar.gz /tmp/etc-gitlab.tar.gz
 COPY --from=datasets webarena_gitlab_backup.tar /var/opt/gitlab/backups/
+COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
 RUN tar xzf /tmp/etc-gitlab.tar.gz -C / \
     && chown git:git /var/opt/gitlab/backups/*.tar \
