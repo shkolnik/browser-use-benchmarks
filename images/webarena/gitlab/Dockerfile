@@ -10,6 +10,7 @@
 FROM gitlab/gitlab-ce:15.7.5-ce.0 AS restore
 COPY --from=datasets etc-gitlab.tar.gz /tmp/etc-gitlab.tar.gz
 COPY --from=datasets webarena_gitlab_backup.tar /var/opt/gitlab/backups/
+COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
 RUN tar xzf /tmp/etc-gitlab.tar.gz -C / \
     && chown git:git /var/opt/gitlab/backups/*.tar \
@@ -52,11 +53,26 @@ COPY --from=restore /staging/bucket-05/ /var/opt/gitlab/
 EXPOSE 8023
 
 # Upstream's own healthcheck test, restated only to add a start period. The
-# base image declares interval 60s / retries 5 and NO start_period, so any
-# GitLab that takes longer than ~5 minutes to boot — all of them — is marked
-# unhealthy while it is still coming up correctly. That matters beyond
-# cosmetics: `docker compose up --wait`, which the smoke gate runs, treats a
-# container going unhealthy as a terminal failure, so the gate would fail a
+# base image declares interval 60s / retries 5 and NO start_period, so a
+# GitLab still coming up correctly is marked unhealthy — and `docker compose
+# up --wait`, which the smoke gate runs, treats that as terminal, failing a
 # perfectly good image mid-boot.
-HEALTHCHECK --interval=30s --timeout=30s --start-period=900s --retries=5 \
+#
+# 150s is measured, not guessed: this image boots to healthy in 61s (2026-08-08,
+# a full boot including the ~28s entrypoint reconfigure — it ships a pre-enabled
+# service tree rather than reconfiguring from scratch, which is what makes a
+# minute possible). 150s is ~2.5x that. The grace period is a CEILING ON
+# DIAGNOSIS, not a budget to spend: a broken image reports unhealthy only after
+# it expires, and the 900s that used to sit here is why a gitlab that was dead
+# on arrival took 1107s of CI to say so.
+HEALTHCHECK --interval=30s --timeout=30s --start-period=150s --retries=5 \
     CMD /opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10
+
+# --chmod so the mode is a property of the BUILD, not of the checkout.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+# The entrypoint ends by exec'ing (or waiting on) runsvdir-start, which is what
+# this image used to be given as a compose `command:`. That override is removed
+# in compose.yml: a `command:` would replace this CMD wholesale and silently
+# skip the HTTP_HOST/HTTP_PORT validation — the contract would be declared and
+# never run.
+CMD ["/entrypoint.sh"]
