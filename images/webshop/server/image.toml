@@ -74,13 +74,8 @@ script = "derive-backup.sh"
 outputs = ["items_shuffle.json", "items_ins_v2.json", "items_human_ins.json"]
 
 [service]
+# The PUBLISHED address the smoke gate reaches this service at. Readiness is the
+# Dockerfile HEALTHCHECK's job — see the long comment beside it for the measured
+# first-request load (1.5s to first response, 5.2s to docker-healthy on the fork,
+# against 57s and ~19G RSS before it) that sets its --timeout.
 healthcheck = "http://localhost:3000/"
-# 900s was sized for the pre-fork app, whose first product-touching request parsed
-# the 5.1G corpus — measured at 57s and ~19G before the OOM killer got involved.
-# The fork reads a prebuilt LMDB instead: measured 1.5s to first response and 5.2s
-# to docker-healthy. This is the HOST-side reachability budget (the in-container
-# HEALTHCHECK owns readiness), so it only has to cover the container's own
-# start-period plus its retries; 120s leaves an order of magnitude of headroom over
-# what was measured, while no longer hiding a genuinely hung image for a quarter of
-# an hour.
-healthcheck_timeout_s = 120

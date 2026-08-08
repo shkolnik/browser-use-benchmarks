@@ -56,6 +56,32 @@ COPY --chmod=755 entrypoint.sh /entrypoint.sh
 # service starts, and base_url written before nginx serves its first page.
 CMD ["/entrypoint.sh"]
 
+# MEASURED, not predicted: this container reached healthy in 15s, serving a
+# real <title>Magento Admin</title> login page. The expected multi-minute
+# first-request DI compile does not happen here — restore-stage.sh does skip
+# setup:di:compile, but generated/code (Composer, Magento, PayPal, Psr,
+# Symfony) arrives with the restored /opt/magento tree, so there is nothing
+# left to compile. The 900s that used to sit in image.toml was sized for a
+# compile this image never performs.
+#
+# 300s is ~20x the measured time, which absorbs a cold page cache on a CI
+# runner while still failing a genuinely stuck container in about five minutes
+# rather than a quarter of an hour. --timeout stays generous because Docker
+# never overlaps probes, so a slow probe costs nothing when things are fine.
+#
+# ⚠️ 127.0.0.1, NOT localhost. Magento's adminhtml is pinned to the configured
+# base_url (unlike the storefront, which serves any Host after
+# redirect_to_base=0), and compose sets HTTP_HOST=127.0.0.1. Measured
+# in-container after the DI compile, against this image:
+#     Host=localhost   -> 404  (falls through to the frontend area)
+#     Host=127.0.0.1   -> 200
+# So a healthcheck naming localhost would never go healthy. The fallthrough
+# does return a real 404, so `curl -f` fails loudly on it rather than passing
+# on an empty page — this check is therefore also, incidentally, proof that the
+# entrypoint's base_url write took effect.
+HEALTHCHECK --start-period=300s --interval=15s --timeout=120s --retries=3 \
+  CMD curl -fsS -L --max-time 115 http://127.0.0.1:7780/admin >/dev/null || exit 1
+
 # --- Magento 2.4.6 code tree, deterministically from the committed lockfile ---
 FROM runtime AS code
 USER app

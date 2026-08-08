@@ -46,4 +46,8 @@ script = "derive-backup.sh"
 outputs = ["reddit_db.sql.gz", "reddit_media.tar"]
 
 [service]
+# The PUBLISHED address the smoke gate reaches this service at (9999) —
+# deliberately different from the Dockerfile's HEALTHCHECK, which probes the
+# IN-CONTAINER listen port (80). Readiness is the HEALTHCHECK's job now; this
+# is a reachability check only.
 healthcheck = "http://localhost:9999/forums"

@@ -108,14 +108,19 @@ RUN cd search_engine \
  && rm -rf resources resources_100 resources_1k resources_100k
 
 EXPOSE 3000
-CMD ["python", "-m", "web_agent_site.app"]
+# --chmod so the mode is a property of the BUILD, not of the checkout.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+# Not the app directly: HTTP_HOST/HTTP_PORT are validated before anything binds.
+CMD ["/entrypoint.sh"]
 
 # The app still binds port 3000 before it has loaded anything — `all_products` is a
 # module global that web_agent_site/app.py's index() populates behind
 # `if search_engine is None` — so the first request is still the one that does the
 # work. What changed is how much work that is: it now mmaps the prebuilt store and
 # attaches the Lucene index rather than parsing 5.1G of JSON. Measured on the fork:
-# 1.5s to first response, 5.2s to docker-healthy, against 57s before.
+# 1.5s to first response, 5.2s to docker-healthy, against 57s before — and that
+# pre-fork load peaked around 19G RSS, close enough to this host's 39G/no-swap to
+# involve the OOM killer.
 #
 # The old numbers (--start-period=120s, --timeout=115s) existed solely to let one
 # probe wait out that 57s load, so they retire with it. 60s of start period is ~10x

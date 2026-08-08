@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Rebuilds the WebArena reddit benchmark image (Postmill) from provenance-clear
 # parts: Postmill's own source at a pinned commit, built with Postmill's own
 # multi-stage recipe, plus the populated data derived from the upstream
@@ -229,4 +230,17 @@ RUN set -eux; \
     chown postgres:postgres /run/postgresql
 
 EXPOSE 80
-CMD ["supervisord", "-c", "/etc/supervisord.conf", "-n"]
+# --chmod so the mode is a property of the BUILD, not of the checkout.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+CMD ["/entrypoint.sh"]
+
+# ⚠️ localhost:80, NOT 9999. The healthcheck runs INSIDE the container, so it
+# uses the listen port; 9999 is the published side and nothing is bound to it in
+# here. This is the only image in the fleet where the two differ, which makes it
+# the easiest one to get wrong by copying image.toml's URL.
+#
+# /forums, not /: a document root nested one level too deep still answers / and
+# 404s every real page — the exact defect that shipped once already.
+# Postgres + php-fpm + nginx come up under supervisord, hence the start period.
+HEALTHCHECK --start-period=90s --interval=10s --timeout=15s --retries=3 \
+  CMD curl -fsS -L --max-time 14 http://localhost:80/forums >/dev/null || exit 1

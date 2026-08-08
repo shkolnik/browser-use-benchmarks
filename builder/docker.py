@@ -249,9 +249,18 @@ class Health(NamedTuple):
     def __bool__(self) -> bool:
         return self.ok
 
-def poll_health(url: str, timeout_s: int = 120,
+def poll_health(url: str, timeout_s: int = 30,
                 opener=urllib.request.urlopen, sleep=time.sleep,
                 clock=time.monotonic) -> Health:
+    """Is the service REACHABLE at its published address?
+
+    NOT a readiness check — the image's own HEALTHCHECK owns that, and
+    `up --wait` has already blocked on it before this runs. This answers the one
+    question the in-container check structurally cannot: does the port mapping
+    work? shopping was healthy inside its container while the host got
+    ECONNREFUSED on 7770 for 901s (#66), and no HEALTHCHECK could ever have seen
+    that.
+    """
     start = clock()
     deadline = start + timeout_s
     last = "no attempt completed"
@@ -274,6 +283,26 @@ def compose_services(compose: Path, check_output=subprocess.check_output) -> lis
         ["docker", "compose", "-f", str(compose), "config", "--services"], text=True)
     return [line.strip() for line in out.splitlines() if line.strip()]
 
+def compose_service_image(compose: Path, service: str,
+                          check_output=subprocess.check_output) -> str:
+    """The image a compose service resolves to, with variables interpolated."""
+    cfg = json.loads(check_output(
+        ["docker", "compose", "-f", str(compose), "config", "--format", "json"],
+        text=True))
+    return cfg["services"][service]["image"]
+
+def image_healthcheck(image: str, check_output=subprocess.check_output) -> dict | None:
+    """The image's declared HEALTHCHECK, or None if it declares none.
+
+    `docker image inspect` prints the literal `null` in the absent case
+    (verified 2026-08-07), which is why this parses json rather than reading a
+    dotted template — the dotted form is what fails outright on the container
+    side, and matching shapes here keeps the two readers honest.
+    """
+    out = check_output(["docker", "image", "inspect", "--format",
+                        "{{json .Config.Healthcheck}}", image], text=True).strip()
+    return None if out in ("", "null") else json.loads(out)
+
 def dump_service_logs(compose: Path, service: str, tail: str = "400",
                       runner=subprocess.run) -> None:
     # Best-effort: this runs on a path that is already failing, so it must not
@@ -285,6 +314,53 @@ def dump_service_logs(compose: Path, service: str, tail: str = "400",
     except Exception as e:
         print(f"(could not collect logs: {e})")
 
+def container_health(compose: Path, service: str,
+                     check_output=subprocess.check_output) -> dict | None:
+    """The container's parsed .State.Health, or None if it declares no healthcheck.
+
+    Read as JSON rather than through `--format '{{.State.Health.Status}}'`: on a
+    container with no healthcheck that template does not print an empty string,
+    it FAILS with `map has no entry for key "Health"` (verified 2026-08-07). The
+    json form prints the literal `null` in the same case, which parses.
+    """
+    ids = check_output(["docker", "compose", "-f", str(compose), "ps", "-aq", service],
+                       text=True).strip().splitlines()
+    if not ids:
+        return None
+    out = check_output(["docker", "inspect", "--format", "{{json .State.Health}}",
+                        ids[0].strip()], text=True).strip()
+    if out in ("", "null"):
+        return None
+    return json.loads(out)
+
+def dump_health_log(compose: Path, service: str,
+                    check_output=subprocess.check_output, log=print) -> None:
+    """The probe's own exit codes and output — the evidence `up --wait` throws away.
+
+    When --wait says `container X is unhealthy` it reports no reason at all, and
+    the reason is sitting in .State.Health.Log (docker keeps the last 5 probes).
+    gitlab went unhealthy after 1107s twice with its service tree present and
+    nothing in this pipeline could say why.
+
+    Best-effort, like the other dumps: it runs on an already-failing path.
+    """
+    log(f"=== healthcheck probe log for {service} ===")
+    try:
+        health = container_health(compose, service, check_output=check_output)
+    except Exception as e:
+        log(f"(could not collect health log: {e})")
+        return
+    if health is None:
+        log("(container declares no healthcheck — nothing to report)")
+        return
+    log(f"status={health.get('Status')} failing_streak={health.get('FailingStreak')}")
+    for entry in health.get("Log", [])[-5:]:
+        log(f"  exit={entry.get('ExitCode')} start={entry.get('Start')} end={entry.get('End')}")
+        output = (entry.get("Output") or "").strip()
+        if output:
+            for line in output[:2000].splitlines():
+                log(f"    {line}")
+
 def dump_service_diagnostics(compose: Path, service: str,
                              runner=subprocess.run) -> None:
     # Logs alone could not explain shopping (CI 31170194781): supervisord said
@@ -293,6 +369,7 @@ def dump_service_diagnostics(compose: Path, service: str,
     # that separate "the server never bound" from "publishing is broken" are the
     # port bindings and the listener table — neither of which is in any log.
     # Best-effort, like the log dump: this runs on an already-failing path.
+    dump_health_log(compose, service)
     probes = [
         (["docker", "compose", "-f", str(compose), "ps", service],
          "what compose published"),
@@ -338,6 +415,19 @@ def run_smoke(refs, repo_root: Path) -> None:
         # fails between here and the last healthcheck, the evidence is the
         # container's logs, and the finally-block is about to delete them.
         try:
+            # Before the boot, not after: a missing HEALTHCHECK is a defect in
+            # the image, and finding it costs seconds here instead of a full
+            # start-period. `up --wait` on an image with none silently degrades
+            # to waiting for RUNNING, which a container that never serves a
+            # byte also reaches.
+            for ref in want:
+                image = compose_service_image(compose, ref.service)
+                if image_healthcheck(image) is None:
+                    raise SystemExit(
+                        f"error: {ref.name}'s image {image} declares no HEALTHCHECK — "
+                        f"`docker compose up --wait` would only wait for the container to "
+                        f"be RUNNING, which a container that never serves a byte also is. "
+                        f"Add a HEALTHCHECK to images/{ref.benchmark}/{ref.service}/Dockerfile.")
             run(["docker", "compose", "-f", str(compose), "up", "-d", "--wait",
                  *[r.service for r in want]])
             for ref in want:
@@ -345,12 +435,16 @@ def run_smoke(refs, repo_root: Path) -> None:
                 hc = man.healthcheck
                 if hc is None:
                     raise SystemExit(f"error: {ref.name} has no [service].healthcheck in image.toml")
-                health = poll_health(hc, timeout_s=man.healthcheck_timeout_s)
+                # `up --wait` proved it healthy from the INSIDE. This is the
+                # other half: reachable from the host, through the published
+                # port mapping.
+                health = poll_health(hc, timeout_s=man.reachability_timeout_s)
                 if not health:
                     raise SystemExit(
-                        f"error: smoke FAILED — {ref.name} never became healthy at {hc} "
-                        f"after {health.elapsed_s:.0f}s (last attempt: {health.last})")
-                print(f"{ref.name}: healthy at {hc} after {health.elapsed_s:.0f}s")
+                        f"error: smoke FAILED — {ref.name} reports healthy in-container but "
+                        f"is not reachable at its published address {hc} after "
+                        f"{health.elapsed_s:.0f}s (last attempt: {health.last})")
+                print(f"{ref.name}: healthy and reachable at {hc} after {health.elapsed_s:.0f}s")
         except BaseException:
             # BaseException, not Exception: SystemExit is how everything in
             # here reports failure, and it is not an Exception.
