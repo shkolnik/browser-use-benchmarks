@@ -95,9 +95,31 @@ dcache_ensure_oras() {
 # derivation; a failed migration risks nothing but trying again later, and
 # never allowed to fail the caller's build.
 dcache__migrate_legacy_hit() {
-  local ref=$1 dest=$2
-  ( cd "$dest" && oras push "$ref" $(find . -mindepth 1 -type f -printf '%P\n') ) \
-    >/dev/null 2>&1 \
+  local ref=$1 dest=$2 extracted=$3
+
+  # Push EXACTLY what came out of the legacy entry, never "what is in $dest".
+  # $dest is DATASETS_DIR — the runner's shared datasets directory, holding
+  # every other image's inputs and the multi-tens-of-GB upstream tars. The
+  # first version of this function pushed `find . -type f` over that directory,
+  # which would have replaced a good cache tag with an artifact containing the
+  # entire datasets dir. It survived review because the round-trip test used a
+  # clean temp dir as the destination, where "everything in $dest" and "what
+  # the entry contained" are the same set. They are not the same on a runner.
+  local -a files=()
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case $f in */) continue ;; esac   # tar -v lists directories too
+    [ -f "$dest/$f" ] || continue
+    files+=("$f")
+  done <<<"$extracted"
+
+  if [ ${#files[@]} -eq 0 ]; then
+    echo "derive-cache: legacy hit for $ref extracted no files; not migrating" >&2
+    return 0
+  fi
+
+  ( cd "$dest" && oras push "$ref" "${files[@]}" ) >/dev/null 2>&1 \
     || echo "derive-cache: opportunistic migration of $ref to oras failed; still legacy" >&2
 }
 
@@ -156,10 +178,15 @@ dcache_pull() {
     # Same idiom as every derive-backup.sh today, unchanged: ONE wildcard
     # pattern, because GNU tar exits 2 on any pattern that matches nothing, so
     # a second shape would break every extract that legitimately lacks it.
-    docker export "$cid" | tar -x -C "$dest" --wildcards "$filter"
+    # `-v` because the migration below must push EXACTLY these files and
+    # nothing else. $dest is the runner's shared datasets directory, holding
+    # every other image's inputs, so "everything under $dest" is never the
+    # right answer — see dcache__migrate_legacy_hit.
+    local extracted
+    extracted=$(docker export "$cid" | tar -x -v -C "$dest" --wildcards "$filter")
     docker rm "$cid" >/dev/null
     docker rmi "$ref" >/dev/null 2>&1 || true
-    dcache__migrate_legacy_hit "$ref" "$dest"
+    dcache__migrate_legacy_hit "$ref" "$dest" "$extracted"
     return 0
   fi
 
