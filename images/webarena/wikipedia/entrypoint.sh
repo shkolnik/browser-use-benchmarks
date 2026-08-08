@@ -3,7 +3,7 @@
 # defaults: HTTP_HOST and HTTP_PORT say how CLIENTS reach this container. They
 # are NOT the address the server binds — the base image's start.sh hardcodes
 # `kiwix-serve --port=80`, so this container always listens on 80 and compose
-# publishes that on 8888 (WebArena's port for this service).
+# publishes that on 9888 (WebArena uses 8888; see images/webarena/compose.yml).
 #
 # Unlike the Magento images, nothing here is rewritten from these values:
 # kiwix-serve emits only RELATIVE links. Verified 2026-08-08 against the real
@@ -26,7 +26,7 @@ error:$missing not set — this image has no default hostname on purpose.
   the published port is normally a different number.
 
   Run it like:
-    docker run -e HTTP_HOST=localhost -e HTTP_PORT=8888 -p 8888:80 <image>
+    docker run -e HTTP_HOST=localhost -e HTTP_PORT=9888 -p 9888:80 <image>
 EOF
   exit 1
 fi
