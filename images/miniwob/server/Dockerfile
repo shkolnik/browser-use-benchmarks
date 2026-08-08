@@ -13,4 +13,12 @@ RUN mkdir -p /usr/share/nginx/miniwob \
  && rm /tmp/miniwob-plusplus.tar.gz
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+EXPOSE 8399
+# --chmod so the mode is a property of the BUILD, not of whoever checked the
+# repo out: a COPY that inherited a 644 script died with "Permission denied"
+# before any of its own validation could run.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+# Not nginx directly: HTTP_HOST/HTTP_PORT are validated before anything serves.
+ENTRYPOINT ["/entrypoint.sh"]
+
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
