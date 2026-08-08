@@ -18,7 +18,12 @@
 # Inputs (env, set by builder/manifest.py's run_prepare):
 #   DATASETS_DIR  where the verified upstream tar lives and outputs must land
 #   REGISTRY      e.g. ghcr.io/shkolnik
+#   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
+
+# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
+# to the legacy `FROM scratch` image, and pushes new entries as oras.
+. "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 UPSTREAM_TAR="$DATASETS_DIR/shopping_final_0712.tar"
 UPSTREAM_TAG=shopping_final_0712:latest
@@ -55,25 +60,16 @@ assert_dump_complete() {
   echo "derive: $1 completion trailer present"
 }
 
-extract_outputs_from_cache() {
-  local cid
-  cid=$(docker create "$CACHE" true)
-  # Filtered: `docker export` also carries the /dev, /etc, /proc, /sys and
-  # /.dockerenv Docker injects into every container, which unfiltered land
-  # in the shared datasets dir. ONE pattern — tar exits 2 on any pattern
-  # that matches nothing, so a second shape would break every extract that
-  # legitimately lacks it.
-  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards 'shopping_*'
-  docker rm "$cid" >/dev/null
+reassemble_outputs() {
   cat "$DATASETS_DIR"/shopping_media.tar.part-* > "$DATASETS_DIR/shopping_media.tar"
   rm -f "$DATASETS_DIR"/shopping_media.tar.part-*
 }
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if docker pull "$CACHE" 2>/dev/null; then
-  extract_outputs_from_cache
+if dcache_pull "$CACHE" "$DATASETS_DIR" 'shopping_*'; then
+  reassemble_outputs
   assert_dump_complete shopping_db.sql.gz
-  echo "derive: cache hit, outputs extracted"
+  echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
 echo "cache miss — deriving from upstream tar"
@@ -160,35 +156,10 @@ trap 'rm -rf "$work"' EXIT
 split -b 8G -d "$DATASETS_DIR/shopping_media.tar" "$work/shopping_media.tar.part-"
 cp "$DATASETS_DIR/shopping_db.sql.gz" "$work/"
 cp "$DATASETS_DIR/shopping_env.php" "$work/"
-{
-  echo "FROM scratch"
-  for f in "$work"/shopping_media.tar.part-*; do
-    echo "COPY $(basename "$f") /"
-  done
-  echo "COPY shopping_db.sql.gz /"
-  echo "COPY shopping_env.php /"
-} > "$work/Dockerfile"
-docker build -t "$CACHE" "$work"
-rm -rf "$work"
-# Retry, then FAIL. builder/docker.py stamps a successful prepare and skips
-# this script on every later run with matching inputs, so this is the only run
-# that will ever push: a warning here leaves the cache empty permanently while
-# later builds depend on it. Retries because a transient GHCR error must not
-# throw away a finished derivation.
-pushed=
-for attempt in 1 2 3; do
-  if docker push "$CACHE"; then
-    pushed=yes
-    break
-  fi
-  echo "cache push attempt $attempt/3 failed" >&2
-  [ "$attempt" = 3 ] || sleep 30
+files=(shopping_db.sql.gz shopping_env.php)
+for f in "$work"/shopping_media.tar.part-*; do
+  files+=("$(basename "$f")")
 done
-if [ -z "$pushed" ]; then
-  echo "derive: could not publish $CACHE after 3 attempts. Failing rather than" \
-       "stamping: prepare_reuse_check would skip this script on the next run," \
-       "so nothing would ever retry the push and the cache would stay empty" \
-       "for good. The artifacts in $DATASETS_DIR are intact and correct." >&2
-  exit 1
-fi
+# dcache_push retries 3x then fails the build (#80) — see the library.
+dcache_push "$CACHE" "$work" "${files[@]}"
 echo "derive complete"

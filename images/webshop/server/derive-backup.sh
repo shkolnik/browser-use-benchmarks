@@ -34,8 +34,13 @@
 #   REGISTRY             e.g. ghcr.io/shkolnik
 #   PREPARE_INPUTS_DIGEST  identity of the whole pinned input set
 #   PREPARE_INPUT_PINS     those pins in `sha256sum -c` format
-#   REPO_ROOT/IMAGE      so the miss path can fetch the lazy datasets
+#   REPO_ROOT/IMAGE      so the miss path can fetch the lazy datasets, and to
+#                        source the shared derive-cache library
 set -euo pipefail
+
+# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
+# to the legacy `FROM scratch` image, and pushes new entries as oras.
+. "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 # The pins come from image.toml via run_prepare — never a second copy here.
 : "${PREPARE_INPUTS_DIGEST:?run_prepare must export the pinned input-set digest}"
@@ -58,23 +63,10 @@ verify_outputs() {
   echo "derive: outputs verified against their pins"
 }
 
-extract_outputs_from_cache() {
-  local cid
-  cid=$(docker create "$CACHE" true)
-  # Filtered: `docker export` also carries the /dev, /etc, /proc, /sys and
-  # /.dockerenv Docker injects into every container, which unfiltered land
-  # in the shared datasets dir. ONE pattern — tar exits 2 on any pattern
-  # that matches nothing, so a second shape would break every extract that
-  # legitimately lacks it.
-  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards 'items_*'
-  docker rm "$cid" >/dev/null
-}
-
 echo "=== checking derived-inputs cache: $CACHE ==="
-if docker pull "$CACHE" 2>/dev/null; then
-  extract_outputs_from_cache
+if dcache_pull "$CACHE" "$DATASETS_DIR" 'items_*'; then
   verify_outputs
-  echo "derive: cache hit, outputs extracted"
+  echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
 echo "cache miss — fetching from the pinned upstream mirrors"
@@ -90,35 +82,16 @@ echo "=== push derived-inputs cache ==="
 # ceiling, unlike the media tars the other scripts have to split.
 work=$(mktemp -d "$DATASETS_DIR/.derive-work.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-{
-  echo "FROM scratch"
-  printf '%s\n' "$PREPARE_INPUT_PINS" | awk '{print $2}' | while read -r f; do
-    # Hardlink rather than copy — same filesystem, and a second 5.1G copy is
-    # real time and real disk on a runner that has run out of both.
-    ln "$DATASETS_DIR/$f" "$work/$f"
-    echo "COPY $f /"
-  done
-} > "$work/Dockerfile"
-docker build -t "$CACHE" "$work"
-# Retry, then FAIL. builder/docker.py stamps a successful prepare and skips
-# this script on every later run with matching inputs, so this is the only run
-# that will ever push: a warning here leaves the cache empty permanently while
-# later builds depend on it. Retries because a transient GHCR error must not
-# throw away a finished fetch.
-pushed=
-for attempt in 1 2 3; do
-  if docker push "$CACHE"; then
-    pushed=yes
-    break
-  fi
-  echo "cache push attempt $attempt/3 failed" >&2
-  [ "$attempt" = 3 ] || sleep 30
-done
-if [ -z "$pushed" ]; then
-  echo "derive: could not publish $CACHE after 3 attempts. Failing rather than" \
-       "stamping: prepare_reuse_check would skip this script on the next run," \
-       "so nothing would ever retry the push and the cache would stay empty" \
-       "for good. The artifacts in $DATASETS_DIR are intact and correct." >&2
-  exit 1
-fi
+files=()
+# Process substitution, not a pipe into `while read`: a pipe runs the loop in
+# a subshell, so appends to `files` there would vanish the moment the pipeline
+# ends and dcache_push below would see an empty list.
+while read -r f; do
+  # Hardlink rather than copy — same filesystem, and a second 5.1G copy is
+  # real time and real disk on a runner that has run out of both.
+  ln "$DATASETS_DIR/$f" "$work/$f"
+  files+=("$f")
+done < <(printf '%s\n' "$PREPARE_INPUT_PINS" | awk '{print $2}')
+# dcache_push retries 3x then fails the build (#80) — see the library.
+dcache_push "$CACHE" "$work" "${files[@]}"
 echo "derive complete"
