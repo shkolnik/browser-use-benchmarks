@@ -21,6 +21,7 @@ the offending path named, if the tree cannot be split under those bounds — a
 build that would push an oversized layer fails here rather than at push time.
 """
 
+import errno
 import os
 import shutil
 import stat
@@ -129,6 +130,65 @@ def mkdir_mirroring(root, bucket, rel_dir):
         os.chmod(dest, stat.S_IMODE(st.st_mode))
 
 
+def _clone_meta(src_st, dest):
+    """Give dest the owner, mode and times of the source it was copied from."""
+    os.chown(dest, src_st.st_uid, src_st.st_gid)
+    # chmod AFTER chown, which clears setuid/setgid. git-data is 2770.
+    os.chmod(dest, stat.S_IMODE(src_st.st_mode))
+    os.utime(dest, (src_st.st_atime, src_st.st_mtime))
+
+
+def copy_preserving(src, dest):
+    """Recursive copy that keeps ownership, which shutil's copytree does not."""
+    st = os.lstat(src)
+    if stat.S_ISLNK(st.st_mode):
+        os.symlink(os.readlink(src), dest)
+        os.chown(dest, st.st_uid, st.st_gid, follow_symlinks=False)
+        return
+    if stat.S_ISDIR(st.st_mode):
+        os.mkdir(dest)
+        for name in os.listdir(src):
+            copy_preserving(os.path.join(src, name), os.path.join(dest, name))
+        # After the children: creating them moves this directory's mtime.
+        _clone_meta(st, dest)
+        return
+    shutil.copyfile(src, dest)
+    _clone_meta(st, dest)
+
+
+def move_preserving(src, dest):
+    """Move src onto dest with owner and mode intact, whatever the filesystem.
+
+    os.rename keeps everything, but only within one filesystem. The pieces moved
+    here usually come from a LOWER overlayfs layer, where renaming a directory
+    raises EXDEV — and shutil.move's fallback is copytree, which copies mode and
+    times but NOT ownership. That is silent and path-dependent: a leaf written
+    during the build renames cleanly and keeps its owner, while a leaf inherited
+    from the base image is copied and arrives root-owned.
+
+    gitlab shipped exactly that. /var/opt/gitlab/prometheus is gitlab-prometheus
+    in the base image, so it took the copy path and reached the final image
+    root-owned; runit runs prometheus as gitlab-prometheus, which then panicked
+    on its TSDB and was restarted forever. /var/opt/gitlab/git-data, created by
+    the restore in the upper layer, renamed and kept git:git — which is why the
+    loss looked like it was confined to one directory rather than to one
+    CODE PATH. Fixing the recreated parents (mkdir_mirroring) did not touch it:
+    that fix covers the directories on the way to a leaf, this one covers the
+    leaf itself.
+    """
+    try:
+        os.rename(src, dest)
+        return
+    except OSError as err:
+        if err.errno != errno.EXDEV:
+            raise
+    copy_preserving(src, dest)
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.rmtree(src)
+    else:
+        os.remove(src)
+
+
 def main(argv):
     limit_kb, max_buckets, root, staging = int(argv[1]), int(argv[2]), argv[3], argv[4]
     assignments, sizes = plan(root, limit_kb, max_buckets)
@@ -136,9 +196,9 @@ def main(argv):
         rel = os.path.relpath(piece, root)
         bucket = os.path.join(staging, f'bucket-{idx:02d}')
         mkdir_mirroring(root, bucket, os.path.dirname(rel))
-        # Not os.rename: paths from lower overlayfs layers EXDEV on cross-layer
-        # directory renames; shutil.move falls back to copy+delete there.
-        shutil.move(piece, os.path.join(bucket, rel))
+        # Not shutil.move: its cross-filesystem fallback drops ownership, and
+        # cross-layer directory renames DO hit EXDEV here. See move_preserving.
+        move_preserving(piece, os.path.join(bucket, rel))
     print(f'{len(sizes)} buckets:')
     for idx, used in enumerate(sizes):
         print(f'  bucket-{idx:02d}: {used / 2**20:.1f}G')
