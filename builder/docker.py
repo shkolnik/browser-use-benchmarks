@@ -285,6 +285,53 @@ def dump_service_logs(compose: Path, service: str, tail: str = "400",
     except Exception as e:
         print(f"(could not collect logs: {e})")
 
+def container_health(compose: Path, service: str,
+                     check_output=subprocess.check_output) -> dict | None:
+    """The container's parsed .State.Health, or None if it declares no healthcheck.
+
+    Read as JSON rather than through `--format '{{.State.Health.Status}}'`: on a
+    container with no healthcheck that template does not print an empty string,
+    it FAILS with `map has no entry for key "Health"` (verified 2026-08-07). The
+    json form prints the literal `null` in the same case, which parses.
+    """
+    ids = check_output(["docker", "compose", "-f", str(compose), "ps", "-aq", service],
+                       text=True).strip().splitlines()
+    if not ids:
+        return None
+    out = check_output(["docker", "inspect", "--format", "{{json .State.Health}}",
+                        ids[0].strip()], text=True).strip()
+    if out in ("", "null"):
+        return None
+    return json.loads(out)
+
+def dump_health_log(compose: Path, service: str,
+                    check_output=subprocess.check_output, log=print) -> None:
+    """The probe's own exit codes and output — the evidence `up --wait` throws away.
+
+    When --wait says `container X is unhealthy` it reports no reason at all, and
+    the reason is sitting in .State.Health.Log (docker keeps the last 5 probes).
+    gitlab went unhealthy after 1107s twice with its service tree present and
+    nothing in this pipeline could say why.
+
+    Best-effort, like the other dumps: it runs on an already-failing path.
+    """
+    log(f"=== healthcheck probe log for {service} ===")
+    try:
+        health = container_health(compose, service, check_output=check_output)
+    except Exception as e:
+        log(f"(could not collect health log: {e})")
+        return
+    if health is None:
+        log("(container declares no healthcheck — nothing to report)")
+        return
+    log(f"status={health.get('Status')} failing_streak={health.get('FailingStreak')}")
+    for entry in health.get("Log", [])[-5:]:
+        log(f"  exit={entry.get('ExitCode')} start={entry.get('Start')} end={entry.get('End')}")
+        output = (entry.get("Output") or "").strip()
+        if output:
+            for line in output[:2000].splitlines():
+                log(f"    {line}")
+
 def dump_service_diagnostics(compose: Path, service: str,
                              runner=subprocess.run) -> None:
     # Logs alone could not explain shopping (CI 31170194781): supervisord said
@@ -293,6 +340,7 @@ def dump_service_diagnostics(compose: Path, service: str,
     # that separate "the server never bound" from "publishing is broken" are the
     # port bindings and the listener table — neither of which is in any log.
     # Best-effort, like the log dump: this runs on an already-failing path.
+    dump_health_log(compose, service)
     probes = [
         (["docker", "compose", "-f", str(compose), "ps", service],
          "what compose published"),
