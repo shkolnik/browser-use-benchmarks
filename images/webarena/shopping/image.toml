@@ -19,10 +19,8 @@ script = "derive-backup.sh"
 outputs = ["shopping_db.sql.gz", "shopping_media.tar", "shopping_env.php"]
 
 [service]
+# The PUBLISHED address the smoke gate reaches this service at. Readiness is the
+# Dockerfile HEALTHCHECK's job (900s start period, for Magento's first-request
+# DI compile); this is a reachability check only, and its budget is the
+# fleet-wide default.
 healthcheck = "http://127.0.0.1:7770/"
-# The build deliberately never runs setup:di:compile (see the Dockerfile banner:
-# the dataset has no core setup_module rows), so the generated/ classes do not
-# exist in the image and Magento compiles them on the FIRST request. Boot itself
-# is quick — mariadb and elasticsearch answered in 10s during the build — but
-# that first uncached page is minutes of PHP, and 120s cut it off mid-compile.
-healthcheck_timeout_s = 900

@@ -59,6 +59,30 @@ COPY --chmod=755 entrypoint.sh /entrypoint.sh
 # service starts, and base_url written before nginx serves its first page.
 CMD ["/entrypoint.sh"]
 
+# 900s is deliberately conservative, and UNVERIFIED for this image — it cannot
+# be built on the dev host (datasets/shopping_media.tar is absent), so nothing
+# here has been measured against a running container.
+#
+# What IS established: restore-stage.sh never runs setup:upgrade/di:compile, so
+# any generated/ classes in the image arrive with the restored /opt/magento
+# tree rather than from a compile. On ../shopping-admin, which restores the
+# same way, generated/code IS present and the container reached healthy in 15s
+# — so the feared multi-minute first-request compile may not happen here
+# either. Left large until someone can measure it: an over-long start period
+# only delays detecting a stuck container, while too short a one fails a
+# healthy image outright.
+#
+# --timeout is the decisive parameter, not the total budget: a probe that gives
+# up after 10s against a first request that takes minutes can never succeed at
+# ANY number of retries. Docker never overlaps probes, so a long timeout is
+# safe. Failures during the start period do not count toward --retries, and a
+# success during it marks the container healthy immediately.
+#
+# -L is load-bearing: `curl -f` fails only on >=400, so an unfollowed 302 would
+# pass against a container that rendered nothing.
+HEALTHCHECK --start-period=900s --interval=15s --timeout=120s --retries=3 \
+  CMD curl -fsS -L --max-time 115 http://localhost:7770/ >/dev/null || exit 1
+
 # --- Magento 2.4.6 code tree, deterministically from the committed lockfile ---
 FROM runtime AS code
 USER app
