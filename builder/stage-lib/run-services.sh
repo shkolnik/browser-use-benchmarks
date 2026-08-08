@@ -44,19 +44,26 @@ svc__die() { echo "run-services: $*" >&2; exit 1; }
 # Every candidate must REPLACE itself with the service (exec, no fork), so that
 # $! is the service's own pid: a wrapper that forks and waits would still
 # forward the exit code, but signals sent on shutdown would land on the wrapper
-# instead of the service. setpriv and su-exec exec; runuser is last because it
-# may fork to run a PAM session.
+# instead of the service. su-exec and util-linux's setpriv exec; runuser is
+# last because it may fork to run a PAM session.
+#
+# Each candidate is PROBED, not merely found on PATH. Alpine ships busybox's
+# setpriv, a different program that rejects --reuid outright — measured in the
+# reddit image, where trusting `command -v setpriv` would have failed every
+# service that drops privileges. Probing as the real target user also turns a
+# misspelled or missing account into a loud failure at startup.
 svc__priv_prefix() {
-  local user=$1
-  if command -v setpriv >/dev/null 2>&1; then
-    SVC_PRE=(setpriv --reuid "$user" --regid "$user" --init-groups --)
-  elif command -v su-exec >/dev/null 2>&1; then
-    SVC_PRE=(su-exec "$user")
-  elif command -v runuser >/dev/null 2>&1; then
-    SVC_PRE=(runuser -u "$user" --)
-  else
-    svc__die "cannot run a service as '$user': no setpriv, su-exec or runuser"
-  fi
+  local user=$1 tool
+  for tool in su-exec setpriv runuser; do
+    command -v "$tool" >/dev/null 2>&1 || continue
+    case $tool in
+      su-exec) SVC_PRE=(su-exec "$user") ;;
+      setpriv) SVC_PRE=(setpriv --reuid "$user" --regid "$user" --init-groups --) ;;
+      runuser) SVC_PRE=(runuser -u "$user" --) ;;
+    esac
+    "${SVC_PRE[@]}" true >/dev/null 2>&1 && return 0
+  done
+  svc__die "cannot run services as '$user': no working su-exec, setpriv or runuser"
 }
 
 # svc_start NAME [--user USER] [--log FILE] -- command...
@@ -151,8 +158,12 @@ svc_supervise() {
   local dead code name
   while :; do
     dead=''
-    wait -n -p dead
-    code=$?
+    code=0
+    # `|| code=$?` rather than a bare wait: every entrypoint sourcing this runs
+    # under `set -e`, where a service exiting non-zero would make errexit kill
+    # this shell right here — with the right code, but with no log line saying
+    # which service died and no shutdown of the others.
+    wait -n -p dead || code=$?
     # A signal interrupted the wait: the trap has already run and exited.
     [ -n "$dead" ] || continue
     # Belt and braces. Measured at PID 1 with eight orphaned grandchildren:
