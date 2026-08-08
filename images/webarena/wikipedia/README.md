@@ -56,7 +56,7 @@ raising the container's `nofile` limit to 65536 does not change it — so it is 
 not a file-descriptor ceiling. The real archive uses 11 parts, far below the bound, but a future
 part-size change should not cross it blindly.
 
-## The unresolved blocker: the fulltext index is bigger than a layer
+## The fulltext index is bigger than a layer, and what this image does about it
 
 Measured extents in `wikipedia_en_all_maxi_2022-05.zim` (95,199,730,590 bytes):
 
@@ -73,9 +73,9 @@ GHCR ceiling. Compression does not rescue it — the index is mostly incompressi
 - ~60% of the index measures 0.945 on its own, so the mean cannot improve much
 - even a hypothetical 0.70 lands at 10.43 GiB — still over
 
-**Conclusion: the full English Wikipedia maxi ZIM cannot be delivered as a single OCI image with
-working full-text search under a 10 GB layer limit.** That is arithmetic, so no oversized test push
-was spent reaching it.
+**So no part size can make this archive publishable with working search:** one part *is* one index,
+and that index is over the ceiling. That is arithmetic, so no oversized test push was spent reaching
+it.
 
 The layout the archive *wants*, from the measured extents (`zim_layout.py boundaries <zim> 9G`):
 
@@ -87,11 +87,31 @@ part  9     14.91 GiB   <- fulltext index, whole   ** the only part over the cei
 part 10      1.48 GiB
 ```
 
-Every part but one fits. See the open task for the options (ship the oversized layer if the
-registry in fact takes it; reassemble that one part at container start; or ship without full-text
-search and say so loudly). This image is **not enabled in CI** until that is settled — note that
-enabling is not an action, it is the *absence* of an exclude line in `build.yml`'s discover step,
-so merging this directory to main is what turns it on.
+Every part but one fits. The one that does not is split **once more, along a different axis**: not
+into more ZIM parts (which would cut the index) but into `.partNN` sub-files that mean nothing to
+libzim. `entrypoint.sh` concatenates them back into `part 9` before kiwix-serve opens the archive,
+so what libzim sees is exactly the layout above.
+
+```
+wikipedia_en_all_maxi_2022-05.zimaj.part00   7.45 GiB  ─┐ concatenated at container start
+wikipedia_en_all_maxi_2022-05.zimaj.part01   7.45 GiB  ─┘ into ...zimaj (14.91 GiB)
+```
+
+What that costs, stated plainly:
+
+- **~15 GiB in the container's writable layer**, on top of the image. The sub-files sit in a
+  read-only layer and cannot be reclaimed by deleting them.
+- **~106 s on first start**, measured at the 144 MiB/s this host sustains under a parallel build.
+  A restart of the same container is free — the size check skips a part that is already whole.
+
+Two alternatives were weighed and not taken. Pushing the 14.91 GiB layer as-is is **untested**: the
+probe built for it died at `permission_denied: create_package` before a single byte was uploaded, so
+nothing is known about whether GHCR would take it. Bind-mounting the archive from the host is what
+upstream WebArena does, and it works, but it gives up the property this image exists for — that a
+benchmark is one `docker pull`.
+
+Enabling this image in CI is not an action, it is the *absence* of an exclude line in `build.yml`'s
+discover step, so merging this directory to main is what turns it on.
 
 ## Ports and the health check
 

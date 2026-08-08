@@ -27,12 +27,17 @@ script = "split-zim.sh"
 # libzim's split-archive convention: parts named <stem>.zimaa, .zimab, ... are
 # opened as one archive via a <stem>.zim path that has no file at it.
 #
-# ELEVEN parts, and they are NOT all the same size. The target is 9 GiB, but a
-# boundary is never allowed to land inside an Xapian index — libzim can only
-# serve an index by direct access when its blob is entirely inside one part, and
-# a cut one breaks search while every article still serves perfectly. So parts 7
-# and 8 end early to let the title index open part 8, and part 9 is the fulltext
-# index exactly (14.91 GiB). See split-zim.sh and README.md.
+# ELEVEN parts in TWELVE files, and they are NOT all the same size. The target
+# is 9 GiB, but a boundary is never allowed to land inside an Xapian index —
+# libzim can only serve an index by direct access when its blob is entirely
+# inside one part, and a cut one breaks search while every article still serves
+# perfectly. So parts 7 and 8 end early to let the title index open part 8, and
+# part 9 is the fulltext index exactly.
+#
+# That index is 14.91 GiB, larger than a layer, and a part is a file that lives
+# in exactly one layer. Part 9 therefore ships as two `.partNN` sub-files that
+# entrypoint.sh concatenates back before kiwix-serve opens the archive; libzim
+# only ever sees the whole part. See split-zim.sh and README.md.
 #
 # Listed individually rather than globbed so that a split which produced the
 # wrong set fails the builder's output check instead of silently shipping a
@@ -47,7 +52,8 @@ outputs = [
     "wikipedia_en_all_maxi_2022-05.zimag",
     "wikipedia_en_all_maxi_2022-05.zimah",
     "wikipedia_en_all_maxi_2022-05.zimai",
-    "wikipedia_en_all_maxi_2022-05.zimaj",
+    "wikipedia_en_all_maxi_2022-05.zimaj.part00",
+    "wikipedia_en_all_maxi_2022-05.zimaj.part01",
     "wikipedia_en_all_maxi_2022-05.zimak",
 ]
 
@@ -62,6 +68,8 @@ outputs = [
 # (2026-08-08): 200 in ONE hop, zero redirects, <title>User:The other Kiwix
 # guy/Landing</title>, 19,396 bytes.
 healthcheck = "http://127.0.0.1:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
-# The default budget is ample — kiwix-serve opened the full 88.7 GiB archive
-# and answered this URL 2 s after `docker run` in that same check. It does no
-# first-request work: the archive is mmap'd, not loaded.
+# The default budget is ample: this poll starts only after `up --wait` has
+# already seen the container healthy, so the first-boot reassembly (see the
+# Dockerfile's HEALTHCHECK start period) is over by the time it runs. kiwix
+# itself answered this URL 2 s after `docker run` against the full 88.7 GiB
+# archive — it does no first-request work, the archive is mmap'd, not loaded.

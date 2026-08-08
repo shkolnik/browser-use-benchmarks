@@ -31,10 +31,10 @@ LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-b
 #
 # They are NOT all the same size, and that is the point: a part boundary must
 # never land inside an Xapian index, or search breaks while every article keeps
-# serving. Part 9 is the fulltext index exactly — 14.91 GiB, which is larger
-# than any layer this fleet has published. split-zim.sh refuses before writing
-# anything, so this Dockerfile currently describes a layout that cannot be
-# built; see README.md.
+# serving. Part 9 is the fulltext index exactly — 14.91 GiB, larger than a layer
+# — so it arrives as two `.partNN` sub-files that entrypoint.sh concatenates
+# before kiwix-serve opens the archive. libzim resolves `.zimaa`, `.zimab`, ...
+# and never sees a `.partNN` name, so the extra files are inert until then.
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaa /zim/
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimab /zim/
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimac /zim/
@@ -44,7 +44,8 @@ COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaf /zim/
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimag /zim/
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimah /zim/
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimai /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj /zim/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj.part00 /zim/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj.part01 /zim/
 COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimak /zim/
 
 EXPOSE 80
@@ -68,10 +69,16 @@ EXPOSE 80
 #
 # The target is WebArena's own landing page for this service rather than the
 # library index, because a kiwix-serve whose archive failed to open still
-# answers / with a page. Opening the archive is mmap, not a load, so this is
-# ready seconds after start; the start period is generous only to absorb a cold
-# page cache over ~89 GiB of parts.
-HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
+# answers / with a page. Opening the archive is mmap, not a load, so kiwix
+# itself is ready seconds after start.
+#
+# The start period is long for one reason, and it is not slack: entrypoint.sh
+# concatenates the 14.91 GiB fulltext part from its sub-files before the server
+# starts. That was ~106 s at the 144 MiB/s this host sustains under a parallel
+# build, so 1200 s is roughly a 10x margin for slower storage. `docker compose
+# up --wait` treats UNHEALTHY as terminal but keeps waiting through `starting`,
+# so this number, not a driver timeout, is what a first boot is allowed.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=1200s --retries=5 \
     CMD wget -T 10 -q -O /dev/null \
         "http://127.0.0.1/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
 
