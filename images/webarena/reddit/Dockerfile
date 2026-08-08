@@ -188,6 +188,7 @@ RUN set -eux; \
 FROM app AS restore
 COPY --from=datasets reddit_db.sql.gz /tmp/reddit_db.sql.gz
 COPY --from=datasets reddit_media.tar /tmp/reddit_media.tar
+COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
 RUN /bin/sh /restore-stage.sh
 

@@ -63,6 +63,7 @@ mkdir -p /staging
 for i in $(seq 0 $((BUCKET_COUNT - 1))); do mkdir -p "$(printf '/staging/bucket-%02d' "$i")"; done
 python3 /partition-tree.py "$BUCKET_LIMIT_KB" "$BUCKET_COUNT" "$APP" /staging
 
-# makedirs creates the intermediate parents root-owned, so re-assert ownership
-# to ship app-owned trees in every COPY layer.
+# The partitioner mirrors each recreated parent's owner and mode, so this is
+# not repairing a loss — it is a single-owner re-assertion, cheap insurance on
+# a tree that has exactly one owner.
 chown -R www-data:www-data /staging

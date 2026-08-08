@@ -130,81 +130,15 @@ bad=$(find "$MAGE" ! -user app -print 2>/dev/null | head -5)
 [ -z "$bad" ] || { echo "non-app-owned files in magento tree: $bad" >&2; exit 1; }
 
 echo "=== partition $MAGE into staging buckets ==="
+# Shared implementation: builder/stage-lib/partition-tree.py, reached through
+# the `stagelib` build context.
 mkdir -p /staging
-for i in $(seq 0 $((BUCKET_COUNT - 1))); do mkdir -p "/staging/bucket-0$i"; done
-python3 - "$BUCKET_LIMIT_KB" "$BUCKET_COUNT" "$MAGE" <<'EOF'
-import os
-import shutil
-import subprocess
-import sys
+for i in $(seq 0 $((BUCKET_COUNT - 1))); do mkdir -p "$(printf '/staging/bucket-%02d' "$i")"; done
+python3 /partition-tree.py "$BUCKET_LIMIT_KB" "$BUCKET_COUNT" "$MAGE" /staging
 
-LIMIT_KB = int(sys.argv[1])
-MAX_BUCKETS = int(sys.argv[2])
-ROOT = sys.argv[3]
-
-
-def du_kb(path):
-    return int(subprocess.check_output(['du', '-sk', path]).split()[0])
-
-
-def partition(path):
-    """Yield (path, kb) pieces each <= LIMIT_KB, descending into oversized dirs."""
-    kb = du_kb(path)
-    if kb <= LIMIT_KB:
-        yield path, kb
-        return
-    yield from children(path, kb)
-
-
-def children(path, kb):
-    entries = sorted(os.path.join(path, e) for e in os.listdir(path))
-    if not entries:
-        raise SystemExit(f'{path} is {kb}K with no children to descend into')
-    for entry in entries:
-        if os.path.isdir(entry) and not os.path.islink(entry):
-            yield from partition(entry)
-        else:
-            yield entry, du_kb(entry)
-
-
-buckets = []  # list of (used_kb, index)
-assignments = []
-# children(), never partition(): ROOT must not be yielded as a piece of
-# itself. relpath(ROOT, ROOT) is '.', so the move lands at bucket-NN/. and
-# shutil nests the whole tree as bucket-NN/<basename> — the final image then
-# gets /app/app/... and nginx's `root /app/public` points at nothing. It only
-# bites when the tree fits in ONE bucket, so a shrinking dataset is all it
-# takes; caught by booting a build made with an empty media tar.
-for piece, kb in children(ROOT, du_kb(ROOT)):
-    if kb > LIMIT_KB:
-        raise SystemExit(f'single file {piece} is {kb}K, over the layer limit')
-    for b in buckets:
-        if b[0] + kb <= LIMIT_KB:
-            b[0] += kb
-            assignments.append((piece, b[1]))
-            break
-    else:
-        if len(buckets) == MAX_BUCKETS:
-            raise SystemExit('state outgrew BUCKET_COUNT buckets; '
-                             'raise it and add COPY lines in the Dockerfile')
-        buckets.append([kb, len(buckets)])
-        assignments.append((piece, len(buckets) - 1))
-
-for piece, idx in assignments:
-    rel = os.path.relpath(piece, ROOT)
-    dest = os.path.join('/staging', f'bucket-{idx:02d}', rel)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    # Not os.rename: paths from lower overlayfs layers EXDEV on cross-layer
-    # directory renames; shutil.move falls back to copy+delete there.
-    shutil.move(piece, dest)
-
-print(f'{len(buckets)} buckets:')
-for used, idx in buckets:
-    print(f'  bucket-{idx:02d}: {used / 2**20:.1f}G')
-EOF
-# The bucket move drops directory ownership context for parents created by
-# makedirs (root-owned): re-assert app ownership so the COPY layers ship
-# app-owned trees.
+# The partitioner mirrors each recreated parent's owner and mode, so this is
+# not repairing a loss — it is the same single-owner re-assertion ../../vwa/
+# classifieds makes, cheap insurance on a tree that has exactly one owner.
 chown -R app:app /staging
 
 echo "restore stage complete"
