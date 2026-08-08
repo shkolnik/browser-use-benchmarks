@@ -38,8 +38,19 @@ services:
       - "9999:80"
   gitlab:
     image: ghcr.io/shkolnik/webarena-gitlab:latest
-    # Upstream runs the image with this command (webarena README docker run line);
-    # GitLab's external_url is baked in on port 8023, so the container port is 8023.
-    command: /opt/gitlab/embedded/bin/runsvdir-start
+    # No `command:` here on purpose. Upstream's documented run line is
+    # runsvdir-start, and the image's entrypoint still ends in exactly that —
+    # but a compose `command:` replaces the image CMD wholesale, which would
+    # skip the entrypoint and with it the HTTP_HOST/HTTP_PORT validation.
+    #
+    # Unlike the rest of the fleet these are not free: the value lives in
+    # /etc/gitlab/gitlab.rb and only a `gitlab-ctl reconfigure` renders it into
+    # the config GitLab actually serves (~28s measured). The entrypoint skips
+    # that when the address already matches. It does not match here — the
+    # restored dataset bakes CMU's own host — so this is also what stops the
+    # image serving links pointing at metis.lti.cs.cmu.edu.
+    environment:
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "8023"
     ports:
       - "8023:8023"
