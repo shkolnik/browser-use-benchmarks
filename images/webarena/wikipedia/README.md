@@ -105,8 +105,9 @@ What that costs, stated plainly:
 
 - **~15 GiB in the container's writable layer**, on top of the image. The sub-files sit in a
   read-only layer and cannot be reclaimed by deleting them.
-- **~106 s on first start**, measured at the 144 MiB/s this host sustains under a parallel build.
-  A restart of the same container is free — the size check skips a part that is already whole.
+- **24 s**, measured on the real part (~640 MiB/s). Note this step is skipped entirely when the
+  finished archive is already present — see `assemble-zim` below, which checks that first precisely
+  so this cost is not paid to build an intermediate nothing reads.
 
 Two alternatives were weighed and not taken. Pushing the 14.91 GiB layer as-is is **untested**: the
 probe built for it died at `permission_denied: create_package` before a single byte was uploaded, so
@@ -197,26 +198,40 @@ the image.
 - **Default** — `/zim` is the container's writable layer, so the join is once per *container*.
   `docker restart` is free; `docker run` again pays it in full.
 - **Named volume on `/zim`** — paid once for the life of the volume, however many containers come
-  and go. `ZIM_JOIN_ONLY=1` performs the join and exits 0, so it can be spent right after
-  `docker pull` rather than on a first boot somebody is waiting for:
+  and go. The join is a documented command of its own, `assemble-zim`, so that cost can be spent
+  deliberately right after `docker pull` rather than on a first boot somebody is waiting for:
 
   ```sh
   docker volume create wiki-zim
-  docker run --rm -e HTTP_HOST=localhost -e HTTP_PORT=8888 \
-      -e ZIM_JOIN_ONLY=1 -v wiki-zim:/zim ghcr.io/shkolnik/webarena-wikipedia:latest
+  # prepare it once. No HTTP_HOST/HTTP_PORT needed — building an archive has
+  # nothing to do with how clients reach the server.
+  docker run --rm -v wiki-zim:/zim --entrypoint assemble-zim \
+      ghcr.io/shkolnik/webarena-wikipedia:latest
   # every later run starts in seconds
   docker run -d -e HTTP_HOST=localhost -e HTTP_PORT=8888 -p 8888:80 \
       -v wiki-zim:/zim ghcr.io/shkolnik/webarena-wikipedia:latest
   ```
+
+  The entrypoint runs `assemble-zim` too, so a plain `docker run` still needs no ceremony; the script
+  is idempotent and exits immediately when the archive is already whole.
 
 The volume must go on `/zim` and **never** on `/zim-parts`: Docker seeds an empty named volume from
 the image's contents at that path, so a volume over the parts would copy 88.7 GiB before the join
 wrote another 88.7 GiB into the same volume. Separating the directories makes that unreachable
 rather than merely documented.
 
-Verified on a three-part test image built for the purpose: two plain containers each joined
-independently; `ZIM_JOIN_ONLY=1` joined into a volume and exited 0; two later containers on that
-volume both reported `already whole at 331961086 bytes — skipping` and served.
+Verified on a purpose-built test image whose third part was itself split into `.partNN` sub-files,
+so both join steps ran: `assemble-zim` prepared a volume with no HTTP variables set; running it again
+did nothing; a container booting on that volume did nothing and served; and a plain container with no
+volume assembled from scratch as before. All three serving paths returned byte-identical article,
+search and suggest responses.
+
+That test also caught a defect worth keeping fixed: the check for "already assembled" has to happen
+**before** the sub-file step, not after. Those intermediates land in the container's writable layer,
+which is fresh for every `docker run`, so a container booting on an already-prepared volume was
+rebuilding the 14.91 GiB fulltext part every time — spending the disk and the minutes to produce a
+file nothing then reads. `assemble-zim` now derives the expected total from the parts without joining
+anything, and exits early.
 
 ### The copy can be avoided entirely with FUSE — at a price this image declines to pay
 

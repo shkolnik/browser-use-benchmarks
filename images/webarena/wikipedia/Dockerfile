@@ -91,6 +91,13 @@ HEALTHCHECK --interval=30s --timeout=15s --start-period=3600s --retries=5 \
         "http://127.0.0.1/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
 
 # --chmod so the mode is a property of the BUILD, not of the checkout.
+#
+# assemble-zim goes on PATH, not beside the entrypoint: it is a command an
+# operator is meant to run, to spend the ~632 s join deliberately rather than on
+# a first boot somebody is waiting on —
+#     docker run --rm -v wiki-zim:/zim --entrypoint assemble-zim <image>
+# The entrypoint calls it too, so a plain `docker run` needs no ceremony.
+COPY --chmod=755 assemble-zim /usr/local/bin/assemble-zim
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 # The base entrypoint runs `kiwix-serve --port=80 $@`, so this is the archive

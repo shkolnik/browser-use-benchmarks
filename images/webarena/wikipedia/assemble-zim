@@ -1,0 +1,134 @@
+#!/bin/sh
+# Rebuild the whole ZIM archive from the parts this image ships.
+#
+#   assemble-zim [archive-path]
+#
+# The image carries the archive as parts, because a registry caps a layer far
+# below 88.7 GiB. libzim can read those parts directly — but a split archive
+# serves every article perfectly and NO full-text search at all, whatever the
+# boundaries (see README.md for the measurements). So the parts are joined back
+# into one file before kiwix-serve ever opens them.
+#
+# The entrypoint runs this automatically when the archive is missing, so a plain
+# `docker run` just works. It is a separate command because that first boot costs
+# ~632 s, and an operator may well want to spend it deliberately — before the
+# boot somebody is waiting on:
+#
+#   docker volume create wiki-zim
+#   docker run --rm -v wiki-zim:/zim --entrypoint assemble-zim <image>
+#   docker run -d -p 8888:80 -v wiki-zim:/zim -e HTTP_HOST=localhost \
+#       -e HTTP_PORT=8888 <image>          # starts in seconds
+#
+# Idempotent: an archive already present at the right size is left alone, so
+# running it twice, or running it and then booting, costs nothing the second
+# time. Needs no HTTP_HOST/HTTP_PORT — preparing an archive has nothing to do
+# with how clients reach the server.
+set -eu
+
+PARTS_DIR=${ZIM_PARTS_DIR:-/zim-parts}
+ZIM_DIR=${ZIM_DIR:-/zim}
+
+# Sum the sizes of every file matching a glob, and count them. Two values out of
+# one pass, via globals, because sh has no tuples and a subshell would lose them.
+sum_glob() {
+    sum_bytes=0
+    sum_count=0
+    for f in "$@"; do
+        [ -e "$f" ] || continue
+        sum_bytes=$((sum_bytes + $(stat -c %s "$f")))
+        sum_count=$((sum_count + 1))
+    done
+}
+
+# Join $2..$n into $1, unless $1 is already there at exactly the right size.
+join_into() {
+    dest=$1
+    shift
+    sum_glob "$@"
+    want=$sum_bytes
+    count=$sum_count
+    if [ "$count" -eq 0 ]; then
+        echo "assemble-zim: nothing to join into $dest" >&2
+        return 1
+    fi
+    if [ -f "$dest" ] && [ "$(stat -c %s "$dest")" -eq "$want" ]; then
+        echo "assemble-zim: $dest already whole at $want bytes — skipping"
+        return 0
+    fi
+    mkdir -p "$(dirname "$dest")"
+    echo "assemble-zim: joining $count files into $dest ($((want / 1073741824)) GiB)..."
+    # Not `>>`: a partial file left by a killed run would be extended rather than
+    # replaced, and the size check below would then pass on garbage.
+    rm -f "$dest"
+    cat "$@" > "$dest"
+    got=$(stat -c %s "$dest")
+    if [ "$got" != "$want" ]; then
+        echo "assemble-zim: $dest is $got bytes, expected $want — out of disk?" >&2
+        return 1
+    fi
+    echo "assemble-zim: $dest complete"
+}
+
+# The archive's name is derived from the parts rather than hardcoded here, so
+# this script and the Dockerfile's CMD cannot drift apart.
+archive=${1:-}
+if [ -z "$archive" ]; then
+    stem=
+    for f in "$PARTS_DIR"/*.zim??; do
+        [ -e "$f" ] || continue
+        base=$(basename "$f")
+        this=${base%??}
+        if [ -z "$stem" ]; then
+            stem=$this
+        elif [ "$stem" != "$this" ]; then
+            echo "assemble-zim: $PARTS_DIR holds parts of more than one archive" \
+                 "($stem, $this) — name the one you want as an argument" >&2
+            exit 1
+        fi
+    done
+    if [ -z "$stem" ]; then
+        echo "assemble-zim: no <name>.zimaa/.zimab/... parts in $PARTS_DIR" >&2
+        exit 1
+    fi
+    archive="$ZIM_DIR/$stem"
+fi
+
+stem=$(basename "$archive")
+
+# What the finished archive must weigh — derived WITHOUT joining anything: each
+# logical part is either its own `.zimXX` file or the `.partNN` chunks that add
+# up to one.
+expected=0
+for part in "$PARTS_DIR/$stem"??; do
+    [ -e "$part" ] || continue
+    expected=$((expected + $(stat -c %s "$part")))
+done
+for first in "$PARTS_DIR/$stem"??.part00; do
+    [ -e "$first" ] || continue
+    sum_glob "${first%.part00}".part??
+    expected=$((expected + sum_bytes))
+done
+if [ "$expected" -eq 0 ]; then
+    echo "assemble-zim: no $stem'aa','ab',... parts in $PARTS_DIR" >&2
+    exit 1
+fi
+
+# Short-circuit BEFORE rebuilding any sub-file part. Those intermediates land in
+# the container's writable layer, which is fresh for every `docker run` — so
+# without this check, a container booting on a volume that was already prepared
+# would rebuild the 14.91 GiB fulltext part every single time, spending the disk
+# and the minutes to produce a file that nothing then reads.
+if [ -f "$archive" ] && [ "$(stat -c %s "$archive")" -eq "$expected" ]; then
+    echo "assemble-zim: $archive already whole at $expected bytes — nothing to do"
+    exit 0
+fi
+
+# A part too big for a layer ships as `.partNN` sub-files. Rebuild those first,
+# beside their chunks: they are an intermediate, and the only thing that needs to
+# reach ZIM_DIR is the finished archive.
+for first in "$PARTS_DIR/$stem"??.part00; do
+    [ -e "$first" ] || continue
+    join_into "${first%.part00}" "${first%.part00}".part??
+done
+
+join_into "$archive" "$PARTS_DIR/$stem"??
