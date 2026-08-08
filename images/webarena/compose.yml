@@ -1,6 +1,13 @@
 # WebArena services, upstream-standard host ports (webarena README):
 #   shopping 7770, shopping-admin 7780, reddit/postmill 9999, gitlab 8023,
-#   wikipedia 8888.
+#   wikipedia 8888 — published as 9888 here, the one deliberate deviation.
+#   8888 is a heavily-squatted default (the OpenTelemetry collector's metrics
+#   endpoint, Jupyter), and it was already taken on the build runner by the
+#   collector: run 31265916367's smoke died with "failed to bind host port
+#   0.0.0.0:8888/tcp: address already in use" after a clean build. A fixed
+#   published port that common cannot be relied on. Nothing in the IMAGE moves
+#   — kiwix-serve still listens on 80 — so anyone wanting upstream's number
+#   maps `-p 8888:80` and sets HTTP_PORT=8888 to match.
 # Healthcheck URLs live in each service's image.toml ([service].healthcheck).
 services:
   # HTTP_HOST/HTTP_PORT are required by these images and have no defaults: they
@@ -40,13 +47,14 @@ services:
   wikipedia:
     image: ghcr.io/shkolnik/webarena-wikipedia:latest
     # kiwix-serve listens on 80 in-container (its --port=80 is baked into the
-    # base image's start.sh); upstream maps it to 8888 on the host. Same
-    # published-vs-listen asymmetry as reddit — HTTP_PORT is the published 8888.
+    # base image's start.sh); upstream maps it to 8888 on the host, we publish
+    # 9888 (see the header). Same published-vs-listen asymmetry as reddit —
+    # HTTP_PORT is the PUBLISHED port, so it moves with the mapping.
     environment:
       HTTP_HOST: 127.0.0.1
-      HTTP_PORT: "8888"
+      HTTP_PORT: "9888"
     ports:
-      - "8888:80"
+      - "9888:80"
   gitlab:
     image: ghcr.io/shkolnik/webarena-gitlab:latest
     # No `command:` here on purpose. Upstream's documented run line is

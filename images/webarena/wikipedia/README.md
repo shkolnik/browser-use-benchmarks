@@ -208,7 +208,7 @@ the image.
   docker run --rm -v wiki-zim:/zim --entrypoint assemble-zim \
       ghcr.io/shkolnik/webarena-wikipedia:latest
   # every later run starts in seconds
-  docker run -d -e HTTP_HOST=localhost -e HTTP_PORT=8888 -p 8888:80 \
+  docker run -d -e HTTP_HOST=localhost -e HTTP_PORT=9888 -p 9888:80 \
       -v wiki-zim:/zim ghcr.io/shkolnik/webarena-wikipedia:latest
   ```
 
@@ -272,8 +272,8 @@ also remove the Python process from the read path.
 ## Ports and the health check
 
 Same published-vs-listen asymmetry as reddit. `start.sh` in the base image hardcodes
-`kiwix-serve --port=80`, so the container always listens on 80 and compose publishes 8888
-(WebArena's port). `HTTP_PORT` is the **published** 8888.
+`kiwix-serve --port=80`, so the container always listens on 80 and compose publishes 9888
+(upstream WebArena uses 8888; see images/webarena/compose.yml). `HTTP_PORT` is the **published** 9888.
 
 `HTTP_HOST`/`HTTP_PORT` are required and have no defaults, per `docs/service-contract.md`. Nothing
 here is rewritten from them — kiwix-serve emits only relative links (verified: no self-referencing
