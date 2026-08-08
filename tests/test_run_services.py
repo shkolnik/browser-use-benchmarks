@@ -134,6 +134,59 @@ def test_stop_all_runs_in_reverse_start_order():
     assert order == ["second", "first"], f"stopped in {order}, expected reverse start order"
 
 
+def test_it_works_under_set_e_like_every_entrypoint_that_sources_it():
+    """Every image's entrypoint runs `set -eu`, so the library must survive it.
+
+    Without care, errexit kills the shell the moment `wait -n` reports a
+    non-zero service — the exit code would still be right, but the log line
+    naming the dead service, and the shutdown of the survivors, would both be
+    skipped. That is a silent loss of exactly the diagnosis this exists for.
+    """
+    r = run("""
+      set -eu
+      svc_start steady -- sleep 30
+      svc_start crasher -- bash -c 'sleep 0.2; exit 66'
+      svc_supervise
+    """)
+    assert r.returncode == 66, f"expected 66, got {r.returncode}"
+    assert "crasher" in r.stderr, (
+        "errexit swallowed the diagnosis: the container died with the right "
+        f"code but never said what happened\nstderr: {r.stderr!r}")
+
+
+def test_a_privilege_tool_that_exists_but_does_not_work_is_skipped(tmp_path):
+    """Alpine's busybox `setpriv` rejects --reuid; being on PATH proves nothing.
+
+    Measured in the reddit image: `command -v setpriv` succeeds there and the
+    program then refuses every option this library passes it. Picking a tool by
+    existence would have broken every privilege-dropping service in that image.
+    """
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "setpriv").write_text("#!/bin/sh\necho 'setpriv: unrecognized option' >&2\nexit 1\n")
+    (fake / "setpriv").chmod(0o755)
+    # runuser stands in for the tool that does work, and records that it ran.
+    (fake / "runuser").write_text('#!/bin/sh\nshift 2; shift; exec "$@"\n')
+    (fake / "runuser").chmod(0o755)
+    r = run(f"""
+      export PATH={fake}:/usr/bin:/bin
+      svc_start svc --user $(id -un) -- bash -c 'echo ran-anyway; sleep 0.2; exit 5'
+      svc_supervise
+    """)
+    assert r.returncode == 5, f"broken setpriv was not skipped: {r.returncode}\n{r.stderr}"
+    assert "ran-anyway" in r.stdout, r.stdout
+
+
+def test_an_unknown_user_fails_loudly_at_startup():
+    """Better a refusal at boot than a service that silently never starts."""
+    r = run("""
+      svc_start svc --user definitely-no-such-user-4b2f -- sleep 30
+      svc_supervise
+    """)
+    assert r.returncode != 0
+    assert "definitely-no-such-user-4b2f" in r.stderr, r.stderr
+
+
 def test_supervise_refuses_when_nothing_was_started():
     """Silently waiting forever with no services would look identical to health."""
     r = run("svc_supervise")

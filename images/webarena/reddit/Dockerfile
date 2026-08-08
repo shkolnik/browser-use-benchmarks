@@ -65,8 +65,8 @@ RUN set -eux; \
 # resolves to alpine 3.21 — and alpine 3.21 has NO postgresql14 package at all
 # (only 15 and 17). Since the measured upstream server is postgres 14.7, and
 # version parity outranks image freshness in this program, the base is pinned
-# to the alpine 3.16 variant, which carries postgresql14 (14.12), nginx 1.22.1
-# and supervisor 4.2.4. Verified by running, not assumed. Revisit under the
+# to the alpine 3.16 variant, which carries postgresql14 (14.12) and nginx
+# 1.22.1. Verified by running, not assumed. Revisit under the
 # security-upgrade pass, where moving off an EOL alpine is the whole point.
 # ==============
 FROM php:${PHP_VERSION}-fpm-alpine3.16 AS runtime
@@ -91,8 +91,8 @@ RUN set -eux; \
     apk add --no-cache \
         acl \
         su-exec \
+        bash \
         nginx \
-        supervisor \
         postgresql14 \
         postgresql14-client \
     ; \
@@ -216,7 +216,8 @@ COPY --from=audited /staging/bucket-05/ /app/
 COPY --from=audited /staging/bucket-06/ /app/
 COPY --from=audited /var/lib/postgresql/data /var/lib/postgresql/data
 COPY nginx.conf /etc/nginx/http.d/default.conf
-COPY supervisord.conf /etc/supervisord.conf
+# The shared supervisor (#73): any service that exits fails the container.
+COPY --from=stagelib run-services.sh /run-services.sh
 
 ENV APP_ENV=prod \
     APP_SECRET="change this in prod or die" \
@@ -242,6 +243,7 @@ CMD ["/entrypoint.sh"]
 #
 # /forums, not /: a document root nested one level too deep still answers / and
 # 404s every real page — the exact defect that shipped once already.
-# Postgres + php-fpm + nginx come up under supervisord, hence the start period.
+# Postgres + php-fpm + nginx come up behind the entrypoint's supervisor, hence
+# the start period.
 HEALTHCHECK --start-period=90s --interval=10s --timeout=15s --retries=3 \
   CMD curl -fsS -L --max-time 14 http://localhost:80/forums >/dev/null || exit 1

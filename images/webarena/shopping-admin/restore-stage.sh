@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs inside the "restore" build stage of the shopping-admin Dockerfile.
-# Boots the shipped supervisord stack, loads the derived DB dump + media +
+# Boots the shipped service stack, loads the derived DB dump + media +
 # synthesizes config.php, reindexes search, validates the admin panel and DB
 # row counts in-build, shuts everything down cleanly (quiesced mariadb), trims
 # junk. The ownership audit runs in the Dockerfile's own following stage/layer
@@ -12,13 +12,13 @@ set -euo pipefail
 MAGE=/opt/magento
 
 echo "=== boot the shipped stack ==="
-/usr/bin/supervisord -c /etc/supervisord.conf &
-SUP_PID=$!
-sctl() { supervisorctl -c /etc/supervisord.conf "$@"; }
+. /run-services.sh
+. /services.sh
+svc_start_stack
 
 for i in $(seq 1 60); do
   mariadb-admin --socket=/run/mysqld/mysqld.sock ping >/dev/null 2>&1 && break
-  [ "$i" = 60 ] && { echo "mariadb never came up" >&2; sctl status >&2 || true; exit 1; }
+  [ "$i" = 60 ] && { echo "mariadb never came up" >&2; svc_status >&2 || true; exit 1; }
   sleep 2
 done
 for i in $(seq 1 120); do
@@ -79,9 +79,9 @@ do
 done
 runuser -u app -- php bin/magento cache:flush
 
-# nginx is autostart=false (entrypoint.sh starts it at runtime once
-# HTTP_HOST/HTTP_PORT are known); the in-build validation still needs it.
-sctl start nginx
+# nginx is held back at runtime until entrypoint.sh knows HTTP_HOST/HTTP_PORT;
+# the in-build validation still needs it.
+svc_start_nginx
 
 echo "=== in-build validation ==="
 # localhost, not 127.0.0.1: per the note above, adminhtml answers only under the
@@ -106,16 +106,15 @@ escount=$(curl -s 'http://127.0.0.1:9200/_cat/count/magento2*?h=count' | tr -d '
 echo "admin panel + DB counts + elasticsearch OK in-build ($escount ES docs)"
 
 echo "=== clean shutdown ==="
-sctl stop nginx php-fpm
-sctl stop elasticsearch redis
-sctl stop mariadb
+svc_stop nginx php-fpm
+svc_stop elasticsearch redis
+svc_stop mariadb
 # A quiesced MariaDB matters: the shipped image must start from a cleanly
 # shut-down datadir, not one that looks like a crash.
 if pgrep -x mariadbd >/dev/null; then echo "mariadbd still running after stop" >&2; exit 1; fi
 grep -q "Shutdown complete" /var/log/supervisor/mariadb.log \
   || { echo "no 'Shutdown complete' in mariadb log" >&2; tail -n 20 /var/log/supervisor/mariadb.log >&2; exit 1; }
-sctl shutdown || true
-wait "$SUP_PID" 2>/dev/null || true
+svc_stop_all
 
 echo "=== trim state not worth shipping ==="
 rm -rf "$MAGE"/var/log/* "$MAGE"/var/cache/* "$MAGE"/var/page_cache/* \
