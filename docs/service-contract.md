@@ -27,7 +27,7 @@ Regenerated from the tree, not copied from the plan.
 | `webarena/reddit` | 80 | `localhost:80/forums` | **`9999:80`** | `localhost:9999/forums` |
 | `webshop/server` | 3000 | `localhost:3000/` | `3000:3000` | `localhost:3000/` |
 | `webarena/gitlab` | 8023 | `gitlab-healthcheck` (not HTTP) | `8023:8023` | `localhost:8023/explore` |
-| `webarena/wikipedia` | 80 | `127.0.0.1:80/<landing>` | **`8888:80`** | `127.0.0.1:8888/<landing>` |
+| `webarena/wikipedia` | 80 | `127.0.0.1:80/<landing>` | **`9888:80`** | `127.0.0.1:9888/<landing>` |
 
 `images/probe/synthetic/` is deliberately absent: it has no Dockerfile and no runnable service.
 `bin/build smoke probe` failing on the missing healthcheck is correct, and CI excludes the

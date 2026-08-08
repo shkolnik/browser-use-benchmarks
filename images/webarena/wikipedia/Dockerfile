@@ -55,7 +55,7 @@ COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimak /zim-parts/
 
 EXPOSE 80
 
-# Readiness, probed at the IN-CONTAINER port (80) — the published port is 8888
+# Readiness, probed at the IN-CONTAINER port (80) — the published port is 9888
 # and nothing is bound to it in here. See docs/service-contract.md.
 #
 # Two things about this line are measured, not copied from a sibling image:

@@ -67,7 +67,7 @@ outputs = [
 ]
 
 [service]
-# Reachability at the PUBLISHED address (8888). Readiness is the Dockerfile's
+# Reachability at the PUBLISHED address (9888). Readiness is the Dockerfile's
 # own HEALTHCHECK, at the in-container port — see docs/service-contract.md.
 #
 # WebArena's own landing URL for this service (environment_docker/README.md),
@@ -76,7 +76,7 @@ outputs = [
 # open still answers / with a page. Verified live against the real ZIM
 # (2026-08-08): 200 in ONE hop, zero redirects, <title>User:The other Kiwix
 # guy/Landing</title>, 19,396 bytes.
-healthcheck = "http://127.0.0.1:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
+healthcheck = "http://127.0.0.1:9888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
 # The default budget is ample: this poll starts only after `up --wait` has
 # already seen the container healthy, so the first-boot reassembly (see the
 # Dockerfile's HEALTHCHECK start period) is over by the time it runs. kiwix
