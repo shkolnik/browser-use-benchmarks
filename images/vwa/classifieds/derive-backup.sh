@@ -46,6 +46,10 @@ if dcache_pull "$CACHE" "$DATASETS_DIR" 'classifieds_*'; then
   echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
+# #42: distinguish "never cached" (fine, derive) from "was cached,
+# now missing" (fatal unless explicitly waived) using the checked-in
+# digest lock.
+dcache_require "$CACHE"
 echo "cache miss — deriving from the upstream image"
 
 echo "=== pull + start upstream image ==="

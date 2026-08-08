@@ -50,6 +50,11 @@ _DCACHE_ORAS_URL="https://github.com/oras-project/oras/releases/download/v${_DCA
 
 dcache__die() { echo "derive-cache: $*" >&2; exit 1; }
 
+# Resolved relative to this file's own location, not the caller's cwd, so
+# dcache_require works from every derive script regardless of where it runs
+# from. builder/stage-lib/derive-cache.sh -> ../derived-cache.lock.
+_DCACHE_LOCK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/derived-cache.lock"
+
 # dcache_ensure_oras — puts a pinned `oras` on PATH. Idempotent: a no-op if
 # `oras` already resolves (a pre-provisioned runner) or if this already ran in
 # this shell. Fails loudly (exits) rather than falling back to an unpinned
@@ -172,6 +177,11 @@ dcache_push() {
       printf '%s\n' "$out"
       DCACHE_PUSHED_DIGEST=$(printf '%s\n' "$out" \
         | grep -oE 'sha256:[0-9a-f]{64}' | tail -1)
+      # #42: the digest lock is only as good as the digests actually in it.
+      # Print the exact line to add rather than making whoever pins it retype
+      # (or worse, copy from somewhere that isn't a live response).
+      echo "derive-cache: to pin this entry, add to builder/derived-cache.lock:"
+      echo "$ref $DCACHE_PUSHED_DIGEST"
       return 0
     fi
     echo "cache push attempt $attempt/3 failed:" >&2
@@ -181,4 +191,41 @@ dcache_push() {
   dcache__die "could not publish $ref after 3 attempts. Failing rather than" \
     "letting prepare_reuse_check stamp this run as done — nothing would ever" \
     "retry the push and the cache would stay empty for good."
+}
+
+# dcache_require REF — called right after a `dcache_pull` miss to decide
+# whether the miss is fatal. `dcache_pull`'s exit 1 alone can't tell a
+# brand-new image (nothing to pin yet) apart from a broken/emptied cache
+# entry this fleet has depended on before; builder/derived-cache.lock is that
+# distinction, checked in so it can only change via a reviewed diff.
+#
+#   - ref present in the lock  -> fatal (exit 1), unless
+#     ALLOW_DERIVE_CACHE_MISS=1 downgrades it to a warning on stderr.
+#   - ref absent from the lock -> returns 0; the caller derives, exactly as
+#     it would for a genuinely new image or a deliberate RECIPE bump.
+dcache_require() {
+  local ref=$1
+  [ -f "$_DCACHE_LOCK" ] || return 0
+
+  local line
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -z "$line" ] && continue
+    local lref=${line%% *}
+    if [ "$lref" = "$ref" ]; then
+      if [ "${ALLOW_DERIVE_CACHE_MISS:-}" = 1 ]; then
+        echo "derive-cache: WARNING: $ref is pinned in builder/derived-cache.lock" \
+             "but missed, and ALLOW_DERIVE_CACHE_MISS=1 downgrades this to a" \
+             "warning — deriving from scratch instead." >&2
+        return 0
+      fi
+      dcache__die "$ref is pinned in builder/derived-cache.lock but missed on" \
+        "pull. This entry has served builds before, so a miss now means the" \
+        "cache lost it, not that this is a new image — failing rather than" \
+        "silently re-deriving (and re-paying) it. If this is a deliberate" \
+        "GHCR outage, re-run with ALLOW_DERIVE_CACHE_MISS=1."
+    fi
+  done < "$_DCACHE_LOCK"
+  return 0
 }

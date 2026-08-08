@@ -51,6 +51,10 @@ if dcache_pull "$CACHE" "$DATASETS_DIR" 'shopping_admin_*'; then
   echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
+# #42: distinguish "never cached" (fine, derive) from "was cached,
+# now missing" (fatal unless explicitly waived) using the checked-in
+# digest lock.
+dcache_require "$CACHE"
 echo "cache miss — deriving from upstream tar"
 # Fetch the upstream tar HERE, not in the download step. It is declared
 # prepare_input, so `bin/build download` skipped it: on a cold runner whose
