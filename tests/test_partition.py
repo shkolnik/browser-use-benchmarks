@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import stat
 from pathlib import Path
 
 # Loaded by path, not imported: the module ships INTO images via the `stagelib`
@@ -81,6 +83,65 @@ def test_refuses_a_single_file_over_the_limit(tmp_path):
         assert "over the layer limit" in str(e)
     else:
         raise AssertionError("expected SystemExit for a file larger than one layer")
+
+
+def test_recreated_parents_keep_the_source_mode(tmp_path):
+    # THE gitlab regression. Only the piece that MOVES keeps its metadata; every
+    # directory recreated on the way to it used to come back 0755 root-owned,
+    # and buckets become COPY layers, so the image shipped a git-owned tree
+    # under parents git could not write. nginx still bound its port and served
+    # 502 over the dead upstream for 17 minutes before the healthcheck gave up.
+    root, staging = tmp_path / "var", tmp_path / "staging"
+    # Two leaves, so @hashed exceeds the limit and must be DESCENDED into --
+    # a tree that fits is yielded whole and keeps its metadata for free, which
+    # is why this bug survived: it only appears above the layer target.
+    write(root, "git-data/repositories/@hashed/ab/f.bin", 100)
+    write(root, "git-data/repositories/@hashed/cd/f.bin", 100)
+    for d in ["git-data", "git-data/repositories", "git-data/repositories/@hashed"]:
+        (root / d).chmod(0o2770)
+    pt.main(["partition-tree.py", "150", "4", str(root), str(staging)])
+    for d in ["git-data", "git-data/repositories", "git-data/repositories/@hashed"]:
+        moded = stat.S_IMODE((staging / "bucket-00" / d).stat().st_mode)
+        assert moded == 0o2770, f"{d} shipped as {oct(moded)}, not the source's 0o2770"
+
+
+def test_recreated_parents_keep_the_source_owner(tmp_path, monkeypatch):
+    # The owner half of the same regression. The suite does not run as root, so
+    # the chown itself cannot be performed here — what is asserted is that each
+    # recreated level is chowned to ITS OWN source's uid/gid, which is the part
+    # a single `chown -R` after the fact cannot express for a tree split across
+    # git, gitlab-psql and gitlab-redis.
+    root, staging = tmp_path / "var", tmp_path / "staging"
+    write(root, "git-data/repositories/@hashed/ab/f.bin", 100)
+    write(root, "git-data/repositories/@hashed/cd/f.bin", 100)
+    calls = []
+    real_stat = os.stat
+
+    def fake_stat(path, *a, **kw):
+        st = real_stat(path, *a, **kw)
+        # Give each source level a distinct uid so a chown that mirrored the
+        # WRONG level, or one blanket uid, cannot pass.
+        fake_uid = {"git-data": 998, "repositories": 997, "@hashed": 996}.get(
+            os.path.basename(str(path)))
+        return _Stat(st, fake_uid) if fake_uid else st
+
+    monkeypatch.setattr(pt.os, "stat", fake_stat)
+    monkeypatch.setattr(pt.os, "chown", lambda p, u, g: calls.append((os.path.basename(p), u)))
+    monkeypatch.setattr(pt.os, "chmod", lambda p, m: None)
+    pt.main(["partition-tree.py", "150", "4", str(root), str(staging)])
+    # Deduped: both leaves walk the same three parents, so each is chowned twice.
+    assert list(dict.fromkeys(calls)) == [
+        ("git-data", 998), ("repositories", 997), ("@hashed", 996)]
+
+
+class _Stat:
+    """os.stat_result with st_uid/st_gid overridden (the tuple is immutable)."""
+
+    def __init__(self, st, uid):
+        self._st, self.st_uid, self.st_gid = st, uid, uid
+
+    def __getattr__(self, name):
+        return getattr(self._st, name)
 
 
 def test_move_places_every_piece_and_empties_the_root(tmp_path):
