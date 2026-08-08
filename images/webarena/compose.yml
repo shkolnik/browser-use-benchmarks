@@ -1,5 +1,6 @@
 # WebArena services, upstream-standard host ports (webarena README):
-#   shopping 7770, shopping-admin 7780, reddit/postmill 9999, gitlab 8023.
+#   shopping 7770, shopping-admin 7780, reddit/postmill 9999, gitlab 8023,
+#   wikipedia 8888.
 # Healthcheck URLs live in each service's image.toml ([service].healthcheck).
 services:
   # HTTP_HOST/HTTP_PORT are required by these images and have no defaults: they
@@ -36,6 +37,16 @@ services:
       HTTP_PORT: "9999"
     ports:
       - "9999:80"
+  wikipedia:
+    image: ghcr.io/shkolnik/webarena-wikipedia:latest
+    # kiwix-serve listens on 80 in-container (its --port=80 is baked into the
+    # base image's start.sh); upstream maps it to 8888 on the host. Same
+    # published-vs-listen asymmetry as reddit — HTTP_PORT is the published 8888.
+    environment:
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "8888"
+    ports:
+      - "8888:80"
   gitlab:
     image: ghcr.io/shkolnik/webarena-gitlab:latest
     # No `command:` here on purpose. Upstream's documented run line is
