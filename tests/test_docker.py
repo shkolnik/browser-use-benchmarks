@@ -629,3 +629,59 @@ def test_exported_pins_are_sha256sum_check_format(tmp_path):
     lines = _env_of(ds)["PREPARE_INPUT_PINS"].split("\n") if "\n" in _env_of(ds).get(
         "PREPARE_INPUT_PINS", "") else [_env_of(ds)["PREPARE_INPUT_PINS"]]
     assert lines[0] == "a" * 64 + "  a.json"
+
+def test_container_health_parses_the_health_object(tmp_path):
+    calls = []
+    def fake(cmd, text=True):
+        calls.append(cmd)
+        if "ps" in cmd:
+            return "abc123\n"
+        return ('{"Status":"unhealthy","FailingStreak":3,'
+                '"Log":[{"Start":"t0","End":"t1","ExitCode":7,"Output":"boom\\n"}]}')
+    h = docker_mod.container_health(tmp_path / "compose.yml", "reddit", check_output=fake)
+    assert h["Status"] == "unhealthy"
+    assert h["Log"][0]["ExitCode"] == 7
+
+def test_container_health_is_None_when_no_healthcheck_is_declared(tmp_path):
+    # `docker inspect` prints the literal "null", and the dotted-template form
+    # ERRORS on such a container — verified live. Reading it as JSON is the
+    # only shape that survives both cases.
+    def fake(cmd, text=True):
+        return "abc123\n" if "ps" in cmd else "null"
+    assert docker_mod.container_health(tmp_path / "compose.yml", "x",
+                                       check_output=fake) is None
+
+def test_dump_health_log_prints_exit_code_and_output(tmp_path):
+    def fake(cmd, text=True):
+        if "ps" in cmd:
+            return "abc123\n"
+        return ('{"Status":"unhealthy","Log":['
+                '{"Start":"t0","End":"t1","ExitCode":7,"Output":"connection refused"}]}')
+    lines = []
+    docker_mod.dump_health_log(tmp_path / "compose.yml", "reddit",
+                               check_output=fake, log=lines.append)
+    blob = "\n".join(lines)
+    assert "unhealthy" in blob
+    assert "exit=7" in blob
+    assert "connection refused" in blob
+
+def test_dump_health_log_never_raises_on_the_failure_path(tmp_path):
+    # This runs when something has ALREADY failed; it must not replace the real
+    # error with one of its own.
+    def boom(cmd, text=True):
+        raise OSError("docker daemon gone")
+    lines = []
+    docker_mod.dump_health_log(tmp_path / "compose.yml", "x",
+                               check_output=boom, log=lines.append)
+    assert any("could not collect" in ln for ln in lines)
+
+def test_diagnostics_include_the_health_log(tmp_path):
+    seen = []
+    monkey = docker_mod.dump_health_log
+    try:
+        docker_mod.dump_health_log = lambda *a, **kw: seen.append("called")
+        docker_mod.dump_service_diagnostics(tmp_path / "compose.yml", "reddit",
+                                           runner=lambda cmd: None)
+    finally:
+        docker_mod.dump_health_log = monkey
+    assert seen == ["called"]
