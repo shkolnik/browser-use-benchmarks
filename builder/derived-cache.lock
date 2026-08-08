@@ -1,0 +1,38 @@
+# Digest lock for the derived-inputs GHCR cache (see #42).
+#
+# One entry per line: `<ref> sha256:<64 hex>`. `dcache_require` (in
+# builder/stage-lib/derive-cache.sh) is called by each of the six
+# derive-backup.sh scripts right after a `dcache_pull` miss:
+#   - ref PRESENT here + miss  -> fatal: the entry we depend on is gone.
+#   - ref ABSENT here + miss   -> not fatal: a new image, or a deliberate
+#     RECIPE bump, is expected to derive from scratch.
+#   - ALLOW_DERIVE_CACHE_MISS=1 downgrades a pinned-miss failure to a
+#     warning on stderr (escape hatch for a GHCR outage — see
+#     .github/workflows/build.yml's workflow_dispatch input).
+#
+# Every digest below was resolved against the LIVE registry on 2026-08-08,
+# never invented or copied from a log: a bearer token was minted from
+# `gh auth token` via https://ghcr.io/token, then each ref's manifest was
+# fetched from https://ghcr.io/v2/shkolnik/<package>/manifests/<tag> with
+# Accept listing both application/vnd.oci.image.index.v1+json and
+# application/vnd.docker.distribution.manifest.v2+json (the wrong Accept
+# header silently returns a different manifest, and therefore a different,
+# WRONG digest). The Docker-Content-Digest response header was cross-checked
+# against sha256 of the raw manifest body for two of the six and matched
+# exactly; see the Task 4 report for the full command and every pair.
+#
+# Wikipedia (webarena-wikipedia-derived) is deliberately NOT pinned here.
+# Task 3 gave it a dual-format READ only — its write path still publishes
+# the legacy ~88 GB scratch image, unconverted — so today's live tag is
+# still legacy-format and will be replaced wholesale the next time it is
+# re-derived. Pinning a digest we are about to throw away would be a trap:
+# the very next successful derive would turn this lock stale and start
+# failing a build that is working as intended. Add its entry once it has
+# been re-derived as an oras artifact.
+
+ghcr.io/shkolnik/vwa-classifieds-derived:a2a794da92f6-r1 sha256:b13e9c247c2e911e6280f4b531f54150d7e5a477b672c64af3b56bb72060fc43
+ghcr.io/shkolnik/webarena-gitlab-derived:6269a90527a6-r1 sha256:b9cb548076631ed13c4891cd5003f8406309a48a622bd915228e0f25557a2b05
+ghcr.io/shkolnik/webarena-reddit-derived:6ff70f73bc80-r2 sha256:4d2840dd215d1ad267810c0ccfaa4522849e112e47f3590565b84b16ac0a18fb
+ghcr.io/shkolnik/webarena-shopping-derived:2052430ee930-r2 sha256:6c365e9621848a2d944306640a3c69687e7f6be39969a24ee6ed8ad64b697857
+ghcr.io/shkolnik/webarena-shopping-admin-derived:ad607557a79f-r2 sha256:4d271dd0c0368b7b86c894f3c5252043f62b8556231d7325260fd608ec08e1e6
+ghcr.io/shkolnik/webshop-server-derived:fbb2df1f2a0e-r1 sha256:7f704ee115a403da9968a27d63a6684b8dc5a70361fc6849d6a5af8e9502ea28
