@@ -3,5 +3,9 @@
 services:
   server:
     image: ghcr.io/shkolnik/webshop-server:latest
+    # Required, no defaults — see docs/service-contract.md.
+    environment:
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "3000"
     ports:
       - "3000:3000"
