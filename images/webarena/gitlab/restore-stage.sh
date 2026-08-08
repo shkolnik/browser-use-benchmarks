@@ -68,6 +68,19 @@ find /var/log/gitlab -type f -delete
 # redis then crash-loops on every fresh boot and the API 500s. It's only
 # cache/queue state; drop it rather than chown it.
 rm -f /var/opt/gitlab/redis/dump.rdb
+# Prometheus's TSDB directory comes out of this stage root-owned, and runit runs
+# prometheus as gitlab-prometheus (`-U gitlab-prometheus:gitlab-prometheus` in
+# /opt/gitlab/sv/prometheus/run), so it panics on "Unable to create mmap-ed
+# active query log" and runit restarts it forever. The boot-time reconfigure
+# does not rescue this one the way it re-asserts ownership elsewhere in this
+# tree — checked live 2026-08-08 on a booted container, where every other
+# root-owned directory belongs to a root service (nginx, logrotate) or to one
+# this image never runs (consul, registry, mattermost).
+#
+# It is worth fixing rather than disabling because it is invisible: the crash
+# loop costs nothing an agent can see, so nothing else in this pipeline would
+# ever report it — /explore and the API answer 200 throughout.
+chown -R gitlab-prometheus:gitlab-prometheus /var/opt/gitlab/prometheus
 
 echo "=== partition /var/opt/gitlab into staging buckets ==="
 # Shared implementation: builder/stage-lib/partition-tree.py, reached through
