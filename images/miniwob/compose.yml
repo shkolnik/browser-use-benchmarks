@@ -1,5 +1,12 @@
+# miniwob task HTML over static nginx; upstream-standard port 8399.
+# Healthcheck URLs live in each service's image.toml ([service].healthcheck).
 services:
   server:
     image: ghcr.io/shkolnik/miniwob-server:latest
+    # Required, no defaults — see docs/service-contract.md. These are the
+    # PUBLISHED side of the mapping below, not the in-container listen port.
+    environment:
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "8399"
     ports:
       - "8399:8399"
