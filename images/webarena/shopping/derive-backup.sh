@@ -18,7 +18,12 @@
 # Inputs (env, set by builder/manifest.py's run_prepare):
 #   DATASETS_DIR  where the verified upstream tar lives and outputs must land
 #   REGISTRY      e.g. ghcr.io/shkolnik
+#   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
+
+# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
+# to the legacy `FROM scratch` image, and pushes new entries as oras.
+. "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 UPSTREAM_TAR="$DATASETS_DIR/shopping_final_0712.tar"
 UPSTREAM_TAG=shopping_final_0712:latest
@@ -55,27 +60,22 @@ assert_dump_complete() {
   echo "derive: $1 completion trailer present"
 }
 
-extract_outputs_from_cache() {
-  local cid
-  cid=$(docker create "$CACHE" true)
-  # Filtered: `docker export` also carries the /dev, /etc, /proc, /sys and
-  # /.dockerenv Docker injects into every container, which unfiltered land
-  # in the shared datasets dir. ONE pattern — tar exits 2 on any pattern
-  # that matches nothing, so a second shape would break every extract that
-  # legitimately lacks it.
-  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards 'shopping_*'
-  docker rm "$cid" >/dev/null
+reassemble_outputs() {
   cat "$DATASETS_DIR"/shopping_media.tar.part-* > "$DATASETS_DIR/shopping_media.tar"
   rm -f "$DATASETS_DIR"/shopping_media.tar.part-*
 }
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if docker pull "$CACHE" 2>/dev/null; then
-  extract_outputs_from_cache
+if dcache_pull "$CACHE" "$DATASETS_DIR" 'shopping_*'; then
+  reassemble_outputs
   assert_dump_complete shopping_db.sql.gz
-  echo "derive: cache hit, outputs extracted"
+  echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
+# #42: distinguish "never cached" (fine, derive) from "was cached,
+# now missing" (fatal unless explicitly waived) using the checked-in
+# digest lock.
+dcache_require "$CACHE"
 echo "cache miss — deriving from upstream tar"
 # Fetch the upstream tar HERE, not in the download step. It is declared
 # prepare_input, so `bin/build download` skipped it: on a cold runner whose
@@ -160,15 +160,10 @@ trap 'rm -rf "$work"' EXIT
 split -b 8G -d "$DATASETS_DIR/shopping_media.tar" "$work/shopping_media.tar.part-"
 cp "$DATASETS_DIR/shopping_db.sql.gz" "$work/"
 cp "$DATASETS_DIR/shopping_env.php" "$work/"
-{
-  echo "FROM scratch"
-  for f in "$work"/shopping_media.tar.part-*; do
-    echo "COPY $(basename "$f") /"
-  done
-  echo "COPY shopping_db.sql.gz /"
-  echo "COPY shopping_env.php /"
-} > "$work/Dockerfile"
-docker build -t "$CACHE" "$work"
-rm -rf "$work"
-docker push "$CACHE" || echo "warning: cache push failed (continuing; derivation succeeded)"
+files=(shopping_db.sql.gz shopping_env.php)
+for f in "$work"/shopping_media.tar.part-*; do
+  files+=("$(basename "$f")")
+done
+# dcache_push retries 3x then fails the build (#80) — see the library.
+dcache_push "$CACHE" "$work" "${files[@]}"
 echo "derive complete"

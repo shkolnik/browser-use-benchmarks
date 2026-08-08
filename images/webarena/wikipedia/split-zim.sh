@@ -57,6 +57,12 @@ set -euo pipefail
 : "${PREPARE_INPUT_SHA256:?run_prepare must export PREPARE_INPUT_SHA256}"
 : "${REGISTRY:?run_prepare must export REGISTRY}"
 
+# builder/stage-lib/derive-cache.sh: gives the READ side dual-format support
+# (an oras artifact preferred, the legacy `FROM scratch` image as fallback).
+# The WRITE side below stays on the legacy image on purpose — see the note
+# at "push derived-inputs cache" further down.
+. "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
+
 # builder/docker.py calls `bin/build download` as a child python process whose
 # stdout is a pipe, so it is block-buffered: when the first wikipedia run was
 # cancelled mid-fetch, the buffer died with it and the log never said WHICH
@@ -100,26 +106,16 @@ CACHE="$REGISTRY/webarena-wikipedia-derived:${PREPARE_INPUT_SHA256:0:12}-$RECIPE
 SIZES=.zim-parts.sizes
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if docker pull "$CACHE" 2>/dev/null; then
-  cid=$(docker create "$CACHE" true)
-  # Filtered, because `docker export` of a `FROM scratch` container is NOT just
-  # the files that were COPYed in: docker injects /dev, /etc, /proc, /sys and
-  # /.dockerenv into every container, and an unfiltered extract drops all of
-  # them into the datasets directory. ONE pattern, not one per shape: tar exits
-  # 2 on "Not found in archive", so listing `*.zim??` and `*.zim??.part??`
-  # separately would fail for a split whose parts all fit a layer and which
-  # therefore has no sub-files at all. `*.zim*` covers parts, sub-files and the
-  # sizes manifest, and cannot match anything docker injects.
-  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards "*.zim*"
-  docker rm "$cid" >/dev/null
-  # Drop it the instant the bytes are on disk. Holding an image locally costs
-  # roughly TWICE its content size — docker's containerd image store keeps both
-  # the compressed layer blobs and the unpacked snapshot a container would run
-  # on. ZIM payloads are already compressed, so this one measures 87.8 GB of
-  # blobs plus a 95.2 GB snapshot = 183 GB (measured on the runner). Nothing
-  # reads it after the export: the wikipedia Dockerfile COPYs the parts from
-  # the datasets build context, never from this image.
-  docker rmi "$CACHE" >/dev/null 2>&1 || true
+# dcache_pull tries the oras artifact first and falls back to the legacy
+# `FROM scratch` image; either way the ONE covering wildcard is unchanged —
+# `*.zim*` covers parts, sub-files and the sizes manifest, and cannot match
+# anything docker's legacy export injects (#79). A legacy hit's local image is
+# already reclaimed by the library (holding it costs roughly TWICE its content
+# size — measured 183 GB on this runner — and nothing reads it after export:
+# the wikipedia Dockerfile COPYs the parts from the datasets build context,
+# never from this image).
+if dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
+  echo "split-zim: cache hit ($DCACHE_HIT_FORMAT format)"
   if [ ! -f "$DATASETS_DIR/$SIZES" ]; then
     echo "split-zim: cache entry has no $SIZES manifest — refusing to trust it" >&2
     exit 1
@@ -149,6 +145,11 @@ if docker pull "$CACHE" 2>/dev/null; then
   exit 0
 fi
 echo "cache miss — fetching from the pinned upstream mirrors"
+# Pinned in builder/derived-cache.lock, so a miss here is fatal rather than the
+# start of a ~24-hour, ~95 GB fetch. This is the fleet's most expensive miss and
+# the LAN mirror that used to soften it is gone, so it is the one that most
+# needs to fail loudly. ALLOW_DERIVE_CACHE_MISS=1 is the deliberate override.
+dcache_require "$CACHE"
 
 # The download step skips prepare_input datasets, so fetch it here. This is a
 # no-op when a sha256-verified copy is already in DATASETS_DIR.
@@ -320,6 +321,15 @@ ls -l "$DATASETS_DIR/$STEM".zim??*
 
 # Publish them, so no later rebuild ever pays the ~24 h upstream fetch again.
 # This runs only on the miss path — a cache hit exited long before here.
+#
+# DELIBERATELY STILL THE LEGACY `docker build` + `docker push`, not
+# dcache_push — this entry is ~88 GB, and re-pushing it as oras opportunistically
+# on every future cache hit (the way the library migrates the other six) would
+# add that upload to the very next fleet run for no benefit today. The read
+# side above already accepts an oras artifact, so this entry converts for free
+# the next time it is genuinely re-derived (a RECIPE bump or an upstream ZIM
+# change) — it just isn't migrated ahead of that. See the plan's Global
+# Constraints.
 echo "=== push derived-inputs cache: $CACHE ==="
 work=$(mktemp -d "$DATASETS_DIR/.derive-work.XXXXXX")
 # Replaces the STAGING trap rather than adding to it: STAGING was already moved

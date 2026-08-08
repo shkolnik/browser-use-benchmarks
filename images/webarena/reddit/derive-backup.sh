@@ -17,7 +17,12 @@
 # Inputs (env, set by builder/docker.py run_prepare):
 #   DATASETS_DIR  where the verified upstream tar lives and outputs must land
 #   REGISTRY      e.g. ghcr.io/shkolnik
+#   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
+
+# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
+# to the legacy `FROM scratch` image, and pushes new entries as oras.
+. "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 UPSTREAM_TAR="$DATASETS_DIR/postmill-populated-exposed-withimg.tar"
 UPSTREAM_TAG=postmill-populated-exposed-withimg:latest
@@ -63,31 +68,26 @@ check_floors() {
   assert_min reddit_media.tar 30000000000
 }
 
-extract_outputs_from_cache() {
-  local cid
-  cid=$(docker create "$CACHE" true)
-  # Filtered: `docker export` also carries the /dev, /etc, /proc, /sys and
-  # /.dockerenv Docker injects into every container, which unfiltered land
-  # in the shared datasets dir. ONE pattern — tar exits 2 on any pattern
-  # that matches nothing, so a second shape would break every extract that
-  # legitimately lacks it.
-  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards 'reddit_*'
-  docker rm "$cid" >/dev/null
+reassemble_outputs() {
   cat "$DATASETS_DIR"/reddit_media.tar.part-* > "$DATASETS_DIR/reddit_media.tar"
   rm -f "$DATASETS_DIR"/reddit_media.tar.part-*
 }
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if docker pull "$CACHE" 2>/dev/null; then
-  extract_outputs_from_cache
+if dcache_pull "$CACHE" "$DATASETS_DIR" 'reddit_*'; then
+  reassemble_outputs
   # The floors apply to the CACHE path too. They used to guard only fresh
   # derivation, so this branch returned unchecked artifacts — which is the one
   # path that can serve a bad blob pushed by an older, buggier revision of this
   # script. A cache is an input like any other; nothing arrives trusted.
   check_floors
-  echo "derive: cache hit, outputs extracted"
+  echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
+# #42: distinguish "never cached" (fine, derive) from "was cached,
+# now missing" (fatal unless explicitly waived) using the checked-in
+# digest lock.
+dcache_require "$CACHE"
 echo "cache miss — deriving from upstream tar"
 # Fetch the upstream tar HERE, not in the download step. It is declared
 # prepare_input, so `bin/build download` skipped it: on a cold runner whose
@@ -166,13 +166,10 @@ cp "$DATASETS_DIR/reddit_db.sql.gz" "$work/"
 # for the same reason ../shopping's does: one blob that size is a bad layer even
 # where a registry tolerates it, and the reassembly is a `cat`.
 split -b 8G -d "$DATASETS_DIR/reddit_media.tar" "$work/reddit_media.tar.part-"
-{
-  echo "FROM scratch"
-  echo "COPY reddit_db.sql.gz /"
-  for f in "$work"/reddit_media.tar.part-*; do
-    echo "COPY $(basename "$f") /"
-  done
-} > "$work/Dockerfile"
-docker build -t "$CACHE" "$work"
-docker push "$CACHE" || echo "warning: cache push failed (continuing; derivation succeeded)"
+files=(reddit_db.sql.gz)
+for f in "$work"/reddit_media.tar.part-*; do
+  files+=("$(basename "$f")")
+done
+# dcache_push retries 3x then fails the build (#80) — see the library.
+dcache_push "$CACHE" "$work" "${files[@]}"
 echo "derive complete"
