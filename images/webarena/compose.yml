@@ -29,6 +29,11 @@ services:
       - "7780:7780"
   reddit:
     image: ghcr.io/shkolnik/webarena-reddit:latest
+    # Required, no defaults — see docs/service-contract.md. Note the asymmetry:
+    # HTTP_PORT is the PUBLISHED port (9999); the container listens on 80.
+    environment:
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "9999"
     ports:
       - "9999:80"
   gitlab:

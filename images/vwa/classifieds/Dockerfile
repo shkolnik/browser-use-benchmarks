@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Rebuilds the VWA classifieds benchmark image (Osclass 8.1.2) from
 # provenance-clear parts: Osclass's own release zip, plus a committed patch
 # carrying the seven changes WebArena made to it, plus the seed dump from the
@@ -183,10 +184,21 @@ RUN set -eux; \
     mkdir -p /var/run/mysqld; \
     chown mysql:mysql /var/run/mysqld
 
-# WEB_PATH comes from this at runtime (config.php reads getenv), exactly as
-# upstream's compose set it; RESET_TOKEN is read by the reset controller.
-ENV CLASSIFIEDS=http://127.0.0.1:9980/ \
-    RESET_TOKEN=4b61655535e7ed388f0d40a93600254c
+# RESET_TOKEN is read by the reset controller and is genuinely a constant, so it
+# stays an ENV. CLASSIFIEDS is NOT: it is this fleet's HTTP_HOST/HTTP_PORT under
+# an app-specific name, and the entrypoint derives it. Leaving a default here
+# would mean a silently-ignored HTTP_HOST still serves the old links.
+ENV RESET_TOKEN=4b61655535e7ed388f0d40a93600254c
 
 EXPOSE 9980
-CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf", "-n"]
+# --chmod so the mode is a property of the BUILD, not of the checkout.
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+# Not supervisord directly: HTTP_HOST/HTTP_PORT are validated, and CLASSIFIEDS
+# derived, before anything serves a page.
+CMD ["/entrypoint.sh"]
+
+# localhost:9980 is the IN-CONTAINER address. Osclass boots MySQL and PHP-FPM
+# under supervisord, so give it a real start period; the per-probe --timeout is
+# the parameter that decides whether a slow first page reads as unhealthy.
+HEALTHCHECK --start-period=90s --interval=10s --timeout=15s --retries=3 \
+  CMD curl -fsS -L --max-time 14 http://localhost:9980/ >/dev/null || exit 1
