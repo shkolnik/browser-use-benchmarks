@@ -40,7 +40,11 @@ services:
   wikipedia:
     image: ghcr.io/shkolnik/webarena-wikipedia:latest
     # kiwix-serve listens on 80 in-container (its --port=80 is baked into the
-    # base image's start.sh); upstream maps it to 8888 on the host.
+    # base image's start.sh); upstream maps it to 8888 on the host. Same
+    # published-vs-listen asymmetry as reddit — HTTP_PORT is the published 8888.
+    environment:
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "8888"
     ports:
       - "8888:80"
   gitlab:
