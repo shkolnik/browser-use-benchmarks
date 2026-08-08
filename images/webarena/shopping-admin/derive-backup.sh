@@ -11,7 +11,12 @@
 # Inputs (env, set by builder/manifest.py's run_prepare):
 #   DATASETS_DIR  where the verified upstream tar lives and outputs must land
 #   REGISTRY      e.g. ghcr.io/shkolnik
+#   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
+
+# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
+# to the legacy `FROM scratch` image, and pushes new entries as oras.
+. "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 UPSTREAM_TAR="$DATASETS_DIR/shopping_admin_final_0719.tar"
 UPSTREAM_TAG=shopping_admin_final_0719:latest
@@ -40,25 +45,16 @@ assert_dump_complete() {
   echo "derive: $1 completion trailer present"
 }
 
-extract_outputs_from_cache() {
-  local cid
-  cid=$(docker create "$CACHE" true)
-  # Filtered: `docker export` also carries the /dev, /etc, /proc, /sys and
-  # /.dockerenv Docker injects into every container, which unfiltered land
-  # in the shared datasets dir. ONE pattern — tar exits 2 on any pattern
-  # that matches nothing, so a second shape would break every extract that
-  # legitimately lacks it.
-  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards 'shopping_admin_*'
-  docker rm "$cid" >/dev/null
-}
-
 echo "=== checking derived-inputs cache: $CACHE ==="
-if docker pull "$CACHE" 2>/dev/null; then
-  extract_outputs_from_cache
+if dcache_pull "$CACHE" "$DATASETS_DIR" 'shopping_admin_*'; then
   assert_dump_complete shopping_admin_db.sql.gz
-  echo "derive: cache hit, outputs extracted"
+  echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
 fi
+# #42: distinguish "never cached" (fine, derive) from "was cached,
+# now missing" (fatal unless explicitly waived) using the checked-in
+# digest lock.
+dcache_require "$CACHE"
 echo "cache miss — deriving from upstream tar"
 # Fetch the upstream tar HERE, not in the download step. It is declared
 # prepare_input, so `bin/build download` skipped it: on a cold runner whose
@@ -136,12 +132,7 @@ trap 'rm -rf "$work"' EXIT
 cp "$DATASETS_DIR/shopping_admin_media.tar" "$work/"
 cp "$DATASETS_DIR/shopping_admin_db.sql.gz" "$work/"
 cp "$DATASETS_DIR/shopping_admin_env.php" "$work/"
-{
-  echo "FROM scratch"
-  echo "COPY shopping_admin_media.tar /"
-  echo "COPY shopping_admin_db.sql.gz /"
-  echo "COPY shopping_admin_env.php /"
-} > "$work/Dockerfile"
-docker build -t "$CACHE" "$work"
-docker push "$CACHE" || echo "warning: cache push failed (continuing; derivation succeeded)"
+# dcache_push retries 3x then fails the build (#80) — see the library.
+dcache_push "$CACHE" "$work" \
+  shopping_admin_media.tar shopping_admin_db.sql.gz shopping_admin_env.php
 echo "derive complete"

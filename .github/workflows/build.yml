@@ -27,6 +27,14 @@ on:
       target:
         description: "all, <benchmark>, or <benchmark>/<service>"
         default: all
+      # #42: builder/derived-cache.lock pins the digests six derive scripts
+      # depend on, so a miss on a pinned entry fails the build rather than
+      # silently re-deriving. This input exists only for a GHCR outage —
+      # leave it false otherwise, since a real miss should fail loudly.
+      allow_derive_cache_miss:
+        description: "Downgrade a pinned derived-cache miss to a warning (GHCR outage escape hatch)"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths: ["images/**", "builder/**", "bin/**", ".github/workflows/build.yml"]
@@ -126,6 +134,15 @@ jobs:
       - name: download datasets (cached on runner)
         run: bin/build download '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
       - name: build
+        # ALLOW_DERIVE_CACHE_MISS: builder/stage-lib/derive-cache.sh's dcache_require
+        # reads this (must be exactly "1" to take effect). workflow_dispatch's
+        # boolean input arrives as the string "true"/"false"; translate here
+        # rather than in the library, so the library's contract stays a plain
+        # env var and doesn't have to know about Actions' input encoding. On
+        # a push event there is no dispatch input at all, so this evaluates
+        # to empty — the default, fail-loud behavior.
+        env:
+          ALLOW_DERIVE_CACHE_MISS: ${{ github.event.inputs.allow_derive_cache_miss == 'true' && '1' || '' }}
         run: bin/build build '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
       # BEFORE push, deliberately: a green build proves the image assembled,
       # not that it serves. The reddit rebuild assembled cleanly and 404'd on
