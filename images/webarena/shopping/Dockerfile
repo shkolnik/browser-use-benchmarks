@@ -5,8 +5,8 @@
 # installed below, (c) Magento 2.4.6 from the keyless Mage-OS mirror via the
 # committed composer.lock, or (d) our derived data artifacts (db dump, media,
 # env.php — see derive-backup.sh), restored in a build stage that boots the very
-# same supervisord stack the image ships. The upstream 67G docker-save tar
-# contributes only *data*, never image layers. See README.md for adjudication
+# same service stack the image ships (services.sh, sourced by both). The
+# upstream 67G docker-save tar contributes only *data*, never image layers. See README.md for adjudication
 # notes (mariadb 10.11, /opt/magento, ES deb).
 #
 # Base: the published image of markshust/docker-magento's images/php/8.1
@@ -18,10 +18,10 @@ FROM markoshust/magento-php@sha256:4b10bfa3cd2586d4e20defbb6789dfa75d30346cd1b93
 USER root
 
 # All services beside php-fpm (which the base provides): nginx + redis (7.0) +
-# mariadb (10.11) from Debian bookworm, supervisor as the init, Elasticsearch
+# mariadb (10.11) from Debian bookworm, Elasticsearch
 # 7.17.9 from Elastic's own deb (bundled JDK), pinned by sha512.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends nginx mariadb-server redis-server supervisor \
+ && apt-get install -y --no-install-recommends nginx mariadb-server redis-server \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSLo /tmp/es.deb https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.17.9-amd64.deb \
  && echo "4516c3fdb5ab5f8ee18378fc7992d370c4a080d0f7e0cecd74fb31b7599016bdb692b40979d418f12929d7819f6576626c593dd3e8fff5f8f2d6129479b92eaa  /tmp/es.deb" | sha512sum -c - \
@@ -34,12 +34,16 @@ COPY conf/mariadb-shopping.cnf /etc/mysql/mariadb.conf.d/99-shopping.cnf
 COPY conf/redis-shopping.conf /etc/redis/redis-shopping.conf
 COPY conf/elasticsearch.yml /etc/elasticsearch/elasticsearch.yml
 COPY conf/es-jvm-heap.options /etc/elasticsearch/jvm.options.d/heap.options
-COPY conf/supervisord.conf /etc/supervisord.conf
+# The shared supervisor (#73) plus this image's service set. services.sh is
+# sourced by the restore stage AND the entrypoint, so the boot path validated
+# in-build is the one that ships.
+COPY --from=stagelib run-services.sh /run-services.sh
+COPY services.sh /services.sh
 
 # /opt/magento, NOT /var/www/html: the base image declares VOLUME /var/www, and a
 # tree there would be copied into a fresh 48G anonymous volume on every
 # `docker run`. Outside the volume path the layers are served in place.
-# supervisord runs the fpm master as root (unlike the base image's own
+# The fpm master runs as root (unlike the base image's own
 # entrypoint, which runs it as app): uncomment the pool's user/group, which a
 # root master requires and which keep workers as app.
 RUN sed -i 's/^;user = app/user = app/; s/^;group = app/group = app/' /usr/local/etc/php-fpm.conf \
@@ -55,7 +59,7 @@ EXPOSE 7770
 # that inherited a non-executable file failed with "Permission denied" before
 # any of the validation below could run.
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
-# Not supervisord directly: HTTP_HOST/HTTP_PORT have to be validated before any
+# HTTP_HOST/HTTP_PORT have to be validated before any
 # service starts, and base_url written before nginx serves its first page.
 CMD ["/entrypoint.sh"]
 
