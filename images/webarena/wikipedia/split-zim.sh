@@ -112,6 +112,14 @@ if docker pull "$CACHE" 2>/dev/null; then
   # sizes manifest, and cannot match anything docker injects.
   docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards "*.zim*"
   docker rm "$cid" >/dev/null
+  # Drop it the instant the bytes are on disk. Holding an image locally costs
+  # roughly TWICE its content size — docker's containerd image store keeps both
+  # the compressed layer blobs and the unpacked snapshot a container would run
+  # on. ZIM payloads are already compressed, so this one measures 87.8 GB of
+  # blobs plus a 95.2 GB snapshot = 183 GB (measured on the runner). Nothing
+  # reads it after the export: the wikipedia Dockerfile COPYs the parts from
+  # the datasets build context, never from this image.
+  docker rmi "$CACHE" >/dev/null 2>&1 || true
   if [ ! -f "$DATASETS_DIR/$SIZES" ]; then
     echo "split-zim: cache entry has no $SIZES manifest — refusing to trust it" >&2
     exit 1
@@ -330,8 +338,52 @@ trap 'rm -rf "$work" "$STAGING"' EXIT
   echo "COPY $SIZES /"
 } > "$work/Dockerfile"
 docker build -t "$CACHE" "$work"
-# A failed push must not fail the build: the parts are already on disk and the
-# image can be built from them. The cost of losing this is the NEXT cold
-# rebuild, which is worth a loud warning and not a thrown-away split.
-docker push "$CACHE" || echo "warning: cache push failed (continuing; the parts are built)"
+# THIS USED TO BE non-fatal — `docker push || echo warning` — on the reasoning
+# that the parts are already on disk, so losing the push only costs the next
+# cold rebuild. That reasoning is wrong, and run 31259175714 demonstrated it:
+# the cache image was built locally, never reached GHCR, and the tag still
+# 404s. The push is not retryable, because builder/docker.py skips this whole
+# script once prepare_reuse_check finds the outputs present and the stamp
+# matching — so the ONE run that derives is the only run that ever pushes. A
+# warning there leaves the cache permanently empty while every later build
+# silently depends on one runner's disk keeping the parts alive, which is the
+# opposite of what this cache exists to guarantee.
+#
+# So: retry, then fail. Retries because a transient GHCR error should not throw
+# away a finished split; a hard failure because an unpushed cache must not be
+# stamped as a success that no later run will revisit.
+pushed=
+for attempt in 1 2 3; do
+  if docker push "$CACHE"; then
+    pushed=yes
+    break
+  fi
+  echo "cache push attempt $attempt/3 failed" >&2
+  [ "$attempt" = 3 ] || sleep 30
+done
+if [ -z "$pushed" ]; then
+  echo "split-zim: could not publish $CACHE after 3 attempts. Failing rather" \
+       "than stamping: prepare_reuse_check would skip this script on the next" \
+       "run, so nothing would ever retry the push and the cache would stay" \
+       "empty for good. The parts in $DATASETS_DIR are intact and correct." >&2
+  exit 1
+fi
+
+# Give the disk back BEFORE the image build that follows, not at the end of the
+# job where build.yml's cleanup steps run. Run 31259175714 died here, and the
+# arithmetic is entirely in copies of one incompressible 95.2 GB file that were
+# all live at once: the source ZIM and the parts in DATASETS_DIR (95.2 each),
+# this cache image (183 — see the note on the hit path above), and then the
+# wikipedia image itself (another 183). That is 556 GB before buildkit's cache
+# of a 95.2 GB context and before smoke assembles the archive again.
+#
+# Both reclaims are unconditional. On a failed push the local copy is no use to
+# anyone either: the next run finds this cache by `docker pull`, which only ever
+# consults the registry.
+echo "=== reclaiming the local copies (the registry has them now) ==="
+docker rmi "$CACHE" >/dev/null 2>&1 || true
+# The context was 95.2 GB of parts and buildkit cached it. --reserved-space
+# matches build.yml's post-job sweep so this cannot evict more than that does.
+docker builder prune -f --reserved-space 20GB || true
+df -h "$DATASETS_DIR" | tail -n 1
 echo "split-zim: complete"
