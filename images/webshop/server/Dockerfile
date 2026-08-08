@@ -16,7 +16,7 @@
 # every pip version is pinned (upstream's requirements.txt at the pinned commit, minus
 # its unpinned lines — see below), and all *datasets* still arrive checksummed via the
 # datasets build context. See README.md.
-FROM python:3.8-bullseye
+FROM python:3.13-bullseye
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openjdk-11-jre-headless \
