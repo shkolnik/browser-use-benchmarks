@@ -113,18 +113,27 @@ dcache_pull() {
   # tag that is still the legacy `FROM scratch` Docker image: `oras pull`
   # exits 0 and writes NOTHING, because oras only materializes a layer as a
   # file when it carries an `org.opencontainers.image.title` annotation, and
-  # `docker build`'s COPY layers never set one. Silently trusting the exit
-  # code here would report a false hit with an empty DEST_DIR — worse than a
-  # miss, because nothing downstream would know to fall back. oras prints
-  # this exact line when that happens; grep it rather than requiring
-  # DEST_DIR to be non-empty, because an artifact this library itself pushed
-  # can legitimately contain zero files and a content check couldn't tell
-  # the two apart.
-  local out
-  if out=$(oras pull "$ref" -o "$dest" 2>&1) \
-      && ! printf '%s' "$out" | grep -q 'Skipped pulling layers without file name'; then
-    DCACHE_HIT_FORMAT=oras
-    return 0
+  # `docker build`'s COPY layers never set one. Trusting the exit code alone
+  # would report a false hit with nothing written — worse than a miss, because
+  # nothing downstream would know to fall back.
+  #
+  # Ask the MANIFEST which format the tag holds, rather than reading oras's
+  # log prose or checking whether DEST_DIR gained files. Both alternatives are
+  # unsound here: the log line is not a stable interface, and DEST_DIR is the
+  # shared datasets directory, which is already full of other files. Measured
+  # on the same pair: an artifact this library pushed carries `artifactType`,
+  # the legacy image has none.
+  local mf out
+  mf=$(oras manifest fetch "$ref" 2>/dev/null || true)
+  if printf '%s' "$mf" | grep -q '"artifactType"'; then
+    if out=$(oras pull "$ref" -o "$dest" 2>&1); then
+      DCACHE_HIT_FORMAT=oras
+      return 0
+    fi
+    # The manifest says this IS our artifact, so a failed pull is a real
+    # error, not a reason to go looking for a legacy image that is not there.
+    printf '%s\n' "$out" >&2
+    dcache__die "oras pull of $ref failed after its manifest identified it as an artifact"
   fi
 
   if docker pull "$ref" >/dev/null 2>&1; then
