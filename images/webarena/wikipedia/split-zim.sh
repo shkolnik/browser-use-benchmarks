@@ -145,6 +145,11 @@ if dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
   exit 0
 fi
 echo "cache miss — fetching from the pinned upstream mirrors"
+# Pinned in builder/derived-cache.lock, so a miss here is fatal rather than the
+# start of a ~24-hour, ~95 GB fetch. This is the fleet's most expensive miss and
+# the LAN mirror that used to soften it is gone, so it is the one that most
+# needs to fail loudly. ALLOW_DERIVE_CACHE_MISS=1 is the deliberate override.
+dcache_require "$CACHE"
 
 # The download step skips prepare_input datasets, so fetch it here. This is a
 # no-op when a sha256-verified copy is already in DATASETS_DIR.

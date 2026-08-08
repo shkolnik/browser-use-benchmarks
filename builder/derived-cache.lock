@@ -30,14 +30,12 @@
 # against sha256 of the raw manifest body for two of the six and matched
 # exactly; see the Task 4 report for the full command and every pair.
 #
-# Wikipedia (webarena-wikipedia-derived) is deliberately NOT pinned here.
-# Task 3 gave it a dual-format READ only — its write path still publishes
-# the legacy ~88 GB scratch image, unconverted — so today's live tag is
-# still legacy-format and will be replaced wholesale the next time it is
-# re-derived. Pinning a digest we are about to throw away would be a trap:
-# the very next successful derive would turn this lock stale and start
-# failing a build that is working as intended. Add its entry once it has
-# been re-derived as an oras artifact.
+# Wikipedia IS pinned, and its case is the reverse of the other six. Task 3
+# left its WRITE path on the legacy format, so its entry is the one that
+# will NOT be republished with a new digest by the migration — and it
+# guards the most expensive miss in the fleet: a ~24-hour, ~95 GB upstream
+# fetch, now that the lab mirror is gone from its manifest. Excluding it
+# would leave the costliest re-download as the only unguarded one.
 
 ghcr.io/shkolnik/vwa-classifieds-derived:a2a794da92f6-r1 sha256:b13e9c247c2e911e6280f4b531f54150d7e5a477b672c64af3b56bb72060fc43
 ghcr.io/shkolnik/webarena-gitlab-derived:6269a90527a6-r1 sha256:b9cb548076631ed13c4891cd5003f8406309a48a622bd915228e0f25557a2b05
@@ -45,3 +43,4 @@ ghcr.io/shkolnik/webarena-reddit-derived:6ff70f73bc80-r2 sha256:4d2840dd215d1ad2
 ghcr.io/shkolnik/webarena-shopping-derived:2052430ee930-r2 sha256:6c365e9621848a2d944306640a3c69687e7f6be39969a24ee6ed8ad64b697857
 ghcr.io/shkolnik/webarena-shopping-admin-derived:ad607557a79f-r2 sha256:4d271dd0c0368b7b86c894f3c5252043f62b8556231d7325260fd608ec08e1e6
 ghcr.io/shkolnik/webshop-server-derived:fbb2df1f2a0e-r1 sha256:7f704ee115a403da9968a27d63a6684b8dc5a70361fc6849d6a5af8e9502ea28
+ghcr.io/shkolnik/webarena-wikipedia-derived:f12163513307-r1 sha256:1de4846366e0ac1940e486e5f48463ae27cbe7f9937fac1db42ec8915fe1d2c6
