@@ -155,10 +155,38 @@ technical unknown:
 - **ship without full-text search**, loudly documented — cheapest, and WebArena's wiki tasks use
   search, so it is a real fidelity loss;
 - **bind-mount the archive** as upstream WebArena does — search works, one-pull is given up;
-- **reassemble the whole 88.7 GiB archive at boot** from the parts — search works (a whole file is
-  the one layout proven to serve it), one-pull survives, and it costs a second full copy: ~89 GiB of
-  writable disk per container on top of the image, and roughly 140 s at the 640 MiB/s measured here
-  (14.91 GiB concatenated in 24 s).
+- **reassemble the whole 88.7 GiB archive at boot** from the parts — **implemented on this branch
+  and measured end to end** (below).
+
+## Whole-archive reassembly at boot: measured, not inferred
+
+`entrypoint.sh` joins the parts back into `<stem>.zim` before kiwix-serve opens anything. Run against
+the real archive's ten parts, with the whole file served beside it from `datasets/` for comparison:
+
+| endpoint | whole file | reassembled | |
+|---|---|---|---|
+| landing page | 200 | 200 | **byte-identical**, 19,396 B |
+| `A/Germany` | 200 | 200 | **byte-identical**, 530,934 B |
+| `/search?pattern=germany` | 200 | 200 | **byte-identical**, 26,160 B |
+| `/suggest?term=Ger` | 200 | 200 | **byte-identical**, 1,349 B |
+
+Full fidelity, including the Xapian ranking that the split layout silently lost (its degraded
+`/suggest` was 4,094,669 B of alphabetical prefix matches against this 1,349 B).
+
+The join is also provably lossless in the other direction: concatenating the parts yields sha256
+`f12163513307893c87fd75009b1d61677bae675627eaadf4cb0fa63953eea021` over 95,199,730,590 bytes — which
+is the **pinned upstream sha256 in `image.toml`**, so the container reconstructs exactly the bytes
+this image's manifest verifies.
+
+What it costs, measured rather than projected:
+
+- **~89 GiB in the container's writable layer**, on top of the ~89 GiB image. The parts live in
+  read-only layers, so deleting them after the join reclaims nothing. A running container is
+  therefore around 178 GiB of disk.
+- **632 s on first start** — about 144 MiB/s, not the ~640 MiB/s a single part reaches, because the
+  join reads and writes the same disk at once. A projection from the single-part rate would have
+  said ~140 s and been wrong by 4.5x, which is why the `HEALTHCHECK` start period is 3600 s.
+- A restart of the same container is free: an archive already whole at the right size is skipped.
 
 ## Ports and the health check
 

@@ -73,14 +73,15 @@ EXPOSE 80
 # itself is ready seconds after start.
 #
 # The start period is long for one reason, and it is not slack: entrypoint.sh
-# concatenates the 14.91 GiB fulltext part from its sub-files before the server
-# starts. Measured on the real archive: **24 s** (~640 MiB/s on an idle host; an
-# earlier ~106 s figure was extrapolated from a host busy with a parallel build,
-# which is the number to plan for). 1200 s is a wide margin for slower storage,
-# and costs nothing when the check passes on the first probe. `docker compose
-# up --wait` treats UNHEALTHY as terminal but keeps waiting through `starting`,
-# so this number, not a driver timeout, is what a first boot is allowed.
-HEALTHCHECK --interval=30s --timeout=15s --start-period=1200s --retries=5 \
+# joins the parts back into the whole 88.7 GiB archive before the server starts,
+# because a split archive serves every article perfectly and no full-text search
+# at all (README.md). Measured on the real archive: **632 s**, about 144 MiB/s —
+# not the ~640 MiB/s one part reaches on its own, because the join reads and
+# writes the same disk at once. 3600 s is a ~6x margin for slower storage, and
+# costs nothing when the check passes on its first probe. `docker compose up
+# --wait` treats UNHEALTHY as terminal but keeps waiting through `starting`, so
+# this number, not a driver timeout, is what a first boot is allowed.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=3600s --retries=5 \
     CMD wget -T 10 -q -O /dev/null \
         "http://127.0.0.1/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
 
