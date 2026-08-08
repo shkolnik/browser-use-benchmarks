@@ -10,6 +10,15 @@
 #     warning on stderr (escape hatch for a GHCR outage — see
 #     .github/workflows/build.yml's workflow_dispatch input).
 #
+# WHAT IS AND IS NOT ENFORCED. `dcache_require` matches on the REF; the digest
+# column is a provenance record, not a comparison. That is deliberate for this
+# wave: every one of these six entries is still the legacy `FROM scratch`
+# image, and each will be REPUBLISHED as an oras artifact — with a different
+# manifest digest — the first time its image is rebuilt. Enforcing the digest
+# today would turn the migration these very digests describe into six red
+# builds. Once the fleet has converted, re-resolve them and tighten this to a
+# real comparison; `dcache_push` already prints the line to paste in.
+#
 # Every digest below was resolved against the LIVE registry on 2026-08-08,
 # never invented or copied from a log: a bearer token was minted from
 # `gh auth token` via https://ghcr.io/token, then each ref's manifest was
