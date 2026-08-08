@@ -15,8 +15,8 @@ script = "derive-backup.sh"
 outputs = ["shopping_admin_db.sql.gz", "shopping_admin_media.tar", "shopping_admin_env.php"]
 
 [service]
+# The PUBLISHED address the smoke gate reaches this service at. Readiness is the
+# Dockerfile HEALTHCHECK's job; this is a reachability check only. 127.0.0.1
+# rather than localhost for the same reason the HEALTHCHECK names it: adminhtml
+# is host-pinned to base_url, and localhost measurably 404s here.
 healthcheck = "http://127.0.0.1:7780/admin"
-# Same Magento first-request DI compile as shopping — and shopping-admin has
-# never been through the smoke gate at all (it was built before that gate
-# landed), so this is a prediction the next build gets to falsify.
-healthcheck_timeout_s = 900
