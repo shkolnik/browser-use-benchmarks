@@ -257,6 +257,8 @@ def test_smoke_brings_up_only_the_targeted_service(tmp_path, monkeypatch):
                         lambda p: ["shopping", "shopping-admin", "reddit", "gitlab"])
     monkeypatch.setattr(docker_mod, "poll_health",
                         lambda url, timeout_s=120: docker_mod.Health(True, 1.0, "HTTP 200"))
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "img")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: {"Retries": 3})
     docker_mod.run_smoke([ref], repo)
     up = cmds[0]
     assert up[-1] == "reddit"
@@ -291,6 +293,8 @@ def test_smoke_fails_loud_when_image_never_becomes_healthy(tmp_path, monkeypatch
                         lambda url, timeout_s=120: docker_mod.Health(False, 42.0, "HTTP 503"))
     monkeypatch.setattr(docker_mod, "dump_service_logs",
                         lambda compose, service, **kw: dumped.append((compose, service)))
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "img")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: {"Retries": 3})
     try:
         docker_mod.run_smoke([ref], repo)
     except SystemExit as e:
@@ -326,6 +330,8 @@ def test_smoke_dumps_logs_and_tears_down_when_up_wait_itself_fails(tmp_path, mon
     monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
     monkeypatch.setattr(docker_mod, "dump_service_logs",
                         lambda compose, service, **kw: dumped.append(service))
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "img")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: {"Retries": 3})
     try:
         docker_mod.run_smoke([ref], repo)
     except SystemExit as e:
@@ -353,6 +359,8 @@ def test_smoke_dumps_network_diagnostics_alongside_the_logs(tmp_path, monkeypatc
                         lambda compose, service, **kw: dumped.append(service))
     monkeypatch.setattr(docker_mod, "dump_service_diagnostics",
                         lambda compose, service, **kw: probed.append(service))
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "img")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: {"Retries": 3})
     try:
         docker_mod.run_smoke([ref], repo)
     except SystemExit:
@@ -388,21 +396,25 @@ def test_diagnostics_never_replace_the_real_failure(tmp_path):
     docker_mod.dump_service_diagnostics(Path("/x/compose.yml"), "shopping",
                                         runner=boom)
 
-def test_smoke_honours_the_images_own_healthcheck_timeout(tmp_path, monkeypatch):
-    # A blanket 120s is what killed shopping: Magento compiles DI on its first
-    # request. The per-image budget must actually reach poll_health.
+def test_smoke_honours_the_images_own_reachability_timeout(tmp_path, monkeypatch):
+    # Was healthcheck_timeout_s, which is now retired: readiness belongs to the
+    # image's own HEALTHCHECK. The per-image budget that survives is the
+    # PUBLISHED-path one, and it must still actually reach poll_health — an
+    # image whose port mapping is genuinely slow can raise it.
     repo = _smoke_repo(tmp_path)
     toml = repo / "images" / "webarena" / "reddit" / "image.toml"
-    toml.write_text(toml.read_text() + "\nhealthcheck_timeout_s = 900\n")
+    toml.write_text(toml.read_text() + "\nreachability_timeout_s = 90\n")
     ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
     seen = []
     monkeypatch.setattr(docker_mod, "run", lambda c: None)
     monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "img")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: {"Retries": 3})
     monkeypatch.setattr(docker_mod, "poll_health",
-                        lambda url, timeout_s=120: seen.append(timeout_s)
+                        lambda url, timeout_s=30: seen.append(timeout_s)
                         or docker_mod.Health(True, 1.0, "HTTP 200"))
     docker_mod.run_smoke([ref], repo)
-    assert seen == [900]
+    assert seen == [90]
 
 def test_compose_services_parses_docker_output():
     out = "shopping\nshopping-admin\nreddit\ngitlab\n"
@@ -685,3 +697,45 @@ def test_diagnostics_include_the_health_log(tmp_path):
     finally:
         docker_mod.dump_health_log = monkey
     assert seen == ["called"]
+
+def test_image_healthcheck_is_None_when_absent():
+    assert docker_mod.image_healthcheck("img", check_output=lambda c, text=True: "null\n") is None
+
+def test_image_healthcheck_parses_the_config():
+    out = '{"Test":["CMD-SHELL","curl -f http://localhost/ || exit 1"],"Retries":3}'
+    hc = docker_mod.image_healthcheck("img", check_output=lambda c, text=True: out)
+    assert hc["Retries"] == 3
+
+def test_smoke_fails_loud_when_the_image_declares_no_healthcheck(tmp_path, monkeypatch):
+    # Without a HEALTHCHECK, `up --wait` only waits for RUNNING — it would report
+    # success on a container that never served a byte. That silent degradation is
+    # the exact thing this gate exists to prevent, so it must be an error.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    monkeypatch.setattr(docker_mod, "run", lambda c: None)
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "ghcr.io/x/reddit:latest")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: None)
+    try:
+        docker_mod.run_smoke([ref], repo)
+    except SystemExit as e:
+        assert "declares no HEALTHCHECK" in str(e)
+    else:
+        raise AssertionError("smoke accepted an image with no healthcheck")
+
+def test_smoke_still_checks_the_PUBLISHED_path_after_wait(tmp_path, monkeypatch):
+    # `up --wait` proves health INSIDE the container. #66 was healthy inside and
+    # ECONNREFUSED from the host for 901s, so the host-side check is not
+    # redundant and must survive this refactor.
+    repo = _smoke_repo(tmp_path)
+    ref = ImageRef("webarena", "reddit", repo / "images" / "webarena" / "reddit")
+    monkeypatch.setattr(docker_mod, "run", lambda c: None)
+    monkeypatch.setattr(docker_mod, "compose_services", lambda p: ["reddit"])
+    monkeypatch.setattr(docker_mod, "compose_service_image", lambda c, s: "img")
+    monkeypatch.setattr(docker_mod, "image_healthcheck", lambda img: {"Retries": 3})
+    polled = []
+    monkeypatch.setattr(docker_mod, "poll_health",
+                        lambda url, timeout_s=30: polled.append((url, timeout_s))
+                        or docker_mod.Health(True, 1.0, "HTTP 200"))
+    docker_mod.run_smoke([ref], repo)
+    assert polled == [("http://localhost:9999/forums", 30)]

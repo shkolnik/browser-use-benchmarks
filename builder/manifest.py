@@ -33,11 +33,12 @@ class Prepare:
 class Manifest:
     datasets: list[Dataset] = field(default_factory=list)
     healthcheck: str | None = None
-    # How long the image gets to answer that URL after `compose up`. The default
-    # suits an app that only has to open a listening socket; an image that does
-    # real work on its first request declares its own budget rather than every
-    # image paying for the slowest one.
-    healthcheck_timeout_s: int = 120
+    # How long the PUBLISHED address gets to answer once `up --wait` has already
+    # proven the container healthy from the inside. Readiness is the image's own
+    # HEALTHCHECK now, so this is small on purpose: it exists to catch a
+    # container that is healthy in-container and unreachable through the port
+    # mapping, which is what happened to shopping for 901s (#66).
+    reachability_timeout_s: int = 30
     build_args: dict[str, str] = field(default_factory=dict)
     source: Source = Source(kind="build")
     prepare: Prepare | None = None
@@ -99,11 +100,18 @@ def load_manifest(image_dir: Path) -> Manifest:
         _die(image_dir,
              f"datasets marked prepare_input ({', '.join(lazy)}) but there is no "
              "[prepare] section to fetch them — nothing would ever download them")
+    svc = data.get("service", {})
+    if "healthcheck_timeout_s" in svc:
+        _die(image_dir,
+             "healthcheck_timeout_s is retired — readiness is now the image's own "
+             "Dockerfile HEALTHCHECK (--start-period/--timeout/--retries), and the "
+             "driver only checks that the PUBLISHED address answers. Move the budget "
+             "into the HEALTHCHECK and delete this key; set reachability_timeout_s "
+             "only if the port mapping itself is slow to come up.")
     return Manifest(
         datasets=datasets,
-        healthcheck=data.get("service", {}).get("healthcheck"),
-        healthcheck_timeout_s=int(
-            data.get("service", {}).get("healthcheck_timeout_s", 120)),
+        healthcheck=svc.get("healthcheck"),
+        reachability_timeout_s=int(svc.get("reachability_timeout_s", 30)),
         build_args={k: str(v) for k, v in data.get("build", {}).get("args", {}).items()},
         source=Source(kind=kind, dataset=src.get("dataset"), tag=src.get("tag")),
         prepare=prepare,
