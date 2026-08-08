@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1
-# WebShop server, pinned to upstream 64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd.
+# WebShop server, built from our fork shkolnik/WebShop at
+# d8c8dc1b0605f86a5d734b37245abff857da38aa (upstream 64fa2a5 + shkolnik/WebShop#1).
+# The fork's one behavioural change: the corpus is transformed into an LMDB product
+# store HERE, at image-build time, instead of being json.load-ed on the first request
+# that touches a product. Same rendered output, byte for byte; 57s -> 1.5s to first
+# response, ~19G -> ~0.8G peak, and the three items_*.json files stop being runtime
+# inputs entirely (see the bind mount below).
 # Python 3.8 matches upstream's documented environment (README: Python 3.8.13);
 # openjdk-11 is required by pyserini 0.17.0 for the lucene index build + search —
 # the JRE stays in the final image because LuceneSearcher needs a JVM at query
@@ -18,9 +24,10 @@ RUN apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
 # Upstream source at the pinned commit (bind mount: the tar never enters a layer).
-RUN --mount=type=bind,from=datasets,source=webshop-src-64fa2a5.tar.gz,target=/tmp/webshop-src.tar.gz \
+RUN --mount=type=bind,from=datasets,source=webshop-src-d8c8dc1.tar.gz,target=/tmp/webshop-src.tar.gz \
     mkdir /webshop \
- && tar -xzf /tmp/webshop-src.tar.gz --strip-components=1 -C /webshop
+ && tar -xzf /tmp/webshop-src.tar.gz --strip-components=1 -C /webshop \
+ && mkdir -p /webshop/data
 WORKDIR /webshop
 
 # Install exactly the '==' pinned lines of upstream's requirements.txt (Flask 2.1.2,
@@ -35,6 +42,8 @@ WORKDIR /webshop
 #   Werkzeug==2.1.2 — Flask 2.1.2 declares only Werkzeug>=2.0, and Werkzeug 2.3
 #     removed url_quote, breaking `from flask import ...` at import time (verified in
 #     this build). 2.1.2 is Werkzeug's contemporary release for Flask 2.1.2.
+# The fork appends a pinned `lmdb==1.4.1` to requirements.txt, so it arrives through
+# the same grep as everything else rather than as another hand-added package here.
 #   typing_extensions==4.5.0 — spacy 3.3.0's dep chain (thinc 8.0.17) resolves
 #     pydantic to 1.8.2, whose compiled validators crash on typing_extensions>=4.6
 #     ("issubclass() arg 1 must be a class" at spacy import; verified live in this
@@ -50,9 +59,6 @@ RUN grep '==' requirements.txt > /tmp/requirements-pinned.txt \
 RUN --mount=type=bind,from=datasets,source=en_core_web_sm-3.3.0.tar.gz,target=/tmp/en_core_web_sm.tar.gz \
     pip install --no-cache-dir /tmp/en_core_web_sm.tar.gz
 
-# Full product datasets (upstream setup.sh -d all layout: data/ under the repo root).
-COPY --from=datasets items_shuffle.json items_ins_v2.json items_human_ins.json /webshop/data/
-
 # Point the app at the FULL dataset (upstream defaults to the 1000-item sample and
 # documents editing these two constants to run on all products). The greps fail the
 # build if a source bump ever makes the substitution stop matching.
@@ -62,6 +68,27 @@ RUN sed -i \
       web_agent_site/utils.py \
  && grep -q "data/items_shuffle.json'" web_agent_site/utils.py \
  && grep -q "data/items_ins_v2.json'" web_agent_site/utils.py
+
+# Transform the corpus into the LMDB product store the server reads at boot. This is
+# the whole point of the fork: the parse happens once, here, instead of on the first
+# request in every container.
+#
+# The three items_*.json files are BIND-MOUNTED rather than COPY-ed, because after this
+# step nothing reads them again — `load_products` opens only the store, and
+# `load_attributes` is now called from build_product_store.py alone (verified by grep
+# across web_agent_site/ at the pinned commit). Mounting keeps ~5.3G out of the image
+# entirely; a COPY could not be undone by a later `rm`, since the bytes would already
+# be committed to their own layer.
+#
+# Ordering is load-bearing in both directions: AFTER the sed, because the store is
+# built from whatever DEFAULT_FILE_PATH names, and BEFORE the convert step below,
+# which reads products back through `load_products` and so needs the store to exist.
+RUN --mount=type=bind,from=datasets,source=items_shuffle.json,target=/webshop/data/items_shuffle.json \
+    --mount=type=bind,from=datasets,source=items_ins_v2.json,target=/webshop/data/items_ins_v2.json \
+    --mount=type=bind,from=datasets,source=items_human_ins.json,target=/webshop/data/items_human_ins.json \
+    cd search_engine \
+ && python build_product_store.py \
+ && test -f /webshop/data/products.lmdb/data.mdb
 
 # Build the lucene search index at image-build time (upstream setup.sh does this once at
 # install). convert writes resources{,_100,_1k,_100k}/documents.jsonl; we index only the
@@ -83,21 +110,23 @@ RUN cd search_engine \
 EXPOSE 3000
 CMD ["python", "-m", "web_agent_site.app"]
 
-# The app binds port 3000 immediately but loads nothing until the first request
-# reaches a real page: `all_products` is a module global and web_agent_site/app.py's
-# index() populates it behind `if search_engine is None`. That first request parses
-# the 5.1G items_shuffle.json, builds the goal set and attaches the Lucene index —
-# measured here at 57s and 14.3G RSS — while the dev server, single-threaded,
-# answers nothing else. So a probe must be allowed to WAIT OUT one whole load: the
-# per-probe --timeout is the parameter that matters, and every earlier failure came
-# from a 10s-per-attempt probe against a 57s first request, which no total budget
-# can rescue. --interval keeps a slow probe from being followed immediately by
-# another; docker already never overlaps probes.
+# The app still binds port 3000 before it has loaded anything — `all_products` is a
+# module global that web_agent_site/app.py's index() populates behind
+# `if search_engine is None` — so the first request is still the one that does the
+# work. What changed is how much work that is: it now mmaps the prebuilt store and
+# attaches the Lucene index rather than parsing 5.1G of JSON. Measured on the fork:
+# 1.5s to first response, 5.2s to docker-healthy, against 57s before.
+#
+# The old numbers (--start-period=120s, --timeout=115s) existed solely to let one
+# probe wait out that 57s load, so they retire with it. 60s of start period is ~10x
+# the measured time to healthy — enough for a cold page cache and a loaded runner,
+# while still failing an actually-stuck container inside a couple of minutes instead
+# of a quarter of an hour.
 #
 # -L is load-bearing. `/` is served by home(), which only redirects to /abc and
 # touches no data, and -f fails only on >=400 — so without -L this check exits 0
 # against a container that has loaded nothing at all.
-HEALTHCHECK --start-period=120s --interval=10s --timeout=115s --retries=3 \
-  CMD curl -fsS -L --max-time 110 http://localhost:3000/ >/dev/null || exit 1
+HEALTHCHECK --start-period=60s --interval=5s --timeout=15s --retries=3 \
+  CMD curl -fsS -L --max-time 10 http://localhost:3000/ >/dev/null || exit 1
 
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
