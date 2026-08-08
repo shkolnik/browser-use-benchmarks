@@ -76,6 +76,50 @@ for first in /zim/*.part00; do
     echo "reassemble: $part complete"
 done
 
+# Reassemble the WHOLE archive from its parts, when it is not already there.
+#
+# libzim can open a split archive — it resolves `<stem>.zimaa`, `.zimab`, ... from
+# a `<stem>.zim` path with no file at it — and that is how this image used to
+# serve. Articles are perfect that way. Full-text search is not: measured on this
+# archive, `/search` answers 404 "Fulltext search unavailable" and `/suggest`
+# silently degrades to an alphabetical prefix scan, and it does so EVEN WITH both
+# Xapian indexes lying whole inside a single part. See README.md for what was
+# ruled out. A whole file is the only layout measured to serve search, so the
+# parts exist purely to get under the registry's per-layer ceiling and are joined
+# back here before kiwix-serve ever opens them.
+#
+# The cost is a second full copy: ~89 GiB in the container's writable layer on
+# top of the image, and **632 s measured** on the real archive — ~144 MiB/s, not
+# the ~640 MiB/s a single part reaches, because this reads and writes the same
+# disk at once. The parts sit in read-only layers, so deleting them afterwards
+# reclaims nothing. Restarting the same container is free — the size check above
+# skips an archive already whole.
+archive=${1:-}
+if [ -n "$archive" ] && [ ! -f "$archive" ]; then
+    want=0
+    count=0
+    for part in "$archive"??; do
+        [ -e "$part" ] || break
+        want=$((want + $(stat -c %s "$part")))
+        count=$((count + 1))
+    done
+    if [ "$count" -eq 0 ]; then
+        echo "error: neither $archive nor its .zimaa/.zimab/... parts exist" >&2
+        exit 1
+    fi
+    echo "reassemble: joining $count parts into $archive ($((want / 1073741824)) GiB)..."
+    # Not `>>`: a partial file from a killed start would be extended rather than
+    # replaced, and the size check below would then pass on garbage.
+    rm -f "$archive"
+    cat "$archive"?? > "$archive"
+    got=$(stat -c %s "$archive")
+    if [ "$got" != "$want" ]; then
+        echo "error: $archive is $got bytes, expected $want — out of disk?" >&2
+        exit 1
+    fi
+    echo "reassemble: $archive complete"
+fi
+
 echo "serving http://${HTTP_HOST}:${HTTP_PORT}/ (listening on 80 in-container)"
 # Hand back to the base image's own chain, with the ZIM path this image's CMD
 # supplies still in "$@". dumb-init is what reaps kiwix-serve's children.
