@@ -25,10 +25,25 @@ from pathlib import Path
 
 import pytest
 
+# The idiom used to live in each of the seven derive scripts under images/;
+# Task 3 of the derived-cache plan centralized the legacy extract into
+# builder/stage-lib/derive-cache.sh's dcache_pull, so the ONE place doing a
+# raw `docker export | tar` today is the library, not the per-site scripts.
+# Scan both trees so this guard keeps covering wherever the idiom actually
+# lives instead of going quietly vacuous.
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = sorted((REPO / "images").glob("*/*/*.sh"))
+SCRIPTS = sorted((REPO / "images").glob("*/*/*.sh")) + \
+    sorted((REPO / "builder" / "stage-lib").glob("*.sh"))
 
 EXPORT = re.compile(r"docker export\b[^\n|]*\|[^\n]*\btar\b[^\n]*")
+
+
+def _code(text: str) -> str:
+    # builder/stage-lib/derive-cache.sh's header prose mentions the
+    # `docker export | tar` idiom on one line while explaining it (see #79) —
+    # stripping comments first keeps this scanning CODE, not documentation
+    # that happens to describe code.
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
 
 
 def _export_lines(text: str):
@@ -38,7 +53,7 @@ def _export_lines(text: str):
 def _cases():
     out = []
     for s in SCRIPTS:
-        for line in _export_lines(s.read_text()):
+        for line in _export_lines(_code(s.read_text())):
             out.append(pytest.param(s, line, id=f"{s.parent.parent.name}-{s.parent.name}"))
     return out
 
@@ -47,9 +62,10 @@ CASES = _cases()
 
 
 def test_there_are_cases():
-    # Six scripts use this idiom today. A collection bug that found none would
-    # make every test below vacuous, and a vacuous suite looks like a green one.
-    assert len(CASES) >= 6, f"expected the fleet's export idiom, found {len(CASES)}"
+    # One occurrence lives today, in the shared library's legacy fallback path
+    # (dcache_pull). A collection bug that found none would make every test
+    # below vacuous, and a vacuous suite looks like a green one.
+    assert len(CASES) >= 1, f"expected the fleet's export idiom, found {len(CASES)}"
 
 
 @pytest.mark.parametrize("script,line", CASES)
