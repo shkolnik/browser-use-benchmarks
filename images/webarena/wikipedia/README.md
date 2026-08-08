@@ -188,6 +188,15 @@ What it costs, measured rather than projected:
   said ~140 s and been wrong by 4.5x, which is why the `HEALTHCHECK` start period is 3600 s.
 - A restart of the same container is free: an archive already whole at the right size is skipped.
 
+A **named volume would make the 632 s a once-ever cost** rather than once per container, and it is
+worth naming because the obvious way to do it is the wrong way. Mounting a volume over `/zim` — where
+the parts already are — makes Docker seed the empty volume by copying the image's contents at that
+path, so the first `up` copies 89 GiB *before* the join writes another 89 GiB into the same volume.
+Ship the parts at a different path (`/zim-parts`) and mount the volume on an empty `/zim`, and the
+volume holds only the joined archive: the same ~178 GiB total, but paid once for the life of the
+volume instead of once per `docker compose up`. Not done here, because a stateful volume is a change
+to how this fleet's services are run, not just to this image.
+
 ## Ports and the health check
 
 Same published-vs-listen asymmetry as reddit. `start.sh` in the base image hardcodes
