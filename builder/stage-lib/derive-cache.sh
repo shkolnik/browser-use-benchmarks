@@ -141,7 +141,15 @@ dcache_pull() {
     dcache__die "oras pull of $ref failed after its manifest identified it as an artifact"
   fi
 
-  if docker pull "$ref" >/dev/null 2>&1; then
+  # Capture the failure instead of discarding it. Run 31268159790 is the reason:
+  # webarena/shopping missed this cache and spent two hours re-downloading 41 GB
+  # from metis, and the log could not say WHY it missed, because the idiom this
+  # replaces was `docker pull "$CACHE" 2>/dev/null`. The entry was verified
+  # intact afterwards — every blob HTTP 200 — so the cause was runner-side and
+  # is now unknowable. A miss that cannot explain itself is the defect; out of
+  # disk, denied and 503 must not all look like "not cached".
+  local dout
+  if dout=$(docker pull "$ref" 2>&1); then
     DCACHE_HIT_FORMAT=legacy
     local cid
     cid=$(docker create "$ref" true)
@@ -155,6 +163,9 @@ dcache_pull() {
     return 0
   fi
 
+  echo "derive-cache: no cache entry for $ref — neither format could be read." >&2
+  echo "  oras manifest fetch: ${mf:-<no manifest returned>}" >&2
+  echo "  docker pull: $dout" >&2
   return 1
 }
 
