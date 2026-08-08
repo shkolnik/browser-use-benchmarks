@@ -2,6 +2,7 @@ import importlib.util
 import os
 import stat
 from pathlib import Path
+import pytest
 
 # Loaded by path, not imported: the module ships INTO images via the `stagelib`
 # build context, so it lives in a directory that is deliberately not a package.
@@ -162,3 +163,47 @@ def test_move_places_every_piece_and_empties_the_root(tmp_path):
     # whole piece, so it moves rather than being lost.
     assert [p for p in root.rglob("*") if p.is_file()] == []
     assert [p.name for p in root.rglob("*")] == ["uploads"]
+
+
+# ---------------------------------------------------------------------------
+# No image may carry its own copy of the partitioner.
+#
+# The same bug was fixed in two separate copies of this code on one afternoon,
+# and the copy that stayed private went on to lose directory ownership through
+# a third (gitlab, three CI runs). shopping and reddit kept inline copies until
+# #53. Measured when they were converted: bucket assignment was byte-identical
+# across 58 paths, and all 32 differences were recreated parent directories the
+# inline copy created 0755 root-owned — including a 2770 setgid dir flattened
+# to 755 and a 0750 flattened to 755. Their `chown -R` restores the owner but
+# cannot restore a mode, so the duplication was shipping a real defect, not
+# just repeated code.
+# ---------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _partitioning_scripts():
+    # BUCKET_COUNT= is set only by a stage that actually partitions. Matching
+    # on "bucket-" alone also caught audit scripts that merely mention them.
+    return [p for p in (REPO_ROOT / "images").glob("*/*/*.sh")
+            if "BUCKET_COUNT=" in p.read_text()]
+
+
+def test_some_image_actually_partitions():
+    assert _partitioning_scripts(), "no partitioning restore stage was discovered"
+
+
+@pytest.mark.parametrize(
+    "script", _partitioning_scripts(),
+    ids=lambda p: f"{p.parent.parent.name}-{p.parent.name}")
+def test_no_image_carries_an_inline_partitioner(script):
+    body = script.read_text()
+    assert "/partition-tree.py" in body, (
+        f"{script.relative_to(REPO_ROOT)} partitions into buckets but does not "
+        f"call the shared builder/stage-lib/partition-tree.py. Add "
+        f"`COPY --from=stagelib partition-tree.py /partition-tree.py` to the "
+        f"image's restore stage and invoke it.")
+    for marker in ("def partition(", "def children(", "MAX_BUCKETS ="):
+        assert marker not in body, (
+            f"{script.relative_to(REPO_ROOT)} still holds an inline copy of the "
+            f"partitioner ({marker!r}). A private fork of this code has silently "
+            f"lost directory ownership before.")
