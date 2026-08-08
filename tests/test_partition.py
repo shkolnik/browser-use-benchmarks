@@ -1,3 +1,4 @@
+import errno
 import importlib.util
 import os
 import stat
@@ -162,3 +163,63 @@ def test_move_places_every_piece_and_empties_the_root(tmp_path):
     # whole piece, so it moves rather than being lost.
     assert [p for p in root.rglob("*") if p.is_file()] == []
     assert [p.name for p in root.rglob("*")] == ["uploads"]
+
+
+def _exdev(*_a, **_kw):
+    raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+
+def test_exdev_move_keeps_every_moved_entry_s_owner(tmp_path, monkeypatch):
+    # The half of the ownership bug that mkdir_mirroring does NOT cover. The
+    # pieces that MOVE were assumed to keep their metadata for free, and they do
+    # -- but only when os.rename works. Renaming a directory whose contents live
+    # in a lower overlayfs layer raises EXDEV, and shutil.move's fallback is
+    # copytree, which copies mode and times and NOT ownership. So the loss was
+    # never about which directory: it was about which code path.
+    #
+    # Measured: gitlab's /var/opt/gitlab/prometheus is gitlab-prometheus-owned in
+    # the base image, took the copy path, and reached the shipped image
+    # root:root -- so runit's prometheus (-U gitlab-prometheus) crash-looped on
+    # its TSDB. git-data, written by the restore into the upper layer, renamed
+    # and kept git:git, which is what made this look like a one-directory
+    # problem for three builds.
+    root, staging = tmp_path / "var", tmp_path / "staging"
+    write(root, "prometheus/data/chunk.bin", 100)
+    write(root, "prometheus/queries.active", 4)
+    calls = []
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **kw):
+        st = real_lstat(path, *a, **kw)
+        # A distinct uid per entry, so a blanket chown -- or one that mirrored
+        # the wrong level -- cannot pass.
+        uid = {"prometheus": 995, "data": 994, "chunk.bin": 993,
+               "queries.active": 992}.get(os.path.basename(str(path)))
+        return _Stat(st, uid) if uid else st
+
+    monkeypatch.setattr(pt.os, "rename", _exdev)
+    monkeypatch.setattr(pt.os, "lstat", fake_lstat)
+    monkeypatch.setattr(
+        pt.os, "chown",
+        lambda p, u, g, **kw: calls.append((os.path.basename(p), u)))
+    monkeypatch.setattr(pt.os, "chmod", lambda p, m, **kw: None)
+    monkeypatch.setattr(pt.os, "utime", lambda p, *a, **kw: None)
+    pt.main(["partition-tree.py", "500", "4", str(root), str(staging)])
+    assert sorted(calls) == [
+        ("chunk.bin", 993), ("data", 994), ("prometheus", 995),
+        ("queries.active", 992)]
+
+
+def test_exdev_move_still_moves_the_content(tmp_path, monkeypatch):
+    # The copy path must be a real move: same bytes, same modes, source gone.
+    # Without this, a chown-only assertion would pass against a copier that
+    # silently dropped files.
+    root, staging = tmp_path / "var", tmp_path / "staging"
+    write(root, "prometheus/data/chunk.bin", 100)
+    (root / "prometheus/data").chmod(0o2750)
+    monkeypatch.setattr(pt.os, "rename", _exdev)
+    pt.main(["partition-tree.py", "500", "4", str(root), str(staging)])
+    moved = staging / "bucket-00" / "prometheus" / "data" / "chunk.bin"
+    assert moved.is_file() and moved.stat().st_size == 100 * 1024
+    assert stat.S_IMODE((staging / "bucket-00" / "prometheus" / "data").stat().st_mode) == 0o2750
+    assert not (root / "prometheus").exists()
