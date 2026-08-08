@@ -41,4 +41,8 @@ script = "derive-backup.sh"
 outputs = ["classifieds_uploads.tar"]
 
 [service]
+# The PUBLISHED address the smoke gate reaches this service at — here it
+# happens to match the Dockerfile's in-container HEALTHCHECK probe (both are
+# localhost:9980) because classifieds publishes on the same port it listens
+# on. Readiness is the HEALTHCHECK's job now; this is a reachability check only.
 healthcheck = "http://localhost:9980/"
