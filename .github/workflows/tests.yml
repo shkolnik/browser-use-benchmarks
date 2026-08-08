@@ -1,0 +1,56 @@
+name: tests
+
+# Deliberately a SEPARATE workflow from build-images, not a step inside it.
+# build-images serialises on `concurrency: build-images` with max-parallel 1
+# and a 300-minute ceiling, so a test step living there would inherit a
+# multi-hour queue to tell us about a two-second regression. Nothing here
+# touches the self-hosted runner either: these jobs run on GitHub-hosted
+# ubuntu (this repo is public, so that is free) and therefore never compete
+# with an image build for the runner's disk.
+#
+# Why this exists at all: build.yml was the only workflow in the repo and it
+# invokes no pytest, so nothing ran tests/ on push or on PR. A builder/
+# regression would surface — if at all — hours later as a failed image build,
+# and unrun tests rot silently in the meantime.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Superseding an in-flight test run is safe and desirable: unlike an image
+# build, a stale result here has no artifact and no commit status worth
+# keeping.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # tomllib is stdlib from 3.11; builder/manifest.py depends on it.
+          python-version: "3.12"
+      - run: pip install pytest pyyaml
+      # Hermetic: no docker, no network, ~2s. This is the signal that should
+      # come back before a reviewer has switched tabs.
+      - run: python3 -m pytest tests/ -q --ignore=tests/integration
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyyaml
+      # A real build → push → run round trip against a throwaway registry:2.
+      # Split from `unit` rather than folded in because it pulls busybox and
+      # registry:2 from Docker Hub, whose anonymous rate limit is the one
+      # failure here that would say nothing about this repo's code. Keeping it
+      # in its own job means that failure is legible as what it is instead of
+      # discrediting the fast suite.
+      - run: python3 -m pytest tests/integration -q
