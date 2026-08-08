@@ -34,6 +34,48 @@ case "$HTTP_PORT" in
   ''|*[!0-9]*) echo "error: HTTP_PORT must be a number, got '$HTTP_PORT'" >&2; exit 1 ;;
 esac
 
+# Reassemble any part that had to ship as sub-files.
+#
+# One part of this archive is a single Xapian index, 14.91 GiB, and search only
+# works when an index sits entirely inside one part (see README.md). A part is a
+# file and a file lives in exactly one layer, so that part is larger than any
+# layer a registry accepts. It therefore ships as `<part>.partNN` chunks that are
+# concatenated here, before kiwix-serve opens the archive. libzim never sees the
+# chunks: it resolves `<stem>.zimaa`, `.zimab`, ... and `.partNN` matches none of
+# those names.
+#
+# The cost is real and worth stating: this writes ~15 GiB into the container's
+# writable layer and takes a couple of minutes on first start, which is why the
+# Dockerfile's HEALTHCHECK has a long start period. It is skipped when the part
+# is already there at the right size, so restarting a container is free.
+for first in /zim/*.part00; do
+    [ -e "$first" ] || break
+    part="${first%.part00}"
+    # Deliberately NOT `set -- "$part".part??`: "$@" still holds the ZIM path
+    # from CMD, which the exec at the bottom passes to kiwix-serve.
+    want=0
+    count=0
+    for chunk in "$part".part??; do
+        want=$((want + $(stat -c %s "$chunk")))
+        count=$((count + 1))
+    done
+    if [ -f "$part" ] && [ "$(stat -c %s "$part")" -eq "$want" ]; then
+        echo "reassemble: $part already present at $want bytes"
+        continue
+    fi
+    echo "reassemble: building $part from $count sub-files ($((want / 1073741824)) GiB)..."
+    # Not `>>`: a partial file from a killed start would otherwise be extended
+    # rather than replaced, and the size check below would pass on garbage.
+    rm -f "$part"
+    cat "$part".part?? > "$part"
+    got=$(stat -c %s "$part")
+    if [ "$got" != "$want" ]; then
+        echo "error: $part is $got bytes, expected $want — out of disk?" >&2
+        exit 1
+    fi
+    echo "reassemble: $part complete"
+done
+
 echo "serving http://${HTTP_HOST}:${HTTP_PORT}/ (listening on 80 in-container)"
 # Hand back to the base image's own chain, with the ZIM path this image's CMD
 # supplies still in "$@". dumb-init is what reaps kiwix-serve's children.

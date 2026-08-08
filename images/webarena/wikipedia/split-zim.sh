@@ -59,6 +59,12 @@ PART_BYTES=$((9 * 1024 * 1024 * 1024))
 # accepted 10.003 GiB. A part over this cannot be published, so fail here rather
 # than after a multi-hour build.
 MAX_PART_BYTES=$((10 * 1024 * 1024 * 1024 + 3 * 1024 * 1024))
+# A part that has to be bigger than the ceiling is not a mistake to be fixed by
+# choosing a different boundary: it is one Xapian index, and search needs it
+# whole. Such a part ships as `.partNN` sub-files of this size, which the
+# entrypoint concatenates back into the part before kiwix-serve starts. The
+# archive on disk is unchanged; only its delivery is. See README.md.
+SUB_BYTES=$((8 * 1024 * 1024 * 1024))
 
 # The download step skips prepare_input datasets, so fetch it here. This is a
 # no-op when a sha256-verified copy is already in DATASETS_DIR.
@@ -89,32 +95,23 @@ trap 'rm -f "$BOUNDS_FILE"' EXIT
 python3 "$HERE/zim_layout.py" boundaries "$ZIM" "$PART_BYTES" > "$BOUNDS_FILE"
 
 # Check the plan before acting on it. Writing 88.7 GiB takes tens of minutes and
-# the sizes are already known from the boundaries, so a layout that cannot be
-# published should say so now rather than after the split.
+# the sizes are already known from the boundaries, so the layout — including
+# which parts have to ship as sub-files — should be legible now rather than
+# after the split.
 echo "=== the planned layout ==="
-python3 - "$ZIM" "$BOUNDS_FILE" "$MAX_PART_BYTES" <<'PY'
+python3 - "$ZIM" "$BOUNDS_FILE" "$MAX_PART_BYTES" "$SUB_BYTES" <<'PY'
 import os, sys
 total = os.path.getsize(sys.argv[1])
 cuts = [0] + [int(x) for x in open(sys.argv[2]) if x.strip()] + [total]
-max_part = int(sys.argv[3])
-over = []
+max_part, sub = int(sys.argv[3]), int(sys.argv[4])
+if sub > max_part:
+    sys.exit(f'split-zim: SUB_BYTES {sub} is over the layer ceiling {max_part}')
 for i, (s, e) in enumerate(zip(cuts, cuts[1:])):
-    flag = ""
-    if e - s > max_part:
-        over.append((i, e - s))
-        flag = "  ** OVER THE LAYER CEILING **"
-    print(f"  part {i:2d}  {s:>14,} .. {e:>14,}  {(e-s)/2**30:6.2f} GiB{flag}")
-if over:
-    lines = "\n".join(f"    part {i}: {n/2**30:.2f} GiB" for i, n in over)
-    sys.exit(
-        "\nsplit-zim: this archive cannot be published as layers:\n"
-        f"{lines}\n"
-        f"    ceiling: {max_part/2**30:.3f} GiB (docs/registry-limits.md)\n"
-        "  A part is a file and a file lives in exactly one layer. A part is only this\n"
-        "  big because an Xapian index is, and that index has to stay whole or search\n"
-        "  breaks — so this is not something a different part size can fix.\n"
-        "  See images/webarena/wikipedia/README.md for the options."
-    )
+    n = e - s
+    note = ""
+    if n > max_part:
+        note = f"  -> {-(-n // sub)} sub-files (over the {max_part/2**30:.3f} GiB layer ceiling)"
+    print(f"  part {i:2d}  {s:>14,} .. {e:>14,}  {n/2**30:6.2f} GiB{note}")
 PY
 
 # Split into a staging dir and move the parts into place only once they verify.
@@ -128,49 +125,53 @@ mkdir -p "$STAGING"
 trap 'rm -rf "$STAGING"' EXIT
 
 echo "=== splitting $PREPARE_INPUT_FILE ($SRC_BYTES bytes) ==="
-python3 - "$ZIM" "$STAGING" "$STEM" "$MAX_PART_BYTES" "$BOUNDS_FILE" <<'PY'
+python3 - "$ZIM" "$STAGING" "$STEM" "$MAX_PART_BYTES" "$BOUNDS_FILE" "$SUB_BYTES" <<'PY'
 import itertools, os, string, sys
 
 src, out, stem, max_part = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+sub_bytes = int(sys.argv[6])
 total = os.path.getsize(src)
 cuts = [0] + [int(x) for x in open(sys.argv[5]) if x.strip()] + [total]
 sfx = [a + b for a, b in itertools.product(string.ascii_lowercase, repeat=2)]
 if len(cuts) - 1 > len(sfx):
     sys.exit(f"split-zim: {len(cuts)-1} parts exceeds the two-letter suffix space")
 
-oversized = []
+
+def pieces(part_bytes):
+    """Byte counts of the files this part ships as — itself, or `.partNN` chunks.
+
+    A chunked part is still ONE part to libzim: the entrypoint concatenates the
+    chunks back before kiwix-serve opens the archive. Chunking is a delivery
+    detail of the layer ceiling and never moves a boundary, because moving one
+    is what cuts an index.
+    """
+    if part_bytes <= max_part:
+        return [part_bytes]
+    n = -(-part_bytes // sub_bytes)
+    base, extra = divmod(part_bytes, n)
+    return [base + (1 if i < extra else 0) for i in range(n)]
+
+
 with open(src, "rb") as f:
     for i, (s, e) in enumerate(zip(cuts, cuts[1:])):
-        name = f"{out}/{stem}.zim{sfx[i]}"
-        with open(name, "wb") as o:
-            left = e - s
-            while left:
-                b = f.read(min(1 << 24, left))
-                o.write(b)
-                left -= len(b)
-        size = os.path.getsize(name)
-        flag = ""
-        if size > max_part:
-            oversized.append((os.path.basename(name), size))
-            flag = "  ** OVER THE LAYER CEILING **"
-        print(f"  part {i:2d}  {size/2**30:6.2f} GiB  {os.path.basename(name)}{flag}", flush=True)
+        chunks = pieces(e - s)
+        part = f"{stem}.zim{sfx[i]}"
+        for j, want in enumerate(chunks):
+            name = part if len(chunks) == 1 else f"{part}.part{j:02d}"
+            with open(f"{out}/{name}", "wb") as o:
+                left = want
+                while left:
+                    b = f.read(min(1 << 24, left))
+                    if not b:
+                        sys.exit(f"split-zim: {src} ended early writing {name}")
+                    o.write(b)
+                    left -= len(b)
+            print(f"  part {i:2d}  {want/2**30:6.2f} GiB  {name}", flush=True)
 
 got = sum(os.path.getsize(os.path.join(out, x)) for x in os.listdir(out))
 if got != total:
     sys.exit(f"split-zim: parts total {got} bytes, source is {total}; the split is incomplete")
 print(f"split-zim: {len(cuts)-1} parts, {got} bytes, matching the source exactly")
-
-if oversized:
-    lines = "\n".join(f"    {n}: {s/2**30:.2f} GiB" for n, s in oversized)
-    sys.exit(
-        "split-zim: these parts are larger than any layer this fleet has published:\n"
-        f"{lines}\n"
-        f"    ceiling: {max_part/2**30:.3f} GiB (docs/registry-limits.md)\n"
-        "  A part is a file and a file lives in exactly one layer, so this cannot be\n"
-        "  pushed as-is. It is not a bug in the split: an Xapian index bigger than the\n"
-        "  ceiling cannot be both whole (which search requires) and inside a layer.\n"
-        "  See images/webarena/wikipedia/README.md for the options."
-    )
 PY
 
 # Containment is the gate the build log cannot show you. Re-derive it from the
@@ -184,12 +185,20 @@ sys.path.insert(0, sys.argv[4])
 from zim_layout import PROTECTED, Zim  # noqa: E402
 
 z = Zim(src)
-parts = sorted(x for x in os.listdir(out) if x.startswith(f"{stem}.zim"))
+# Sub-files sum back into the part they belong to: `.zimaj.part00` and
+# `.part01` ARE `.zimaj` as far as libzim ever sees, since the entrypoint
+# concatenates them before the archive is opened. Grouping here is what keeps
+# this check about containment rather than about delivery.
+sizes = {}
+for x in sorted(os.listdir(out)):
+    if not x.startswith(f"{stem}.zim"):
+        continue
+    part = x.split(".part")[0]
+    sizes[part] = sizes.get(part, 0) + os.path.getsize(os.path.join(out, x))
 edges, pos = [], 0
-for p in parts:
-    n = os.path.getsize(os.path.join(out, p))
-    edges.append((p, pos, pos + n))
-    pos += n
+for p in sorted(sizes):
+    edges.append((p, pos, pos + sizes[p]))
+    pos += sizes[p]
 
 bad = False
 for path in PROTECTED:
@@ -209,8 +218,12 @@ if bad:
     sys.exit("split-zim: refusing to publish a split that breaks search")
 PY
 
-for p in "$STAGING/$STEM.zim"??; do
+# Also `.zim??.partNN`, hence the glob rather than `.zim??` — a previous run's
+# whole part would otherwise be left behind next to this run's sub-files and
+# libzim would open the stale one.
+rm -f -- "$DATASETS_DIR/$STEM".zim??  "$DATASETS_DIR/$STEM".zim??.part??
+for p in "$STAGING/$STEM.zim"??*; do
   mv -f -- "$p" "$DATASETS_DIR/"
 done
 echo "=== parts in place ==="
-ls -l "$DATASETS_DIR/$STEM".zim??
+ls -l "$DATASETS_DIR/$STEM".zim??*
