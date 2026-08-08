@@ -101,6 +101,7 @@ COPY --chown=app:app conf/env.php app/etc/env.php
 # --- Restore: boot the appliance stack, load the derived data, reindex, quiesce ---
 FROM code AS restore
 USER root
+COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
 RUN --mount=type=bind,from=datasets,source=shopping_db.sql.gz,target=/mnt/shopping_db.sql.gz \
     --mount=type=bind,from=datasets,source=shopping_media.tar,target=/mnt/shopping_media.tar \
