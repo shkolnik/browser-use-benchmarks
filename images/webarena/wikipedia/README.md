@@ -218,6 +218,35 @@ Verified on a three-part test image built for the purpose: two plain containers 
 independently; `ZIM_JOIN_ONLY=1` joined into a volume and exited 0; two later containers on that
 volume both reported `already whole at 331961086 bytes — skipping` and served.
 
+### The copy can be avoided entirely with FUSE — at a price this image declines to pay
+
+The join exists because libzim wants one file. It does not need one file *on disk* — only one file in
+the namespace it opens. A ~50-line FUSE filesystem that presents the parts as a single virtual file
+gives libzim exactly that, copying nothing.
+
+**Tested, and it works.** A concat FUSE fs over three parts of the 332 MB fixture, with kiwix-serve
+opening the virtual path: article, `/search` and `/suggest` all **byte-identical** to the whole file
+(747,052 / 21,852 / 1,722 B). Full-text search included — which follows, because libzim sees one file
+and the split code path that loses search never runs. Single-file access at 95 GB is already proven
+(the whole archive serves search fine), so the risk here is FUSE's, not libzim's.
+
+Two reasons it is not what ships:
+
+- **Privilege.** `--device /dev/fuse` and `--cap-add SYS_ADMIN` are not enough: the mount is refused
+  until `--security-opt apparmor:unconfined --security-opt seccomp=unconfined` are added too. That is
+  a near-root capability plus the removal of both sandbox layers, on every container running this
+  benchmark, to save disk. For an image whose whole point is being trivial and safe to run, that is
+  the wrong trade — and the wrong trade to make silently.
+- **Unmeasured at scale.** Latency was identical on the fixture (search ~155 ms both ways), but that
+  fixture fits entirely in page cache after one warm request, so it barely exercises FUSE at all.
+  Random access across a 14.91 GiB Xapian index with a cold cache, through a userspace process, is
+  the case that matters and it has **not** been measured. Treat the fixture numbers as evidence of
+  correctness only, never of performance — this document already made the mistake once of trusting a
+  332 MB result about this archive.
+
+Worth revisiting if disk, not privilege, is ever the binding constraint; a C implementation would
+also remove the Python process from the read path.
+
 ### Sizes, so the two numbers do not get confused
 
 - **image: ~88.8 GiB** — the parts (95,199,730,590 B) plus a 102 MB base. ZIM payloads are already
