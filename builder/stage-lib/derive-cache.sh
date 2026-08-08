@@ -97,6 +97,17 @@ dcache_ensure_oras() {
 dcache__migrate_legacy_hit() {
   local ref=$1 dest=$2 extracted=$3
 
+  # Opt-out for entries too big to convert as a side effect of an ordinary
+  # build. Only wikipedia sets it: its entry is ~88 GB, and re-pushing that
+  # during a fleet run would add the upload to a job already sharing a
+  # 300-minute run budget. It converts when it is next re-derived, which is
+  # already an expensive, deliberate operation. Everything else migrates on
+  # first hit, paying only the upload for bytes it has just downloaded anyway.
+  if [ "${DCACHE_NO_MIGRATE:-}" = 1 ]; then
+    echo "derive-cache: DCACHE_NO_MIGRATE=1 — leaving $ref in its legacy format" >&2
+    return 0
+  fi
+
   # Push EXACTLY what came out of the legacy entry, never "what is in $dest".
   # $dest is DATASETS_DIR — the runner's shared datasets directory, holding
   # every other image's inputs and the multi-tens-of-GB upstream tars. The
