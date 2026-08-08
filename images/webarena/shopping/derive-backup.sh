@@ -170,5 +170,25 @@ cp "$DATASETS_DIR/shopping_env.php" "$work/"
 } > "$work/Dockerfile"
 docker build -t "$CACHE" "$work"
 rm -rf "$work"
-docker push "$CACHE" || echo "warning: cache push failed (continuing; derivation succeeded)"
+# Retry, then FAIL. builder/docker.py stamps a successful prepare and skips
+# this script on every later run with matching inputs, so this is the only run
+# that will ever push: a warning here leaves the cache empty permanently while
+# later builds depend on it. Retries because a transient GHCR error must not
+# throw away a finished derivation.
+pushed=
+for attempt in 1 2 3; do
+  if docker push "$CACHE"; then
+    pushed=yes
+    break
+  fi
+  echo "cache push attempt $attempt/3 failed" >&2
+  [ "$attempt" = 3 ] || sleep 30
+done
+if [ -z "$pushed" ]; then
+  echo "derive: could not publish $CACHE after 3 attempts. Failing rather than" \
+       "stamping: prepare_reuse_check would skip this script on the next run," \
+       "so nothing would ever retry the push and the cache would stay empty" \
+       "for good. The artifacts in $DATASETS_DIR are intact and correct." >&2
+  exit 1
+fi
 echo "derive complete"
