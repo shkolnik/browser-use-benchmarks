@@ -303,16 +303,50 @@ def image_healthcheck(image: str, check_output=subprocess.check_output) -> dict 
                         "{{json .Config.Healthcheck}}", image], text=True).strip()
     return None if out in ("", "null") else json.loads(out)
 
+def _dump(cmd: list[str], what: str, runner=subprocess.run, log=print) -> None:
+    """Print one diagnostic section, and make an EMPTY one say why it is empty.
+
+    Two separate defects produced the gitlab failures' unreadable diagnostics
+    (#76), and this addresses both:
+
+    1. The output was not missing, it was DISPLACED. These sections used to
+       print a header and then let the child write straight to the inherited
+       fd. Python block-buffers stdout when it is a pipe — which is what CI
+       gives it — so every header sat in the buffer until exit while the child
+       output went out immediately. The log showed the docker output up front
+       and a run of bare headers at the end. Capturing the child's output and
+       logging it ourselves makes ordering structural rather than a matter of
+       flush discipline. (bin/build also line-buffers now, which fixes the same
+       displacement for `run`'s `+ cmd` echoes everywhere else.)
+
+    2. A section that genuinely had nothing to show was indistinguishable from
+       one that failed. `ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null`
+       prints nothing and says nothing when an image ships neither tool. An
+       empty section now carries the exit code, and stderr is folded in rather
+       than discarded, so the reader can tell "nothing was listening" from
+       "the probe could not run".
+
+    Best-effort throughout: this runs on an already-failing path and must never
+    replace the real error with one of its own.
+    """
+    log(f"=== {what} ===")
+    try:
+        p = runner(cmd, capture_output=True, text=True)
+    except Exception as e:
+        log(f"(could not collect: {e})")
+        return
+    # A faked runner in a test may return None; treat that as "no output"
+    # rather than crashing the diagnostic path.
+    body = ((getattr(p, "stdout", "") or "") + (getattr(p, "stderr", "") or "")).rstrip()
+    if body:
+        log(body)
+    else:
+        log(f"(no output; `{' '.join(cmd)}` exited {getattr(p, 'returncode', '?')})")
+
 def dump_service_logs(compose: Path, service: str, tail: str = "400",
                       runner=subprocess.run) -> None:
-    # Best-effort: this runs on a path that is already failing, so it must not
-    # replace the real error with one of its own.
-    print(f"=== docker compose logs (last {tail} lines) for {service} ===")
-    try:
-        runner(["docker", "compose", "-f", str(compose), "logs",
-                "--tail", tail, service])
-    except Exception as e:
-        print(f"(could not collect logs: {e})")
+    _dump(["docker", "compose", "-f", str(compose), "logs", "--tail", tail, service],
+          f"docker compose logs (last {tail} lines) for {service}", runner=runner)
 
 def container_health(compose: Path, service: str,
                      check_output=subprocess.check_output) -> dict | None:
@@ -370,19 +404,20 @@ def dump_service_diagnostics(compose: Path, service: str,
     # port bindings and the listener table — neither of which is in any log.
     # Best-effort, like the log dump: this runs on an already-failing path.
     dump_health_log(compose, service)
+    # The listener probe keeps its fallback chain but no longer sends the
+    # failures to /dev/null: an image with neither tool used to print nothing
+    # and explain nothing, which reads exactly like "nothing is listening" —
+    # the opposite conclusion from the one the operator should draw.
     probes = [
         (["docker", "compose", "-f", str(compose), "ps", service],
-         "what compose published"),
+         f"what compose published for {service}"),
         (["docker", "compose", "-f", str(compose), "exec", "-T", service,
-          "sh", "-c", "ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null"],
-         "listeners inside the container"),
+          "sh", "-c", "ss -ltnp || netstat -ltnp || "
+                      "echo '(neither ss nor netstat is present in this image)'"],
+         f"listeners inside the container for {service}"),
     ]
     for cmd, what in probes:
-        print(f"=== {what} for {service} ===")
-        try:
-            runner(cmd)
-        except Exception as e:
-            print(f"(could not collect: {e})")
+        _dump(cmd, what, runner=runner)
 
 def run_smoke(refs, repo_root: Path) -> None:
     benches = sorted({r.benchmark for r in refs})
