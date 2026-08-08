@@ -17,36 +17,41 @@ FROM ghcr.io/kiwix/kiwix-serve:3.3.0@sha256:889f08dcbfe94b44a506060632618d671ea0
 # GHCR links this package to this repo and inherits its visibility.
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
 
-# /zim, NOT the base image's /data. /data is declared VOLUME in the base
+# /zim-parts, NOT the base image's /data. /data is declared VOLUME in the base
 # config, and Docker initialises an anonymous volume by copying the image's
 # contents at that path on every `docker run` — baking the archive there would
 # mean copying 88.7 GiB per container start, and leave a volume that size
 # behind each time. Any path outside the declared volume is baked into the
 # layers and read in place.
 #
+# The parts live HERE and the finished archive is assembled into /zim, a
+# different and deliberately empty directory. Keeping them apart is what lets an
+# operator mount a named volume on /zim to pay the join once for the life of the
+# volume rather than once per container: a volume over the PARTS would be seeded
+# from the image, copying 88.7 GiB before the join wrote another 88.7 GiB into
+# the same volume. See entrypoint.sh.
+#
 # One COPY per part, each its own layer: a registry caps a layer far below
 # 88.7 GiB, so a single COPY of the whole file could never be pushed. The parts
-# are produced by split-zim.sh (image.toml [prepare]); see it for why libzim
-# reassembles them without the whole file ever existing on disk.
+# are produced by split-zim.sh (image.toml [prepare]).
 #
-# They are NOT all the same size, and that is the point: a part boundary must
-# never land inside an Xapian index, or search breaks while every article keeps
-# serving. Part 9 is the fulltext index exactly — 14.91 GiB, larger than a layer
-# — so it arrives as two `.partNN` sub-files that entrypoint.sh concatenates
-# before kiwix-serve opens the archive. libzim resolves `.zimaa`, `.zimab`, ...
-# and never sees a `.partNN` name, so the extra files are inert until then.
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaa /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimab /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimac /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimad /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimae /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaf /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimag /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimah /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimai /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj.part00 /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj.part01 /zim/
-COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimak /zim/
+# They are NOT all the same size. A part boundary must never land inside an
+# Xapian index — and on this archive that turns out not to be enough either, so
+# the entrypoint rebuilds the whole file; README.md has the measurements. Part 9
+# is the fulltext index exactly (14.91 GiB, larger than a layer) and arrives as
+# two `.partNN` sub-files, which is what makes it shippable at all.
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaa /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimab /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimac /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimad /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimae /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaf /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimag /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimah /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimai /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj.part00 /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimaj.part01 /zim-parts/
+COPY --from=datasets wikipedia_en_all_maxi_2022-05.zimak /zim-parts/
 
 EXPOSE 80
 
@@ -89,6 +94,8 @@ HEALTHCHECK --interval=30s --timeout=15s --start-period=3600s --retries=5 \
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 # The base entrypoint runs `kiwix-serve --port=80 $@`, so this is the archive
-# argument, and entrypoint.sh passes it straight through. There is deliberately
-# no file at this path — libzim resolves the .zimaa/.zimab/... parts beside it.
+# argument, and entrypoint.sh passes it straight through. Nothing exists at this
+# path in the image: the entrypoint builds it from /zim-parts first, into
+# whatever /zim happens to be — the container's writable layer, or a named
+# volume if one is mounted there.
 CMD ["/zim/wikipedia_en_all_maxi_2022-05.zim"]

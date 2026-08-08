@@ -188,14 +188,42 @@ What it costs, measured rather than projected:
   said ~140 s and been wrong by 4.5x, which is why the `HEALTHCHECK` start period is 3600 s.
 - A restart of the same container is free: an archive already whole at the right size is skipped.
 
-A **named volume would make the 632 s a once-ever cost** rather than once per container, and it is
-worth naming because the obvious way to do it is the wrong way. Mounting a volume over `/zim` — where
-the parts already are — makes Docker seed the empty volume by copying the image's contents at that
-path, so the first `up` copies 89 GiB *before* the join writes another 89 GiB into the same volume.
-Ship the parts at a different path (`/zim-parts`) and mount the volume on an empty `/zim`, and the
-volume holds only the joined archive: the same ~178 GiB total, but paid once for the life of the
-volume instead of once per `docker compose up`. Not done here, because a stateful volume is a change
-to how this fleet's services are run, not just to this image.
+### Paying the 632 s once, instead of once per container
+
+Where the joined archive lands decides how often it is paid, so the image keeps the two directories
+apart: **parts ship at `/zim-parts`, the archive is assembled into `/zim`**, which holds nothing in
+the image.
+
+- **Default** — `/zim` is the container's writable layer, so the join is once per *container*.
+  `docker restart` is free; `docker run` again pays it in full.
+- **Named volume on `/zim`** — paid once for the life of the volume, however many containers come
+  and go. `ZIM_JOIN_ONLY=1` performs the join and exits 0, so it can be spent right after
+  `docker pull` rather than on a first boot somebody is waiting for:
+
+  ```sh
+  docker volume create wiki-zim
+  docker run --rm -e HTTP_HOST=localhost -e HTTP_PORT=8888 \
+      -e ZIM_JOIN_ONLY=1 -v wiki-zim:/zim ghcr.io/shkolnik/webarena-wikipedia:latest
+  # every later run starts in seconds
+  docker run -d -e HTTP_HOST=localhost -e HTTP_PORT=8888 -p 8888:80 \
+      -v wiki-zim:/zim ghcr.io/shkolnik/webarena-wikipedia:latest
+  ```
+
+The volume must go on `/zim` and **never** on `/zim-parts`: Docker seeds an empty named volume from
+the image's contents at that path, so a volume over the parts would copy 88.7 GiB before the join
+wrote another 88.7 GiB into the same volume. Separating the directories makes that unreachable
+rather than merely documented.
+
+Verified on a three-part test image built for the purpose: two plain containers each joined
+independently; `ZIM_JOIN_ONLY=1` joined into a volume and exited 0; two later containers on that
+volume both reported `already whole at 331961086 bytes — skipping` and served.
+
+### Sizes, so the two numbers do not get confused
+
+- **image: ~88.8 GiB** — the parts (95,199,730,590 B) plus a 102 MB base. ZIM payloads are already
+  compressed, so a layer barely shrinks on push.
+- **a running container: ~177 GiB** — the image plus the joined second copy, unless that copy lives
+  in a shared named volume, in which case it is 88.7 GiB once per host rather than per container.
 
 ## Ports and the health check
 
