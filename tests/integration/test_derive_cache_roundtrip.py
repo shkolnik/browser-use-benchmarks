@@ -135,11 +135,20 @@ def test_legacy_hit_falls_back_and_migrates(tmp_path, registry, oras_tool_dir):
         # First pull: the registry only has the legacy image. dcache_pull
         # must fall back and still return the files correctly.
         dest1 = tmp_path / "dest1"
+        # NOT an empty directory. On a runner $dest is DATASETS_DIR, shared by
+        # every image and full of other people's inputs — and this fixture
+        # being clean is exactly why the first migration implementation, which
+        # pushed `find . -type f` over $dest, passed review. The neighbour
+        # below must never appear in the migrated artifact.
+        dest1.mkdir()
+        neighbour = dest1 / "someone-elses-upstream.tar"
+        neighbour.write_bytes(b"another image's 40GB input, in miniature\n")
         r = _run(f'dcache_pull "{ref}" "{dest1}" "x_*" '
                   '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path, oras_tool_dir)
         assert r.returncode == 0, r.stderr
         assert "FORMAT=legacy" in r.stdout, r.stdout
-        got = {p.name: _sha(p) for p in dest1.iterdir() if p.is_file()}
+        got = {p.name: _sha(p) for p in dest1.iterdir()
+               if p.is_file() and p.name != neighbour.name}
         assert got == want, (got, want)
 
         # #79 regression guard: `docker export` unfiltered would have dropped

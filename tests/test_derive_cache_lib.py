@@ -70,11 +70,31 @@ def test_a_pull_falls_back_to_the_legacy_image(tmp_path):
     assert any(c.startswith("docker pull") for c in calls), calls
 
 
+def fake_docker_serving(tmp_path, *names):
+    """A docker whose `export` really emits a tar of NAMES.
+
+    A fake that just `exit 0`s models a legacy hit which extracts nothing —
+    a state that cannot occur — and then cannot distinguish "migrated the
+    entry" from "migrated whatever else was lying in $dest".
+    """
+    for n in names:
+        (tmp_path / n).write_text(f"content of {n}")
+    return (
+        'case "$1" in\n'
+        '  pull) exit 0 ;;\n'
+        '  create) echo cid; exit 0 ;;\n'
+        f'  export) tar -cf - -C {tmp_path} {" ".join(names)}; exit 0 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+
+
 def test_a_legacy_hit_is_re_pushed_as_oras(tmp_path):
     r, calls = run('dcache_pull reg/x:t out "*.dat"', tmp_path,
-                   fake_oras="[ \"$1\" = pull ] && exit 1; exit 0", fake_docker="exit 0")
+                   fake_oras=ORAS_LEGACY_TAG,
+                   fake_docker=fake_docker_serving(tmp_path, "a.dat"))
     assert any(c.startswith("oras push") for c in calls), (
-        "a legacy hit did not migrate the entry, so it stays legacy forever")
+        f"a legacy hit did not migrate the entry, so it stays legacy forever: {r.stderr}")
 
 
 def test_a_re_push_failure_does_not_fail_the_build(tmp_path):
@@ -116,3 +136,36 @@ def test_a_legacy_tag_is_not_mistaken_for_an_oras_hit(tmp_path):
                    tmp_path, fake_oras=ORAS_LEGACY_TAG, fake_docker="exit 0")
     assert "FORMAT=legacy" in r.stdout, (
         f"a legacy tag was read as an oras hit: {r.stdout!r} {r.stderr!r}")
+
+
+def test_migration_pushes_only_the_entry_it_read(tmp_path):
+    """$dest is the SHARED datasets dir, not a clean directory.
+
+    The first version of dcache__migrate_legacy_hit pushed `find . -type f`
+    over $dest. On a runner that is DATASETS_DIR — every other image's inputs
+    and the multi-tens-of-GB upstream tars — so a legacy hit would have
+    replaced a good cache tag with an artifact containing all of it. The
+    round-trip test missed it because its destination was an empty temp dir,
+    where "everything in $dest" and "what the entry held" coincide.
+    """
+    dest = tmp_path / "datasets"
+    dest.mkdir()
+    # A neighbour that must never be swept into this image's cache entry.
+    (dest / "someone-elses-40gb-upstream.tar").write_text("not mine")
+    # A fake docker whose `export` emits a tar holding just this entry's file.
+    fake_docker = (
+        'case "$1" in\n'
+        '  pull) exit 0 ;;\n'
+        '  create) echo cid; exit 0 ;;\n'
+        f'  export) tar -cf - -C {tmp_path} entry.dat; exit 0 ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    (tmp_path / "entry.dat").write_text("mine")
+    r, calls = run(f'dcache_pull reg/x:t {dest} "entry*"', tmp_path,
+                   fake_oras=ORAS_LEGACY_TAG, fake_docker=fake_docker)
+    push = [c for c in calls if c.startswith("oras push")]
+    assert push, f"no migration push happened at all: {calls} {r.stderr}"
+    assert "someone-elses-40gb-upstream.tar" not in push[0], (
+        f"the migration swept up an unrelated dataset: {push[0]}")
+    assert "entry.dat" in push[0], push[0]
