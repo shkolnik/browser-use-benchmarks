@@ -58,7 +58,12 @@ assert_dump_complete() {
 extract_outputs_from_cache() {
   local cid
   cid=$(docker create "$CACHE" true)
-  docker export "$cid" | tar -x -C "$DATASETS_DIR"
+  # Filtered: `docker export` also carries the /dev, /etc, /proc, /sys and
+  # /.dockerenv Docker injects into every container, which unfiltered land
+  # in the shared datasets dir. ONE pattern — tar exits 2 on any pattern
+  # that matches nothing, so a second shape would break every extract that
+  # legitimately lacks it.
+  docker export "$cid" | tar -x -C "$DATASETS_DIR" --wildcards 'shopping_*'
   docker rm "$cid" >/dev/null
   cat "$DATASETS_DIR"/shopping_media.tar.part-* > "$DATASETS_DIR/shopping_media.tar"
   rm -f "$DATASETS_DIR"/shopping_media.tar.part-*
