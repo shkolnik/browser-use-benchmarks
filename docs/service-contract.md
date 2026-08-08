@@ -27,6 +27,7 @@ Regenerated from the tree, not copied from the plan.
 | `webarena/reddit` | 80 | `localhost:80/forums` | **`9999:80`** | `localhost:9999/forums` |
 | `webshop/server` | 3000 | `localhost:3000/` | `3000:3000` | `localhost:3000/` |
 | `webarena/gitlab` | 8023 | `gitlab-healthcheck` (not HTTP) | `8023:8023` | `localhost:8023/explore` |
+| `webarena/wikipedia` | 80 | `127.0.0.1:80/<landing>` | **`8888:80`** | `127.0.0.1:8888/<landing>` |
 
 `images/probe/synthetic/` is deliberately absent: it has no Dockerfile and no runnable service.
 `bin/build smoke probe` failing on the missing healthcheck is correct, and CI excludes the
@@ -69,7 +70,14 @@ never overlaps probes, so a generous `--timeout` costs nothing when things are h
 - Size it from a measurement. shopping-admin's 900s was inherited from an assumption about a
   first-request DI compile it turned out not to perform (its `generated/` classes arrive with the
   restored `/opt/magento` tree); measured, it reaches healthy in **15s**, so it now uses 300s.
-- **`curl` is the fleet's one probe binary.** `wget` is missing from shopping-admin.
+- **`curl` is the fleet's one probe binary — with one measured exception.** `wget` is missing from
+  shopping-admin; `curl` is missing from wikipedia's Alpine-based kiwix base. That image uses
+  busybox `wget`, which needs two extra cautions (both checked in-container, 2026-08-08):
+  it exits non-zero on a plain 404, but **following a redirect it prints the error and still exits
+  0** — so it must probe a path that answers 200 in one hop; and it tries `::1` first for
+  `localhost`, so against a server bound to `0.0.0.0` (IPv4-only, as kiwix-serve is) it gets
+  ECONNREFUSED. **Use `127.0.0.1` in a wget-based probe**, or the container never goes healthy
+  while the app is fine.
 - **`-L` is load-bearing wherever the probed path redirects.** `curl -f` fails only on >=400, so
   an unfollowed 302 passes against a container that rendered nothing.
 - **Probe a path that touches the app, not just the router.** Reddit probes `/forums`, not `/`,
@@ -87,19 +95,21 @@ There are several near-identical validation blocks, and the DRY instinct says ex
 any change under `builder/`, so a typo fix in a shared entrypoint would rebuild the entire fleet —
 hours of CI, serialized. The duplication is the cheaper side of that trade, and it is deliberate.
 
-## gitlab is a deliberate exception
+## gitlab: no longer an exception, but the dearest adopter
 
-gitlab ships a `HEALTHCHECK` but does **not** take `HTTP_HOST`/`HTTP_PORT`. Its served URL comes
-from `external_url` baked into `gitlab.rb` at image-build time, and the only reader of
+gitlab now takes `HTTP_HOST`/`HTTP_PORT` like the rest of the fleet (#10, #12). It is worth
+recording why it was the last to, because the cost is real and still paid on every boot.
+
+Its served URL comes from `external_url` in `gitlab.rb`, and the only reader of
 `ENV['EXTERNAL_URL']` in the whole omnibus tree of `gitlab-ce:15.7.5` is
 `/opt/gitlab/embedded/service/omnibus-ctl/upgrade.rb` — reachable only via `gitlab-ctl
-reconfigure`, which this image deliberately omits because skipping it is what keeps boot fast.
+reconfigure`. So unlike every sibling, applying these variables means running chef at container
+start: **~28s** for a genuine `external_url` change (`6/741 resources updated`, restarting puma,
+sidekiq, gitlab-kas, nginx). The entrypoint skips it when the address already matches, but the
+restored dataset bakes CMU's own host, so in practice it always runs — and that is also what stops
+the image serving links pointing at `metis.lti.cs.cmu.edu`.
 
-Measured cost of that chef run on stock `gitlab-ce:15.7.5`: **28s** for a genuine `external_url`
-change (`6/741 resources updated`, restarting puma, sidekiq, gitlab-kas, nginx), against 120s for
-the container's initial boot-and-reconfigure. Note the 28s is a *warm* figure — that container had
-already reconfigured once at boot, whereas our image never has, so its first-ever run is likely
-dearer.
-
-How gitlab adopts the contract is still an open decision. Until then it is an exception, and this
-paragraph exists so that reads as a decision rather than an oversight.
+**One consequence is unique to gitlab and easy to trip over:** because nginx derives
+`listen *:<port>` from `external_url`, `HTTP_PORT` moves the *in-container* listener too. Published
+and container port must therefore be equal for gitlab, which is why its `EXPOSE 8023` goes stale
+the moment `HTTP_PORT` is anything else.
