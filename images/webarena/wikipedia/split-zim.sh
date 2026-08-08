@@ -114,7 +114,12 @@ echo "=== checking derived-inputs cache: $CACHE ==="
 # size — measured 183 GB on this runner — and nothing reads it after export:
 # the wikipedia Dockerfile COPYs the parts from the datasets build context,
 # never from this image).
-if dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
+# DCACHE_NO_MIGRATE: this entry is ~88 GB. Every other site converts to the
+# oras format on its first legacy hit, paying only an upload for bytes it
+# just downloaded — cheap. Here that upload would land inside a fleet run
+# sharing a 300-minute budget, so this one converts when it is next
+# re-derived instead, which is already a deliberate multi-hour operation.
+if DCACHE_NO_MIGRATE=1 dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
   echo "split-zim: cache hit ($DCACHE_HIT_FORMAT format)"
   if [ ! -f "$DATASETS_DIR/$SIZES" ]; then
     echo "split-zim: cache entry has no $SIZES manifest — refusing to trust it" >&2
