@@ -1,0 +1,78 @@
+# Front door for the fleet: one host, one port, a subdomain per service.
+# Used by deploy/compose.proxy.yml. BENCH_HOST is the base domain, so with
+# BENCH_HOST=depot.example.com this serves shopping.depot.example.com etc.
+
+{
+	# No automatic HTTPS. These are names on a private domain, and Caddy would
+	# fail a public ACME challenge for them on startup. To serve TLS instead,
+	# drop this line and the `http://` prefixes below, and make sure the names
+	# are publicly resolvable (or configure a DNS-01 provider).
+	auto_https off
+}
+
+# Each upstream is the port the service listens on INSIDE its container, which
+# is not generally the port clients use. Only gitlab's moves: its listener
+# follows HTTP_PORT, so it tracks PROXY_PORT with everything else here fixed.
+# See docs/service-contract.md.
+
+http://shopping.{$BENCH_HOST} {
+	reverse_proxy shopping:7770
+}
+
+http://shopping-admin.{$BENCH_HOST} {
+	reverse_proxy shopping-admin:7780
+}
+
+http://reddit.{$BENCH_HOST} {
+	reverse_proxy reddit:80
+}
+
+http://wikipedia.{$BENCH_HOST} {
+	reverse_proxy wikipedia:80
+}
+
+http://gitlab.{$BENCH_HOST} {
+	reverse_proxy gitlab:{$PROXY_PORT:80}
+}
+
+http://classifieds.{$BENCH_HOST} {
+	reverse_proxy classifieds:9980
+}
+
+http://webshop.{$BENCH_HOST} {
+	reverse_proxy webshop:3000
+}
+
+http://miniwob.{$BENCH_HOST} {
+	reverse_proxy miniwob:8399
+}
+
+# Anything that matches no site above. Caddy's default for an unmatched host is
+# an empty 200, which is the worst available answer: a typo'd subdomain, or one
+# whose DNS points here by accident, reads as a service that is up and serving
+# nothing. Say what actually happened instead. The blocks above are all
+# host-specific, so they win over this one.
+http://:80 {
+	header Content-Type "text/plain; charset=utf-8"
+	respond "no service is published at this hostname — see http://{$BENCH_HOST}/ for the list" 404
+}
+
+# The bare domain is not a service. Answer it with the index rather than a bare
+# 404, so a wrong guess at a subdomain tells you the right ones.
+http://{$BENCH_HOST} {
+	header Content-Type "text/plain; charset=utf-8"
+	respond `benchmark fleet
+
+  http://shopping.{$BENCH_HOST}         WebArena shopping (Magento storefront)
+  http://shopping-admin.{$BENCH_HOST}   WebArena shopping admin (Magento admin)
+  http://reddit.{$BENCH_HOST}           WebArena reddit (Postmill)
+  http://wikipedia.{$BENCH_HOST}        WebArena wikipedia (kiwix)
+  http://gitlab.{$BENCH_HOST}           WebArena gitlab
+  http://classifieds.{$BENCH_HOST}      VisualWebArena classifieds (Osclass)
+  http://webshop.{$BENCH_HOST}          WebShop
+  http://miniwob.{$BENCH_HOST}          MiniWoB++
+
+A subdomain that returns 502 is a service that is not running: bring it up with
+    docker compose up -d --wait <name>
+` 200
+}

@@ -30,7 +30,7 @@ services:
       HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
       HTTP_PORT: "${SHOPPING_PORT:-7770}"
     ports:
-      - "${SHOPPING_PORT:-7770}:7770"
+      - "${BIND_ADDR:-0.0.0.0}:${SHOPPING_PORT:-7770}:7770"
     restart: unless-stopped
 
   shopping-admin:
@@ -39,7 +39,7 @@ services:
       HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
       HTTP_PORT: "${SHOPPING_ADMIN_PORT:-7780}"
     ports:
-      - "${SHOPPING_ADMIN_PORT:-7780}:7780"
+      - "${BIND_ADDR:-0.0.0.0}:${SHOPPING_ADMIN_PORT:-7780}:7780"
     restart: unless-stopped
 
   reddit:
@@ -49,7 +49,7 @@ services:
       HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
       HTTP_PORT: "${REDDIT_PORT:-9999}"
     ports:
-      - "${REDDIT_PORT:-9999}:80"
+      - "${BIND_ADDR:-0.0.0.0}:${REDDIT_PORT:-9999}:80"
     restart: unless-stopped
 
   wikipedia:
@@ -61,7 +61,7 @@ services:
       HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
       HTTP_PORT: "${WIKIPEDIA_PORT:-9888}"
     ports:
-      - "${WIKIPEDIA_PORT:-9888}:80"
+      - "${BIND_ADDR:-0.0.0.0}:${WIKIPEDIA_PORT:-9888}:80"
     restart: unless-stopped
 
   gitlab:
@@ -84,7 +84,7 @@ services:
     # only the published side moves. (Verified in entrypoint.sh, which probes
     # 127.0.0.1:$HTTP_PORT from inside the container.)
     ports:
-      - "${GITLAB_PORT:-8023}:${GITLAB_PORT:-8023}"
+      - "${BIND_ADDR:-0.0.0.0}:${GITLAB_PORT:-8023}:${GITLAB_PORT:-8023}"
     restart: unless-stopped
 
   # ---- VisualWebArena -----------------------------------------------------
@@ -97,7 +97,7 @@ services:
       HTTP_PORT: "${CLASSIFIEDS_PORT:-9980}"
       RESET_TOKEN: ${CLASSIFIEDS_RESET_TOKEN:-4b61655535e7ed388f0d40a93600254c}
     ports:
-      - "${CLASSIFIEDS_PORT:-9980}:9980"
+      - "${BIND_ADDR:-0.0.0.0}:${CLASSIFIEDS_PORT:-9980}:9980"
     restart: unless-stopped
 
   # ---- WebShop ------------------------------------------------------------
@@ -107,7 +107,7 @@ services:
       HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
       HTTP_PORT: "${WEBSHOP_PORT:-3000}"
     ports:
-      - "${WEBSHOP_PORT:-3000}:3000"
+      - "${BIND_ADDR:-0.0.0.0}:${WEBSHOP_PORT:-3000}:3000"
     restart: unless-stopped
 
   # ---- MiniWoB++ ----------------------------------------------------------
@@ -117,5 +117,5 @@ services:
       HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
       HTTP_PORT: "${MINIWOB_PORT:-8399}"
     ports:
-      - "${MINIWOB_PORT:-8399}:8399"
+      - "${BIND_ADDR:-0.0.0.0}:${MINIWOB_PORT:-8399}:8399"
     restart: unless-stopped
