@@ -73,18 +73,23 @@ CMD ["/entrypoint.sh"]
 # rather than a quarter of an hour. --timeout stays generous because Docker
 # never overlaps probes, so a slow probe costs nothing when things are fine.
 #
-# ⚠️ 127.0.0.1, NOT localhost. Magento's adminhtml is pinned to the configured
-# base_url (unlike the storefront, which serves any Host after
-# redirect_to_base=0), and compose sets HTTP_HOST=127.0.0.1. Measured
-# in-container after the DI compile, against this image:
-#     Host=localhost   -> 404  (falls through to the frontend area)
-#     Host=127.0.0.1   -> 200
-# So a healthcheck naming localhost would never go healthy. The fallthrough
-# does return a real 404, so `curl -f` fails loudly on it rather than passing
-# on an empty page — this check is therefore also, incidentally, proof that the
-# entrypoint's base_url write took effect.
+# ⚠️ The Host header is load-bearing, and it must be HTTP_HOST. Magento's
+# adminhtml is pinned to the configured base_url — unlike the storefront, which
+# serves any Host after redirect_to_base=0 — so a request whose Host is not the
+# configured one falls through to the frontend area and 404s. Measured
+# in-container against this image with HTTP_HOST=depot.example.com:
+#     Host=127.0.0.1           -> 404  (falls through to the frontend area)
+#     Host=depot.example.com   -> 200
+# Connect over the loopback (nginx's listen port is fixed at 7780 regardless of
+# HTTP_PORT) but present the name the app was configured for. Naming a literal
+# here would only ever pass under the one HTTP_HOST that happened to match it.
+#
+# The fallthrough returns a real 404, so `curl -f` fails loudly on it rather
+# than passing on an empty page — this check is therefore also, incidentally,
+# proof that the entrypoint's base_url write took effect.
 HEALTHCHECK --start-period=300s --interval=15s --timeout=120s --retries=3 \
-  CMD curl -fsS -L --max-time 115 http://127.0.0.1:7780/admin >/dev/null || exit 1
+  CMD curl -fsS -L --max-time 115 -H "Host: ${HTTP_HOST}" \
+      http://127.0.0.1:7780/admin >/dev/null || exit 1
 
 # --- Magento 2.4.6 code tree, deterministically from the committed lockfile ---
 FROM runtime AS code
