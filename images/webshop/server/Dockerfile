@@ -122,16 +122,22 @@ CMD ["/entrypoint.sh"]
 # pre-fork load peaked around 19G RSS, close enough to this host's 39G/no-swap to
 # involve the OOM killer.
 #
-# The old numbers (--start-period=120s, --timeout=115s) existed solely to let one
-# probe wait out that 57s load, so they retire with it. 60s of start period is ~10x
-# the measured time to healthy — enough for a cold page cache and a loaded runner,
-# while still failing an actually-stuck container inside a couple of minutes instead
-# of a quarter of an hour.
+# The old --timeout=115s existed solely to let one probe wait out that 57s load,
+# so it retires with it.
+#
+# The start period is 180s, not the ~10x-the-measured-time 60s it was first set
+# to. 5.2s to healthy was measured on a dedicated CI runner starting one image;
+# on a NAS bringing the whole fleet up at once the same load ran past 60s and the
+# container was declared unhealthy about 90s after its own start, while serving
+# correctly minutes later. A measurement on an idle host is a floor, not a
+# ceiling: contention can only inflate it, so sizing the grace period as a small
+# multiple of the idle number encodes an assumption the deployment gets to break.
+# 180s still surfaces a genuinely stuck container in about three minutes.
 #
 # -L is load-bearing. `/` is served by home(), which only redirects to /abc and
 # touches no data, and -f fails only on >=400 — so without -L this check exits 0
 # against a container that has loaded nothing at all.
-HEALTHCHECK --start-period=60s --interval=5s --timeout=15s --retries=3 \
+HEALTHCHECK --start-period=180s --interval=5s --timeout=15s --retries=3 \
   CMD curl -fsS -L --max-time 10 http://localhost:3000/ >/dev/null || exit 1
 
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
