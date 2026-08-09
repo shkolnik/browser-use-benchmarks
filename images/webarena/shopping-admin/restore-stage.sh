@@ -82,16 +82,26 @@ runuser -u app -- php bin/magento cache:flush
 # nginx is held back at runtime until entrypoint.sh knows HTTP_HOST/HTTP_PORT;
 # the in-build validation still needs it.
 svc_start_nginx
+# svc_start returns at fork, not at bind. mariadb and elasticsearch above each
+# wait for readiness; nginx did not, and run 31284811602 lost that race on both
+# this image and shopping — curl exited 7 before nginx was listening.
+svc_wait_http http://127.0.0.1:7780/ nginx 60 /var/log/supervisor/nginx.log
 
 echo "=== in-build validation ==="
 # localhost, not 127.0.0.1: per the note above, adminhtml answers only under the
 # host in base_url. The storefront check below is the one that proves the redirect
 # to CMU is gone.
-code=$(curl -s -o /tmp/admin.html -w '%{http_code}' http://localhost:7780/admin)
+#
+# `|| true` on every capture below is load-bearing under `set -e`: a curl that
+# cannot connect makes the ASSIGNMENT fail, killing the script with curl's own
+# exit status before the check on the next line can report anything. That is
+# what made run 31284811602 fail with a bare "exit code: 7" and no diagnosis.
+# With it, curl writes 000 and the existing message says so.
+code=$(curl -s -o /tmp/admin.html -w '%{http_code}' http://localhost:7780/admin || true)
 [ "$code" = 200 ] || { echo "admin panel returned $code" >&2; tail -n 50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
 # Any Host must reach the app rather than being bounced to CMU. The storefront is
 # the surface that can prove it, since adminhtml is host-pinned.
-scode=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7780/)
+scode=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7780/ || true)
 [ "$scode" = 200 ] || { echo "storefront on 127.0.0.1 returned $scode (host-agnostic serving broken)" >&2; exit 1; }
 # name="login[username]" is Magento core's admin login field (stable across
 # 2.x — referenced by the form's own JS validation), a more reliable marker
@@ -101,7 +111,7 @@ grep -q 'name="login\[username\]"' /tmp/admin.html \
 # Elasticsearch really indexed the catalog (mirrors shopping's catalogsearch
 # assertion, which requires an unauthenticated storefront page the admin
 # panel doesn't have): query the reindexed count directly.
-escount=$(curl -s 'http://127.0.0.1:9200/_cat/count/magento2*?h=count' | tr -d '[:space:]')
+escount=$(curl -s 'http://127.0.0.1:9200/_cat/count/magento2*?h=count' | tr -d '[:space:]' || true)
 [ -n "$escount" ] && [ "$escount" -gt 0 ] 2>/dev/null || { echo "elasticsearch index empty (count='$escount')" >&2; curl -s 'http://127.0.0.1:9200/_cat/indices?v' >&2 || true; exit 1; }
 echo "admin panel + DB counts + elasticsearch OK in-build ($escount ES docs)"
 

@@ -101,6 +101,37 @@ svc_start() {
   echo "run-services: started $name (pid $pid)${log:+, logging to $log}"
 }
 
+# svc_wait_http URL NAME [TRIES] [LOGFILE]
+#
+# svc_start returns when the process is forked, not when it has bound its port,
+# so a caller that immediately talks to the service races the daemon. Waiting
+# on the pid is not enough either — a live nginx that has not finished binding
+# refuses connections exactly like a dead one.
+#
+# Readiness here is "the socket answered", not "the answer was 200": curl's own
+# exit status, with no -f. Demanding a 2xx would swallow the caller's status-code
+# assertions, reporting a storefront that 302s as "never came up" instead of
+# letting the check written to explain a 302 do it.
+svc_wait_http() {
+  local url=$1 name=$2 tries=${3:-60} log=${4:-}
+  local i pid
+  for (( i=1; i<=tries; i++ )); do
+    curl -s -o /dev/null --max-time 5 "$url" && return 0
+    # A daemon that died will never answer, and polling it for the full timeout
+    # buries the real error under a misleading "never came up".
+    pid=${SVC_PID[$name]:-}
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      echo "run-services: $name died while waiting for $url" >&2
+      [ -z "$log" ] || tail -n 50 "$log" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+  echo "run-services: $name never answered $url after $tries tries" >&2
+  [ -z "$log" ] || tail -n 50 "$log" >&2 || true
+  return 1
+}
+
 # Stop services on purpose. Deregistering before the kill keeps svc_status and
 # svc_stop_all honest about what is left; it is not what stops an intentional
 # stop reading as a crash. `wait` below reaps the pid here, so svc_supervise

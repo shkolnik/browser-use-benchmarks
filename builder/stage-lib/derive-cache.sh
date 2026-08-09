@@ -50,6 +50,34 @@ _DCACHE_ORAS_URL="https://github.com/oras-project/oras/releases/download/v${_DCA
 
 dcache__die() { echo "derive-cache: $*" >&2; exit 1; }
 
+# dcache__transfer LABEL TRIES CMD...
+#
+# Run CMD, retrying a failure up to TRIES times. The last attempt's combined
+# output is left in _DCACHE_LAST_OUT so the caller can put it in a diagnostic;
+# it is NOT printed on success, because a 13-layer docker pull's progress
+# chatter is noise once it worked.
+#
+# TRIES is a parameter rather than a constant because the caller knows
+# something this function cannot: whether the thing being transferred is known
+# to exist. Retrying an absent entry is pure latency.
+_DCACHE_LAST_OUT=
+dcache__transfer() {
+  local label=$1 tries=$2; shift 2
+  local i
+  for (( i=1; i<=tries; i++ )); do
+    if _DCACHE_LAST_OUT=$("$@" 2>&1); then
+      [ "$i" = 1 ] || echo "derive-cache: $label succeeded on attempt $i" >&2
+      return 0
+    fi
+    if [ "$i" != "$tries" ]; then
+      echo "derive-cache: $label failed (attempt $i/$tries), retrying" >&2
+      printf '%s\n' "$_DCACHE_LAST_OUT" | tail -n 3 >&2
+      sleep "${DCACHE_RETRY_SLEEP:-30}"
+    fi
+  done
+  return 1
+}
+
 # Resolved relative to this file's own location, not the caller's cwd, so
 # dcache_require works from every derive script regardless of where it runs
 # from. builder/stage-lib/derive-cache.sh -> ../derived-cache.lock.
@@ -163,14 +191,33 @@ dcache_pull() {
   # the legacy image has none.
   local mf out
   mf=$(oras manifest fetch "$ref" 2>/dev/null || true)
+
+  # PRESENCE AND TRANSFER ARE DIFFERENT QUESTIONS, and conflating them is what
+  # cost this fleet two long re-downloads. Run 31284811602's wikipedia job:
+  #
+  #   failed to copy: read tcp ...->185.199.111.154:443: read: connection reset by peer
+  #
+  # GHCR reset the connection ~4.5 min into an 88 GB pull. The entry was
+  # perfectly intact; the transfer broke. With no retry that reported as "no
+  # cache entry", which pre-fix meant falling through to the upstream mirrors —
+  # ~24 h for wikipedia at the measured 1.05 MB/s, ~6 h for shopping. Bigger
+  # entries take longer and so are MORE likely to be reset: the failure grows
+  # with exactly the cost it inflicts.
+  #
+  # The manifest above already answers "does this exist?", so a transfer that
+  # fails on an entry we KNOW is there is transient by construction and gets
+  # retried. An entry with no manifest is genuinely absent — a first build of a
+  # new image — and must miss immediately rather than burning three attempts.
+  # docker keeps completed blobs in its content store between attempts, so a
+  # retry resumes rather than restarting the whole 88 GB.
   if printf '%s' "$mf" | grep -q '"artifactType"'; then
-    if out=$(oras pull "$ref" -o "$dest" 2>&1); then
+    if dcache__transfer "oras pull of $ref" "${DCACHE_PULL_TRIES:-3}" \
+         oras pull "$ref" -o "$dest"; then
       DCACHE_HIT_FORMAT=oras
       return 0
     fi
     # The manifest says this IS our artifact, so a failed pull is a real
     # error, not a reason to go looking for a legacy image that is not there.
-    printf '%s\n' "$out" >&2
     dcache__die "oras pull of $ref failed after its manifest identified it as an artifact"
   fi
 
@@ -181,8 +228,14 @@ dcache_pull() {
   # intact afterwards — every blob HTTP 200 — so the cause was runner-side and
   # is now unknowable. A miss that cannot explain itself is the defect; out of
   # disk, denied and 503 must not all look like "not cached".
+  # No manifest at all means genuinely absent, and a first build of a new image
+  # legitimately lands here — one attempt, then miss. A manifest we could read
+  # means the entry is there and only the transfer can fail, so it retries.
+  local dtries=1
+  [ -z "$mf" ] || dtries=${DCACHE_PULL_TRIES:-3}
   local dout
-  if dout=$(docker pull "$ref" 2>&1); then
+  if dcache__transfer "docker pull of $ref" "$dtries" docker pull "$ref"; then
+    dout=$_DCACHE_LAST_OUT
     DCACHE_HIT_FORMAT=legacy
     local cid
     cid=$(docker create "$ref" true)
@@ -200,6 +253,7 @@ dcache_pull() {
     dcache__migrate_legacy_hit "$ref" "$dest" "$extracted"
     return 0
   fi
+  dout=$_DCACHE_LAST_OUT
 
   echo "derive-cache: no cache entry for $ref — neither format could be read." >&2
   echo "  oras manifest fetch: ${mf:-<no manifest returned>}" >&2
