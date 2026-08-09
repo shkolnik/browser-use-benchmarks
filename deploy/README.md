@@ -21,6 +21,47 @@ Bring up one suite at a time by naming services:
 BENCH_HOST=nas.local docker compose -f deploy/compose.yml up -d --wait shopping reddit
 ```
 
+## One hostname instead of eight ports
+
+`deploy/compose.proxy.yml` overlays a Caddy front door, giving each service a
+subdomain on a single host and port:
+
+```sh
+BENCH_HOST=depot.example.com \
+  docker compose -f deploy/compose.yml -f deploy/compose.proxy.yml up -d --wait
+```
+
+Pass both `-f` flags, in that order — the overlay adds the proxy and rewrites
+each service's public address, but everything else still comes from the base
+file. `BENCH_HOST` is the same variable as in direct mode; here it is the base
+domain, and `shopping.$BENCH_HOST`, `reddit.$BENCH_HOST` and so on route to the
+services. `Caddyfile` must sit next to the compose files, since it is
+bind-mounted.
+
+**`*.$BENCH_HOST` has to resolve to this host** — a wildcard DNS record, or
+per-name entries in each client's hosts file. The bare domain serves an index
+of the eight names; an unpublished hostname gets a 404 saying so, and a
+subdomain whose service is not running gets a 502.
+
+`PROXY_PORT` (default 80) moves the front door.
+
+Two consequences worth knowing before you switch:
+
+- **The direct ports still answer, but serve subdomain links.** An image can
+  bake only one address, so proxy mode repoints `HTTP_HOST`/`HTTP_PORT` at the
+  subdomain and the per-service ports become debug-only. Set
+  `BIND_ADDR=127.0.0.1` to take them off the network and make the proxy the
+  only way in.
+- **GitLab's direct port stops working in proxy mode.** Its in-container
+  listener follows `HTTP_PORT`, so it moves to the proxy's port while the base
+  file still publishes `8023:8023` — that mapping then points at nothing.
+  Reach GitLab through `gitlab.$BENCH_HOST`. Nothing else is affected; every
+  other image has a fixed listen port.
+
+To serve HTTPS instead, drop `auto_https off` and the `http://` prefixes from
+the `Caddyfile`, and make sure the names are publicly resolvable or configure a
+DNS-01 provider.
+
 ## Ports
 
 | Service | Published | Override |

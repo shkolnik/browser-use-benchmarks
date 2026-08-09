@@ -1,0 +1,97 @@
+# Front the fleet with one hostname and one port, a subdomain per service.
+#
+#   BENCH_HOST=depot.example.com \
+#     docker compose -f deploy/compose.yml -f deploy/compose.proxy.yml up -d --wait
+#
+# This is an OVERLAY on deploy/compose.yml, not a replacement — pass both -f
+# flags, in that order. It adds the proxy and rewrites each service's public
+# address; everything else (images, port variables, restart policy) still comes
+# from the base file.
+#
+# BENCH_HOST is the same variable as in direct mode, and means the same thing:
+# the address clients type. Here it is the base DOMAIN, and each service gets a
+# subdomain of it. `*.$BENCH_HOST` must resolve to this host — a wildcard DNS
+# record, or per-name entries in the client's hosts file.
+#
+# Why the environment has to change at all: these images bake the address into
+# the URLs they serve (Magento's base_url, Osclass's WEB_PATH, GitLab's
+# external_url). Behind a proxy the address clients use is the subdomain on the
+# proxy's port, not the container's own published port, so HTTP_HOST/HTTP_PORT
+# have to say so. Leaving them at the direct-mode values would produce eight
+# services that answer through the proxy while every link they emit points back
+# at the direct ports.
+#
+# Consequence worth knowing: an image can only bake ONE address, so the direct
+# ports from the base file still answer here but serve subdomain links. They
+# are useful for debugging, not for driving. Set BIND_ADDR=127.0.0.1 to keep
+# them off the network entirely and make the proxy the only way in.
+
+services:
+  proxy:
+    image: caddy:2.11.4-alpine
+    environment:
+      BENCH_HOST: ${BENCH_HOST:?set BENCH_HOST to the base domain, e.g. depot.example.com}
+      # The Caddyfile needs this to reach gitlab, whose in-container listener
+      # follows HTTP_PORT while every other upstream port is fixed.
+      PROXY_PORT: "${PROXY_PORT:-80}"
+    ports:
+      - "${PROXY_PORT:-80}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Deliberately no depends_on: Caddy resolves upstreams per request, so it
+    # starts fine on its own and a subset of the fleet can be brought up
+    # without dragging in all eight. A service that is down is a 502.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+  # Each service's public address becomes its subdomain on the proxy's port.
+  shopping:
+    environment:
+      HTTP_HOST: shopping.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  shopping-admin:
+    environment:
+      HTTP_HOST: shopping-admin.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  reddit:
+    environment:
+      HTTP_HOST: reddit.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  wikipedia:
+    environment:
+      HTTP_HOST: wikipedia.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  gitlab:
+    environment:
+      HTTP_HOST: gitlab.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  classifieds:
+    environment:
+      HTTP_HOST: classifieds.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  webshop:
+    environment:
+      HTTP_HOST: webshop.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+  miniwob:
+    environment:
+      HTTP_HOST: miniwob.${BENCH_HOST:?set BENCH_HOST to the base domain}
+      HTTP_PORT: "${PROXY_PORT:-80}"
+
+volumes:
+  caddy_data:
+  caddy_config:
