@@ -83,14 +83,24 @@ runuser -u app -- php bin/magento cache:flush
 # nginx is held back at runtime until entrypoint.sh knows HTTP_HOST/HTTP_PORT;
 # the in-build validation still needs it.
 svc_start_nginx
+# svc_start returns at fork, not at bind. mariadb and elasticsearch above each
+# wait for readiness; nginx did not, and run 31284811602 lost that race on both
+# this image and shopping-admin — curl exited 7 before nginx was listening.
+svc_wait_http http://127.0.0.1:7770/ nginx 60 /var/log/supervisor/nginx.log
 
 echo "=== in-build validation ==="
 # Deliberately 127.0.0.1 rather than the configured localhost base_url: this
 # asserts the host-agnostic serving above, and would fail if the 302 came back.
-code=$(curl -s -o /tmp/home.html -w '%{http_code}' http://127.0.0.1:7770/)
+#
+# `|| true` on every capture below is load-bearing under `set -e`: a curl that
+# cannot connect makes the ASSIGNMENT fail, killing the script with curl's own
+# exit status before the check on the next line can report anything. That is
+# what made run 31284811602 fail with a bare "exit code: 7" and no diagnosis.
+# With it, curl writes 000 and the existing message says so.
+code=$(curl -s -o /tmp/home.html -w '%{http_code}' http://127.0.0.1:7770/ || true)
 [ "$code" = 200 ] || { echo "storefront returned $code" >&2; tail -n 50 "$MAGE"/var/log/*.log >&2 || true; exit 1; }
 grep -q "One Stop Market" /tmp/home.html || { echo "storefront 200 but no 'One Stop Market'" >&2; exit 1; }
-scode=$(curl -s -o /tmp/search.html -w '%{http_code}' 'http://127.0.0.1:7770/catalogsearch/result/?q=toothbrush')
+scode=$(curl -s -o /tmp/search.html -w '%{http_code}' 'http://127.0.0.1:7770/catalogsearch/result/?q=toothbrush' || true)
 [ "$scode" = 200 ] && grep -q 'product-item-link' /tmp/search.html \
   || { echo "catalog search not working (code $scode)" >&2; exit 1; }
 echo "storefront + search OK in-build"

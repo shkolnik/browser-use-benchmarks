@@ -192,3 +192,98 @@ def test_supervise_refuses_when_nothing_was_started():
     r = run("svc_supervise")
     assert r.returncode != 0
     assert "no services" in r.stderr, r.stderr
+
+
+# --- svc_wait_http: a started service is not a listening service -------------
+#
+# Run 31284811602 lost this race on BOTH shopping and shopping-admin: their
+# restore stages called svc_start_nginx and immediately curled the storefront,
+# and the build died with curl's exit 7 (could not connect). mariadb and
+# elasticsearch each had a hand-rolled readiness loop above; nginx had none.
+
+
+def _port():
+    """A free port, closed again before the caller binds it.
+
+    Hardcoding one makes the test fail when anything else on the machine holds
+    it — including a second copy of this suite running in parallel.
+    """
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def test_wait_http_returns_once_a_slow_server_starts_listening():
+    """The whole point: svc_start returns at fork, not at bind()."""
+    port = _port()
+    # --log, and svc_stop at the end: a service left running inherits this
+    # script's stdout pipe and holds it open, so the harness would block on EOF
+    # long after svc_wait_http returned. That hang looks exactly like the
+    # function failing.
+    r = run(f"""
+      svc_start slow --log $(mktemp) -- \
+        bash -c 'sleep 2; exec python3 -m http.server {port} --bind 127.0.0.1'
+      svc_wait_http http://127.0.0.1:{port}/ slow 30 && echo READY
+      svc_stop slow
+    """, timeout=40)
+    assert "READY" in r.stdout, f"never became ready: {r.stdout}\n{r.stderr}"
+
+
+def test_wait_http_does_not_require_a_2xx_to_call_the_listener_up():
+    """Readiness is 'the socket answers', NOT 'the app is correct'.
+
+    If this demanded a 200 it would swallow the callers' own status-code
+    assertions: a storefront answering 302 would be reported as 'never came
+    up' instead of by the check written to explain a 302.
+    """
+    port = _port()
+    r = run(f"""
+      svc_start teapot --log $(mktemp) -- python3 -c '
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self): self.send_error(418)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", {port}), H).serve_forever()
+'
+      svc_wait_http http://127.0.0.1:{port}/ teapot 30 && echo READY
+      svc_stop teapot
+    """, timeout=40)
+    assert "READY" in r.stdout, f"a non-2xx listener was called down: {r.stdout}\n{r.stderr}"
+
+
+def test_wait_http_gives_up_immediately_when_the_service_is_already_dead():
+    """A daemon that failed to start must not cost the full timeout.
+
+    Polling a port nobody will ever bind is indistinguishable from polling one
+    that is merely slow — unless you also watch the pid. Without that check
+    this returns only after `tries` seconds; the assertion below is on the
+    clock, so it fails if the pid check is removed.
+    """
+    import time
+    port = _port()
+    t0 = time.time()
+    r = run(f"""
+      svc_start doomed -- bash -c 'exit 1'
+      svc_wait_http http://127.0.0.1:{port}/ doomed 60 || echo GAVE_UP
+    """, timeout=40)
+    elapsed = time.time() - t0
+    assert "GAVE_UP" in r.stdout, f"{r.stdout}\n{r.stderr}"
+    assert "doomed" in r.stderr and "died" in r.stderr, r.stderr
+    assert elapsed < 15, f"waited {elapsed:.1f}s for an already-dead service"
+
+
+def test_wait_http_reports_the_service_log_when_it_never_answers():
+    """The failure the operator has to act on is in the daemon's own log."""
+    port = _port()
+    r = run(f"""
+      log=$(mktemp)
+      echo 'nginx: [emerg] bind() to 0.0.0.0:80 failed' >> "$log"
+      svc_start stubborn --log "$log" -- sleep 30
+      svc_wait_http http://127.0.0.1:{port}/ stubborn 2 "$log" || echo GAVE_UP
+    """, timeout=40)
+    assert "GAVE_UP" in r.stdout, r.stdout
+    assert "bind() to 0.0.0.0:80 failed" in r.stderr, (
+        f"the daemon's own log was not surfaced: {r.stderr}")
