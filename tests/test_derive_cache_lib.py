@@ -179,3 +179,77 @@ def test_no_migrate_leaves_the_entry_alone(tmp_path):
     assert "HIT" in r.stdout, r.stderr
     assert not any(c.startswith("oras push") for c in calls), (
         f"an opted-out entry was migrated anyway: {calls}")
+
+
+# --- a broken transfer is not a miss -----------------------------------------
+#
+# Run 31284811602 / webarena-wikipedia, verbatim from the job log:
+#   failed to copy: read tcp ...->185.199.111.154:443: read: connection reset by peer
+# GHCR reset an 88 GB pull mid-flight. With no retry that read as "no cache
+# entry", and pre-fix a miss meant re-downloading from upstream at a measured
+# 1.05 MB/s — about 24 hours. The entry was intact the whole time.
+
+RESET = "failed to copy: read tcp: read: connection reset by peer"
+
+
+def flaky(cmd, fail_times, tmp_path, then="exit 0"):
+    """A fake CMD that fails `fail_times` times, then succeeds.
+
+    The counter is a file because each invocation is a fresh process.
+    """
+    return (
+        f'n=$(cat {tmp_path}/{cmd}.n 2>/dev/null || echo 0); n=$((n+1));'
+        f' echo $n > {tmp_path}/{cmd}.n\n'
+        f'if [ "$n" -le {fail_times} ]; then echo "{RESET}" >&2; exit 1; fi\n'
+        f'{then}\n'
+    )
+
+
+def test_a_reset_transfer_is_retried_rather_than_called_a_miss(tmp_path):
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" '
+                   '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
+                   fake_oras=ORAS_LEGACY_TAG,
+                   fake_docker=flaky("docker", 1, tmp_path,
+                                     then=fake_docker_serving(tmp_path, "a.dat")),
+                   env={"DCACHE_NO_MIGRATE": "1"})
+    assert "FORMAT=legacy" in r.stdout, (
+        f"a transient reset was reported as a cache miss: {r.stdout!r} {r.stderr!r}")
+    assert len([c for c in calls if c.startswith("docker pull")]) == 2, calls
+
+
+def test_an_absent_entry_misses_immediately_without_burning_retries(tmp_path):
+    """A first build of a NEW image has no entry, and must not pay 3 attempts.
+
+    This is why presence is decided by the manifest and not by the transfer:
+    an absent ref returns no manifest, so there is nothing to retry.
+    """
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" || echo MISS',
+                   tmp_path, fake_oras="exit 1", fake_docker="exit 1")
+    assert "MISS" in r.stdout, r.stderr
+    assert len([c for c in calls if c.startswith("docker pull")]) == 1, (
+        f"an absent entry was retried: {calls}")
+
+
+def test_a_persistently_broken_transfer_still_misses_and_says_why(tmp_path):
+    """Retries are bounded; the operator still gets the underlying error."""
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" || echo MISS',
+                   tmp_path, fake_oras=ORAS_LEGACY_TAG, fake_docker=f'echo "{RESET}" >&2; exit 1')
+    assert "MISS" in r.stdout, r.stderr
+    assert len([c for c in calls if c.startswith("docker pull")]) == 3, calls
+    assert "connection reset by peer" in r.stderr, (
+        f"the real cause was swallowed: {r.stderr}")
+
+
+def test_a_reset_oras_transfer_is_retried_too(tmp_path):
+    """The oras path is where the fleet ends up; it must not regress to no-retry."""
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" '
+                   '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
+                   fake_oras=(
+                       'if [ "$1 $2" = "manifest fetch" ]; then\n'
+                       '  echo \'{"artifactType":"application/vnd.beep.derived.v1"}\'\n'
+                       '  exit 0\n'
+                       'fi\n'
+                       + flaky("oraspull", 1, tmp_path)),
+                   fake_docker="exit 1")
+    assert "FORMAT=oras" in r.stdout, (
+        f"a reset oras pull was not retried: {r.stdout!r} {r.stderr!r}")
