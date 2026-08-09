@@ -34,6 +34,7 @@ probe is not a runnable service, only a data-shape stress test. That is intentio
 | ghcr.io (then flipped public) | 80.03 GiB (g80) | 10.003 GiB | ACCEPTED | none | — | YES (Synology, anonymous) | 2026-08-05 |
 | ghcr.io (public) | **100.03 GiB (g100)** | 10.003 GiB | ACCEPTED | none | ~50 min (build+push rung) | — | 2026-08-05 |
 | docker.io (public repo, free account `jshkol`) | 10.005 GiB (1 chunk) | **10.003 GiB** | ACCEPTED | none | 185 s | YES (anonymous, registry API) | 2026-08-09 |
+| docker.io (same) | **120.04 GiB (12 chunks)** | 10.003 GiB | ACCEPTED | none | 1161 s | YES (anonymous, registry API) | 2026-08-09 |
 
 **Conclusion:** GHCR accepts ≥100 GiB single images with ~10 GiB layers on a free-tier account,
 private or public, with anonymous pull proven end-to-end at 80 GiB. Every size in our benchmark
@@ -62,11 +63,38 @@ that gap. Motivation was concrete: mirroring the fleet is a straight copy if Doc
 wikipedia's 9.66 GB (8.996 GiB); the accepted probe layer exceeds it by ~11%, so mirroring needs
 **no rechunking**. A free account and a public repo are sufficient.
 
-**Still unverified, and the reason mirroring is not yet a decision:** the *total* caps. Docker
-Hub's cited 100 GB limit remains community lore, and it is ambiguous between per-image and
-per-account. Both matter to us — the fleet is ~280 GB compressed and wikipedia alone is 87.9 GB,
-which would sit inside a 100 GB per-image cap with only ~12% headroom. Settling that needs a
-~90 GB staircase (per-image) or a full-fleet push (per-account); neither was run.
+The *total*-size half of the gap was closed the same day — see the ladder below. **Per-account is
+still open.**
+
+## Docker Hub total-size ladder (2026-08-09, verified live)
+
+Designed as a descending ladder from a 120 GiB ceiling (James), 10 GiB layers held fixed so that
+total size is the only variable. It **passed on the first rung**, so no lower rung was ever built.
+
+- Target `docker.io/jshkol/benchmark-test:probe-120g`, same **public repo on a free account**.
+- 12 x 10 GiB incompressible `/dev/urandom` chunks, one `COPY` each, on a busybox base.
+- **ACCEPTED.** `docker push` exit 0 in 1161 s (~111 MB/s); the build itself took 2457 s.
+- Registry-side truth: the amd64 manifest carries 13 layers totalling
+  **128,890,570,741 bytes = 120.039 GiB = 128.89 GB**.
+- Retrievable, not merely accepted: anonymous `HEAD` on the largest blob returns 200 with a
+  `content-length` matching the manifest, and a ranged GET of its final 16 bytes returns 206.
+
+**Conclusion — what this settles:** the reported 100 GB figure is **refuted as a per-image cap**.
+A single image of 128.89 GB is accepted and readable on a free account in a public repo. Every
+image in the fleet fits with large headroom: wikipedia, the largest at 87.9 GB, clears by ~47%.
+
+**What this does NOT settle:** the **per-account total**. A single-image ladder cannot test an
+account-wide cap by construction — the ladder pushed one repo, and its 128.89 GB is the only
+thing in that account. If the 100 GB lore refers to an account total rather than an image, this
+result is silent on it, and mirroring the ~280 GB fleet would still hit it. Settling that needs a
+full-fleet push (or a multi-repo ladder), which was not run. Note also that the ladder's own
+128.89 GB is *currently occupying* that account, so it must be deleted before any per-account
+measurement, or it becomes part of what is being measured.
+
+**Not tested, and worth knowing before relying on this:** Docker Hub's free tier has a documented
+*pull-rate* limit and, separately, an inactive-image retention policy. Neither is a size limit and
+neither was probed here; both bear on using Docker Hub as a real mirror rather than as a target
+that merely accepts bytes.
 
 ### Local smoke-scale verification (2 x 1G, this sandbox, 2026-08-05)
 
@@ -84,9 +112,11 @@ round-trip) is sound before spending real time/bandwidth on the full-scale run.
   finalization at exactly 10 min. If whole-push, 120G needs ~1.6 Gbit/s sustained.
 - Largest verified public-registry push found anywhere: ~25 GiB via 7–8 GB layers. Nothing at
   our 100G+ scale is documented as succeeding — our probe exits the tested envelope.
-- Docker Hub's cited 100 GB total cap: REPORTED community lore only, not in Docker's docs.
-  Still unverified as of 2026-08-09, and ambiguous between per-image and per-account.
-  The ~10 GB layer ceiling across registries is an inherited S3 5 GB-multipart artifact.
+- Docker Hub's cited 100 GB total cap: REPORTED community lore only, not in Docker's docs, and
+  ambiguous between per-image and per-account. **Refuted as a per-image cap on 2026-08-09** — a
+  128.89 GB single image was accepted and read back (see the total-size ladder above). The
+  per-account reading remains untested. The ~10 GB layer ceiling across registries is an
+  inherited S3 5 GB-multipart artifact.
   **Superseded for Docker Hub on 2026-08-09** — a 10.003 GiB layer was accepted and read back
   (see the Docker Hub layer probe above), so the 5 GB figure does not bind there.
 - docker push has NO intra-layer resume (a failed 9 GB layer re-pushes from zero) and pushes
