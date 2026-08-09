@@ -1,0 +1,121 @@
+# The whole fleet, on one host, reachable from the network.
+#
+# This is the DEPLOY compose. It is deliberately separate from the per-benchmark
+# images/<bench>/compose.yml files, which `bin/build smoke` resolves by path and
+# which exist to gate a single freshly-built image on the build runner. Those
+# publish to 127.0.0.1 because nothing off-box is meant to reach them. This one
+# is for standing the fleet up somewhere it will be used from another machine.
+#
+# Usage:
+#   BENCH_HOST=nas.local docker compose -f deploy/compose.yml up -d --wait
+#
+# BENCH_HOST has no default, on purpose. It is the address CLIENTS will type,
+# and several of these images bake it into every link and asset URL they serve
+# (Magento's base_url, Osclass's WEB_PATH, GitLab's external_url). Get it wrong
+# and the service comes up healthy while serving links nobody can follow. See
+# docs/service-contract.md. Use the NAS's LAN name or IP — NOT localhost, unless
+# you only ever browse from the NAS itself.
+#
+# Each service's port appears twice by design: once as the published port and
+# once as HTTP_PORT. They are the same number because HTTP_PORT means "the port
+# a client types", not "the port the process listens on" — note that reddit and
+# wikipedia listen on 80 in-container and are still HTTP_PORT=9999/9888. Move a
+# port by setting its variable; both sides follow.
+
+services:
+  # ---- WebArena -----------------------------------------------------------
+  shopping:
+    image: ghcr.io/shkolnik/webarena-shopping:latest
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${SHOPPING_PORT:-7770}"
+    ports:
+      - "${SHOPPING_PORT:-7770}:7770"
+    restart: unless-stopped
+
+  shopping-admin:
+    image: ghcr.io/shkolnik/webarena-shopping-admin:latest
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${SHOPPING_ADMIN_PORT:-7780}"
+    ports:
+      - "${SHOPPING_ADMIN_PORT:-7780}:7780"
+    restart: unless-stopped
+
+  reddit:
+    image: ghcr.io/shkolnik/webarena-reddit:latest
+    # Listens on 80 in-container; HTTP_PORT is the published side.
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${REDDIT_PORT:-9999}"
+    ports:
+      - "${REDDIT_PORT:-9999}:80"
+    restart: unless-stopped
+
+  wikipedia:
+    image: ghcr.io/shkolnik/webarena-wikipedia:latest
+    # kiwix-serve listens on 80 in-container. Published as 9888, not upstream's
+    # 8888, which is heavily squatted (OpenTelemetry collector, Jupyter) and was
+    # already bound on the build runner. Nothing in the image moves.
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${WIKIPEDIA_PORT:-9888}"
+    ports:
+      - "${WIKIPEDIA_PORT:-9888}:80"
+    restart: unless-stopped
+
+  gitlab:
+    image: ghcr.io/shkolnik/webarena-gitlab:latest
+    # No `command:` here on purpose — a compose command replaces the image CMD
+    # wholesale and would skip the entrypoint's HTTP_HOST/HTTP_PORT validation.
+    #
+    # Unlike the rest of the fleet these are not free: the value lands in
+    # /etc/gitlab/gitlab.rb and only `gitlab-ctl reconfigure` renders it into the
+    # config GitLab serves (~28s measured, and it runs on every host change).
+    # Budget that on first boot here, since the restored dataset bakes CMU's own
+    # hostname and this will not match it.
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${GITLAB_PORT:-8023}"
+    #
+    # GitLab is also the ONE image whose internal listener follows HTTP_PORT —
+    # it serves on whatever port external_url names, so both sides of the
+    # mapping move together. Every other image here has a fixed listen port and
+    # only the published side moves. (Verified in entrypoint.sh, which probes
+    # 127.0.0.1:$HTTP_PORT from inside the container.)
+    ports:
+      - "${GITLAB_PORT:-8023}:${GITLAB_PORT:-8023}"
+    restart: unless-stopped
+
+  # ---- VisualWebArena -----------------------------------------------------
+  classifieds:
+    image: ghcr.io/shkolnik/vwa-classifieds:latest
+    # RESET_TOKEN is upstream's fixed value; the reset endpoint accepts it to
+    # restore task state between runs.
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${CLASSIFIEDS_PORT:-9980}"
+      RESET_TOKEN: ${CLASSIFIEDS_RESET_TOKEN:-4b61655535e7ed388f0d40a93600254c}
+    ports:
+      - "${CLASSIFIEDS_PORT:-9980}:9980"
+    restart: unless-stopped
+
+  # ---- WebShop ------------------------------------------------------------
+  webshop:
+    image: ghcr.io/shkolnik/webshop-server:latest
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${WEBSHOP_PORT:-3000}"
+    ports:
+      - "${WEBSHOP_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  # ---- MiniWoB++ ----------------------------------------------------------
+  miniwob:
+    image: ghcr.io/shkolnik/miniwob-server:latest
+    environment:
+      HTTP_HOST: ${BENCH_HOST:?set BENCH_HOST to the address clients will use, e.g. nas.local}
+      HTTP_PORT: "${MINIWOB_PORT:-8399}"
+    ports:
+      - "${MINIWOB_PORT:-8399}:8399"
+    restart: unless-stopped
