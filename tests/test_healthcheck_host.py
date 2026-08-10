@@ -72,6 +72,33 @@ def test_every_probe_connects_over_loopback():
         f"name from inside the container.")
 
 
+def test_no_probe_follows_redirects():
+    """A followed redirect can leave the container; a probe never may.
+
+    These apps bake their PUBLISHED address into what they emit, so an absolute
+    redirect points at ${HTTP_HOST} — a name that resolves for clients and need
+    not resolve inside the container at all. Following it makes readiness depend
+    on DNS, on egress back into the host, and on the proxy being up, none of
+    which are properties of a healthy container. Under the subdomain proxy that
+    is how classifieds reported unhealthy while serving every real request.
+
+    Not following costs nothing, because a redirect is not evidence of health in
+    the first place: `curl -f` only fails on >= 400, so an unfollowed 302 passes.
+    Where the destination is what proves the app works — webshop's `/` is home(),
+    which redirects and touches no data — name the destination in the probe
+    (/abc) instead of following a hop to reach it.
+    """
+    following = sorted(
+        img for img, cmd in _healthcheck_curls().items()
+        if re.search(r"(?:^|\s)(?:-L|--location)(?:\s|$)", cmd))
+    assert not following, (
+        f"HEALTHCHECK(s) following redirects: {following}. Probe the destination "
+        f"URL directly instead. A redirect target is generally the published "
+        f"address, so following one couples readiness to DNS, the proxy, and the "
+        f"host network — a container that is serving correctly then reports "
+        f"unhealthy whenever any of them wobbles.")
+
+
 def test_host_pinned_apps_are_probed_under_their_configured_name():
     missing = sorted(
         img for img, cmd in _healthcheck_curls().items()
