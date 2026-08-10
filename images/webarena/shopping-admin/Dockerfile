@@ -87,8 +87,13 @@ CMD ["/entrypoint.sh"]
 # The fallthrough returns a real 404, so `curl -f` fails loudly on it rather
 # than passing on an empty page — this check is therefore also, incidentally,
 # proof that the entrypoint's base_url write took effect.
+#
+# And no -L: under the right Host this answers 200 directly, so there is no
+# redirect worth following, and following one would only ever lead to the
+# PUBLISHED address — which the container is not required to be able to
+# resolve. Readiness must not depend on that.
 HEALTHCHECK --start-period=300s --interval=15s --timeout=120s --retries=3 \
-  CMD curl -fsS -L --max-time 115 -H "Host: ${HTTP_HOST}" \
+  CMD curl -fsS --max-time 115 -H "Host: ${HTTP_HOST}" \
       http://127.0.0.1:7780/admin >/dev/null || exit 1
 
 # --- Magento 2.4.6 code tree, deterministically from the committed lockfile ---
