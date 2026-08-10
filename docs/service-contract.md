@@ -114,6 +114,14 @@ the image serving links pointing at `metis.lti.cs.cmu.edu`.
 and container port must therefore be equal for gitlab, which is why its `EXPOSE 8023` goes stale
 the moment `HTTP_PORT` is anything else.
 
+**A gitlab that never finishes booting exits rather than waiting.** The fleet contract that a dead
+service fails the container (#73) is implemented here with runit's per-service `finish` hook, which
+only fires on an *exit* — so a service that never STARTS produces nothing to catch.
+`arm-services.sh` closes that: it watches for the stack to serve and hold still, and if that has not
+happened in 15 minutes (a healthy boot takes 61s, measured) it writes the same failure sentinel a
+crash would and takes the container down, naming the services still down. The message distinguishes
+"nothing answered the port" from "it served but never held still" — different problems.
+
 **And it makes exactly one port unusable: 18080.** Rails runs behind that nginx, and puma binds a
 TCP port of its own on the loopback for it. Since `HTTP_PORT` moves nginx onto whatever it names,
 setting it to puma's port aims both at the same bind — nginx wins, puma crashloops with
