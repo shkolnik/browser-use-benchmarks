@@ -63,10 +63,9 @@ RB=${GITLAB_RB:-/etc/gitlab/gitlab.rb}
 # Measured on the published image, whose puma was still on omnibus's default of
 # 8080, with HTTP_PORT=8080: nginx stable on one pid, a new puma pid every few
 # seconds, 12 x `Errno::EADDRINUSE bind(2) for "127.0.0.1" port 8080` in four
-# minutes, and — because the stack never settles — the arming fallback below
-# firing at 15 minutes, at which point the next puma exit finally takes the
-# container down. Twenty minutes to report a misconfiguration knowable here, in
-# a millisecond, before anything binds.
+# minutes, and a stack that never settles — which /arm-services.sh gives up on
+# at 15 minutes and fails the container for. Fifteen minutes to report a
+# misconfiguration knowable here, in a millisecond, before anything binds.
 #
 # restore-stage.sh moves puma off 8080 precisely so that the reserved port is
 # one nobody wants to publish. Read from gitlab.rb rather than hardcoded: a
@@ -142,44 +141,10 @@ assert_hook_coverage() {
   fi
 }
 
-# "svc:pid" for every service, so two samples can be compared for stability.
-services_snapshot() {
-  gitlab-ctl status 2>/dev/null | sed 's/;.*//' | awk '{print $1 $2 $4}'
-}
-
-# Why the hook is armed rather than always live. Measured across a full boot of
-# the published image with observe-only hooks: sidekiq exits 1 once while the
-# stack settles, and reconfigure restarts puma, nginx and gitlab-kas — each of
-# which handles SIGTERM and therefore exits **0, signal 0**, indistinguishable
-# by exit status alone from a service dying on its own. Boot is a distinct
-# phase, exactly as the image's HEALTHCHECK --start-period already says; the
-# contract governs a container that has finished coming up. After arming, ANY
-# exit is fatal, including a clean one.
-arm_when_serving() {
-  local i prev='' now=''
-  for i in $(seq 1 90); do
-    sleep 10
-    curl -fsS -o /dev/null --max-time 5 \
-      "http://127.0.0.1:${HTTP_PORT}/users/sign_in" 2>/dev/null || continue
-    now=$(services_snapshot)
-    # Serving is not enough. `gitlab-ctl reconfigure` queues DELAYED restarts
-    # that land after it returns: measured, nginx was already answering when
-    # chef then restarted puma, and arming on the HTTP probe alone failed the
-    # container on that restart. Require every service up AND the same pids in
-    # two samples ten seconds apart, so the boot has actually stopped moving.
-    case $now in *down:*|'') prev=''; continue ;; esac
-    if [ -n "$prev" ] && [ "$now" = "$prev" ]; then
-      touch "$ARMED"
-      echo "gitlab-services: serving and quiesced; the no-restart contract is now armed"
-      return 0
-    fi
-    prev=$now
-  done
-  # Never settled. Arm anyway: a container that hides crashes is worse than one
-  # that exits, and the healthcheck reports the rest.
-  touch "$ARMED"
-  echo "gitlab-services: WARNING: never settled within 15m; arming anyway" >&2
-}
+# Watching the boot and deciding when the contract goes live is /arm-services.sh,
+# next to the finish hook it arms. It runs in the background from the two boot
+# paths below, and it either arms the hooks or — if the stack never finishes
+# coming up — signals this process the way a crashed service would.
 
 on_term() {
   # Non-reentrant, and it says so on disk. Measured: a plain `docker stop`
@@ -215,7 +180,7 @@ if [ "$want" = "$have" ]; then
   assert_hook_coverage
   /opt/gitlab/embedded/bin/runsvdir-start &
   runsvdir_pid=$!
-  arm_when_serving &
+  /arm-services.sh "$HTTP_PORT" &
   wait "$runsvdir_pid"
   exit $?
 fi
@@ -242,5 +207,5 @@ echo "reconfigure complete; external_url is now '$want'"
 # thing most likely to have replaced a service directory out from under a hook.
 install_finish_hooks
 assert_hook_coverage
-arm_when_serving &
+/arm-services.sh "$HTTP_PORT" &
 wait "$runsvdir_pid"
