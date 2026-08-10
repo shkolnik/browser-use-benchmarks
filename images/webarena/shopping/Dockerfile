@@ -82,10 +82,15 @@ CMD ["/entrypoint.sh"]
 # safe. Failures during the start period do not count toward --retries, and a
 # success during it marks the container healthy immediately.
 #
-# -L is load-bearing: `curl -f` fails only on >=400, so an unfollowed 302 would
-# pass against a container that rendered nothing.
+# No -L, and no Host header either. Unlike the admin next door, the storefront
+# is not pinned to base_url — redirect_to_base=0 makes it serve any Host — so
+# this answers the loopback directly: measured 200, 171,694 bytes, no redirect.
+# There is nothing to follow, which is why the container stayed healthy on the
+# deployment where the admin and classifieds did not. A healthcheck answers "is
+# this container serving?" and must not depend on DNS, the proxy, or anything
+# else outside the container.
 HEALTHCHECK --start-period=900s --interval=15s --timeout=120s --retries=3 \
-  CMD curl -fsS -L --max-time 115 http://localhost:7770/ >/dev/null || exit 1
+  CMD curl -fsS --max-time 115 http://localhost:7770/ >/dev/null || exit 1
 
 # --- Magento 2.4.6 code tree, deterministically from the committed lockfile ---
 FROM runtime AS code
