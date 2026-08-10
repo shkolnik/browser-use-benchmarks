@@ -26,12 +26,20 @@ REPO = Path(__file__).resolve().parent.parent
 IMAGES = REPO / "images"
 
 # Apps that serve any Host answer a loopback probe whichever name it sends, so
-# the header is optional for them. Magento's admin area is the one that is
-# pinned to base_url — measured in-container, with HTTP_HOST=depot.example.com:
-# Host=127.0.0.1 -> 404, Host=depot.example.com -> 200. The storefront
-# (webarena/shopping) is NOT pinned: redirect_to_base=0 makes it serve any Host,
-# which is why it stayed healthy on the same deployment that broke the admin.
-HOST_PINNED = {"webarena/shopping-admin"}
+# the header is optional for them. Two are pinned to their configured address,
+# both measured in-container:
+#
+#   webarena/shopping-admin  Magento adminhtml, pinned to base_url.
+#                            Host=127.0.0.1 -> 404, Host=$HTTP_HOST -> 200.
+#   vwa/classifieds          Osclass, pinned to WEB_PATH. It 302s EVERY request
+#                            whose Host does not match, so the probe saw a
+#                            0-byte redirect, not a page.
+#                            no Host -> 302, Host=$HTTP_HOST -> 200 (31,721 B).
+#
+# The storefront (webarena/shopping) is NOT pinned: redirect_to_base=0 makes it
+# serve any Host, which is why it stayed healthy on the same deployment that
+# broke the admin and classifieds.
+HOST_PINNED = {"webarena/shopping-admin", "vwa/classifieds"}
 
 
 def _healthcheck_curls():
