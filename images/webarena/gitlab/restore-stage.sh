@@ -9,6 +9,25 @@ BK=webarena
 BUCKET_LIMIT_KB=$((8 * 1024 * 1024))  # 8G target keeps layers under GHCR's ~10G comfort zone
 BUCKET_COUNT=6  # must match the COPY --from lines in the Dockerfile's final stage
 
+# Move puma off 8080 BEFORE anything boots.
+#
+# Rails runs behind nginx here, and puma binds a TCP port of its own on the
+# loopback for it. Omnibus's default for that is 8080 — and this is the one
+# image whose nginx listener follows HTTP_PORT, so a deployment publishing on
+# 8080 aims both at the same bind. nginx wins, puma dies with EADDRINUSE and
+# runit restarts it forever. 8080 is the second most common HTTP port there is;
+# spending it on an internal detail nobody sees is the wrong trade, so puma
+# moves instead. entrypoint.sh reserves whatever this names, reading it back
+# from gitlab.rb rather than hardcoding a constant that could drift from it.
+#
+# Before the wrapper boot, not after: the wrapper's first-boot reconfigure
+# renders puma's config, and a port changed afterwards would leave the shipped
+# tree disagreeing with gitlab.rb — the entrypoint would then reserve a port
+# puma is not on, and wave through the one it is.
+PUMA_PORT=18080
+printf "\n# See entrypoint.sh: HTTP_PORT may not equal this.\npuma['port'] = %s\n" \
+    "$PUMA_PORT" >> /etc/gitlab/gitlab.rb
+
 echo "=== boot services ==="
 /assets/wrapper &
 WRAPPER_PID=$!
@@ -38,6 +57,18 @@ gitlab-ctl stop puma
 gitlab-ctl stop sidekiq
 gitlab-backup restore BACKUP=$BK force=yes
 gitlab-ctl reconfigure
+
+# The setting is only half of it; the rendered config is what puma actually
+# binds, and it is what ships. Assert rather than assume: a reconfigure that
+# quietly ignored puma['port'] would leave 8080 in place, and the collision
+# would come back on a deployment we could no longer reproduce here.
+PUMA_RB=/var/opt/gitlab/gitlab-rails/etc/puma.rb
+grep -q "bind 'tcp://127.0.0.1:${PUMA_PORT}'" "$PUMA_RB" || {
+  echo "puma did not move to ${PUMA_PORT}; rendered config says:" >&2
+  grep -n "^bind" "$PUMA_RB" >&2
+  exit 1
+}
+echo "puma bound to ${PUMA_PORT} (8080 left free for the published side)"
 
 echo "=== clean shutdown ==="
 gitlab-ctl stop
