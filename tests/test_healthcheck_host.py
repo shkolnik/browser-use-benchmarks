@@ -26,12 +26,20 @@ REPO = Path(__file__).resolve().parent.parent
 IMAGES = REPO / "images"
 
 # Apps that serve any Host answer a loopback probe whichever name it sends, so
-# the header is optional for them. Magento's admin area is the one that is
-# pinned to base_url — measured in-container, with HTTP_HOST=depot.example.com:
-# Host=127.0.0.1 -> 404, Host=depot.example.com -> 200. The storefront
-# (webarena/shopping) is NOT pinned: redirect_to_base=0 makes it serve any Host,
-# which is why it stayed healthy on the same deployment that broke the admin.
-HOST_PINNED = {"webarena/shopping-admin"}
+# the header is optional for them. Two are pinned to their configured address,
+# both measured in-container:
+#
+#   webarena/shopping-admin  Magento adminhtml, pinned to base_url.
+#                            Host=127.0.0.1 -> 404, Host=$HTTP_HOST -> 200.
+#   vwa/classifieds          Osclass, pinned to WEB_PATH. It 302s EVERY request
+#                            whose Host does not match, so the probe saw a
+#                            0-byte redirect, not a page.
+#                            no Host -> 302, Host=$HTTP_HOST -> 200 (31,721 B).
+#
+# The storefront (webarena/shopping) is NOT pinned: redirect_to_base=0 makes it
+# serve any Host, which is why it stayed healthy on the same deployment that
+# broke the admin and classifieds.
+HOST_PINNED = {"webarena/shopping-admin", "vwa/classifieds"}
 
 
 def _healthcheck_curls():
@@ -62,6 +70,33 @@ def test_every_probe_connects_over_loopback():
         f"a probe dialing ${{HTTP_HOST}}:${{HTTP_PORT}} reaches a port nothing is "
         f"bound to — and makes readiness depend on DNS resolving the published "
         f"name from inside the container.")
+
+
+def test_no_probe_follows_redirects():
+    """A followed redirect can leave the container; a probe never may.
+
+    These apps bake their PUBLISHED address into what they emit, so an absolute
+    redirect points at ${HTTP_HOST} — a name that resolves for clients and need
+    not resolve inside the container at all. Following it makes readiness depend
+    on DNS, on egress back into the host, and on the proxy being up, none of
+    which are properties of a healthy container. Under the subdomain proxy that
+    is how classifieds reported unhealthy while serving every real request.
+
+    Not following costs nothing, because a redirect is not evidence of health in
+    the first place: `curl -f` only fails on >= 400, so an unfollowed 302 passes.
+    Where the destination is what proves the app works — webshop's `/` is home(),
+    which redirects and touches no data — name the destination in the probe
+    (/abc) instead of following a hop to reach it.
+    """
+    following = sorted(
+        img for img, cmd in _healthcheck_curls().items()
+        if re.search(r"(?:^|\s)(?:-L|--location)(?:\s|$)", cmd))
+    assert not following, (
+        f"HEALTHCHECK(s) following redirects: {following}. Probe the destination "
+        f"URL directly instead. A redirect target is generally the published "
+        f"address, so following one couples readiness to DNS, the proxy, and the "
+        f"host network — a container that is serving correctly then reports "
+        f"unhealthy whenever any of them wobbles.")
 
 
 def test_host_pinned_apps_are_probed_under_their_configured_name():

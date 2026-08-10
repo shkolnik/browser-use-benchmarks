@@ -198,8 +198,20 @@ COPY --chmod=755 entrypoint.sh /entrypoint.sh
 # serves a page; the entrypoint then starts the services and supervises them.
 CMD ["/entrypoint.sh"]
 
+# ⚠️ The Host header is load-bearing. Osclass 302s every request whose Host is
+# not WEB_PATH's, so a probe that omits it never sees a page at all; it used to
+# pass only because -L chased that redirect to the PUBLISHED name, which the
+# container generally cannot resolve. Measured here with
+# HTTP_HOST=classifieds.depot.example.com:
+#     no Host header  -> 302 to the public name, 0 bytes (with -L: "curl: (6)
+#                        Could not resolve host")
+#     Host=$HTTP_HOST -> 200, 31,721 bytes of rendered page
+# Connect over the loopback, present the configured name, and follow nothing:
+# readiness must not depend on the container resolving its own public address.
+#
 # localhost:9980 is the IN-CONTAINER address. Osclass boots MySQL and PHP
 # behind the entrypoint's supervisor, so give it a real start period; the per-probe --timeout is
 # the parameter that decides whether a slow first page reads as unhealthy.
 HEALTHCHECK --start-period=90s --interval=10s --timeout=15s --retries=3 \
-  CMD curl -fsS -L --max-time 14 http://localhost:9980/ >/dev/null || exit 1
+  CMD curl -fsS --max-time 14 -H "Host: ${HTTP_HOST}" \
+      http://localhost:9980/ >/dev/null || exit 1
