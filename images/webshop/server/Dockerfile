@@ -134,10 +134,16 @@ CMD ["/entrypoint.sh"]
 # multiple of the idle number encodes an assumption the deployment gets to break.
 # 180s still surfaces a genuinely stuck container in about three minutes.
 #
-# -L is load-bearing. `/` is served by home(), which only redirects to /abc and
-# touches no data, and -f fails only on >=400 — so without -L this check exits 0
-# against a container that has loaded nothing at all.
+# Probe /abc, not `/`. `/` is served by home(), which only redirects and
+# touches no data, so a probe of `/` proves nothing unless it follows the
+# redirect: measured, `/` is 302 (195 bytes), /abc is 200 (1,466 bytes).
+# Naming the destination directly gets the same proof in one request instead of
+# two, and needs no -L. This redirect happens to stay on localhost, so -L was
+# safe here — but the rule is fleet-wide on purpose: a healthcheck answers "is
+# this container serving?" and must not depend on DNS, the proxy, or anything
+# else outside the container. Two probes elsewhere DID follow a redirect to the
+# published name and went permanently unhealthy for it.
 HEALTHCHECK --start-period=180s --interval=5s --timeout=15s --retries=3 \
-  CMD curl -fsS -L --max-time 10 http://localhost:3000/ >/dev/null || exit 1
+  CMD curl -fsS --max-time 10 http://localhost:3000/abc >/dev/null || exit 1
 
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"

@@ -245,5 +245,10 @@ CMD ["/entrypoint.sh"]
 # 404s every real page — the exact defect that shipped once already.
 # Postgres + php-fpm + nginx come up behind the entrypoint's supervisor, hence
 # the start period.
+#
+# No -L: Postmill serves /forums as a 200 whatever Host it is asked under
+# (measured: 33,671 bytes, no redirect), so there is nothing to follow. A
+# healthcheck answers "is this container serving?", which must not depend on
+# DNS, the proxy, or anything else outside the container.
 HEALTHCHECK --start-period=90s --interval=10s --timeout=15s --retries=3 \
-  CMD curl -fsS -L --max-time 14 http://localhost:80/forums >/dev/null || exit 1
+  CMD curl -fsS --max-time 14 http://localhost:80/forums >/dev/null || exit 1
