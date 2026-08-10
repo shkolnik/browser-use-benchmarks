@@ -113,3 +113,13 @@ the image serving links pointing at `metis.lti.cs.cmu.edu`.
 `listen *:<port>` from `external_url`, `HTTP_PORT` moves the *in-container* listener too. Published
 and container port must therefore be equal for gitlab, which is why its `EXPOSE 8023` goes stale
 the moment `HTTP_PORT` is anything else.
+
+**And it makes exactly one port unusable: 18080.** Rails runs behind that nginx, and puma binds a
+TCP port of its own on the loopback for it. Since `HTTP_PORT` moves nginx onto whatever it names,
+setting it to puma's port aims both at the same bind — nginx wins, puma crashloops with
+`EADDRINUSE`, and the container serves 502s while reporting `starting`. Omnibus's default for puma
+is **8080**, which is far too useful a port to spend on an invisible internal detail, so the build
+moves puma to **18080** (`restore-stage.sh`, asserted against the rendered `puma.rb`) and
+`entrypoint.sh` refuses `HTTP_PORT=18080` up front with a message naming the conflict. The
+entrypoint reads the reserved value out of `gitlab.rb` rather than hardcoding it, so the check
+follows the setting instead of drifting from it.
