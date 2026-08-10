@@ -44,7 +44,56 @@ case "$HTTP_PORT" in
   ''|*[!0-9]*) echo "error: HTTP_PORT must be a number, got '$HTTP_PORT'" >&2; exit 1 ;;
 esac
 
-RB=/etc/gitlab/gitlab.rb
+# Overridable for the same reason SUPERVISOR_PID is in runit-finish.sh: so the
+# validation below can be tested without an omnibus install to read. In the
+# image it is always /etc/gitlab/gitlab.rb.
+RB=${GITLAB_RB:-/etc/gitlab/gitlab.rb}
+
+# One port is RESERVED in this image, and the failure it causes is silent and
+# slow.
+#
+# Rails runs behind nginx here, and puma binds a TCP port of its own on the
+# loopback for it, independent of the port nginx serves on. This is also the ONE
+# image whose nginx listener follows HTTP_PORT (every other image in the fleet
+# has a fixed internal port and moves only the published side), so an HTTP_PORT
+# equal to puma's points both at the same bind. nginx gets there first, puma
+# dies with EADDRINUSE, runit restarts it forever, and the container serves 502s
+# while looking like it is starting.
+#
+# Measured on the published image, whose puma was still on omnibus's default of
+# 8080, with HTTP_PORT=8080: nginx stable on one pid, a new puma pid every few
+# seconds, 12 x `Errno::EADDRINUSE bind(2) for "127.0.0.1" port 8080` in four
+# minutes, and — because the stack never settles — the arming fallback below
+# firing at 15 minutes, at which point the next puma exit finally takes the
+# container down. Twenty minutes to report a misconfiguration knowable here, in
+# a millisecond, before anything binds.
+#
+# restore-stage.sh moves puma off 8080 precisely so that the reserved port is
+# one nobody wants to publish. Read from gitlab.rb rather than hardcoded: a
+# constant here would silently become a lie the moment that value changed, and
+# would then reserve a port puma is not on while admitting the one it is.
+puma_port=$(sed -n "s/^[[:space:]]*puma\['port'\][[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
+            "$RB" 2>/dev/null | head -n 1)
+puma_port=${puma_port:-8080}
+if [ "$HTTP_PORT" = "$puma_port" ]; then
+  cat >&2 <<EOF
+error: HTTP_PORT=$HTTP_PORT collides with GitLab's internal puma port ($puma_port).
+
+  Unlike the rest of the fleet, this image's nginx listens on HTTP_PORT itself,
+  and puma already holds $puma_port on the loopback behind it. Both would bind
+  the same port: nginx wins, puma crashloops with EADDRINUSE, and the container
+  never serves.
+
+  Pick any other port for the PUBLISHED side and keep the mapping symmetric:
+    docker run -e HTTP_HOST=$HTTP_HOST -e HTTP_PORT=8023 -p 8023:8023 <image>
+
+  Behind deploy/compose.proxy.yml this is PROXY_PORT, which gitlab follows:
+    BENCH_HOST=... PROXY_PORT=8081 docker compose -f deploy/compose.yml \\
+        -f deploy/compose.proxy.yml up -d --wait
+EOF
+  exit 1
+fi
+
 want="http://${HTTP_HOST}:${HTTP_PORT}"
 have=$(sed -n "s/^external_url[[:space:]]*'\([^']*\)'.*/\1/p" "$RB" | head -n 1)
 

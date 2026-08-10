@@ -84,6 +84,12 @@ the port the process binds. Wikipedia publishes 9888 rather than upstream's
 both sides of its mapping move together. Every other image has a fixed listen
 port. See `docs/service-contract.md`.
 
+Because of that, **`18080` is the one value `HTTP_PORT` (and so `PROXY_PORT`,
+which gitlab follows) may not take** — it is where puma listens behind gitlab's
+nginx, and both would bind it. The entrypoint refuses it immediately and says
+so. Puma was deliberately moved there off omnibus's default of 8080 so that the
+reserved port is one nobody wants to publish.
+
 ## Before you pull
 
 **These images are `linux/amd64` only.** There is no `arm64` variant, so an
