@@ -111,6 +111,57 @@ def test_oras_round_trip_is_byte_identical(tmp_path, registry, oras_tool_dir):
     assert got == want, (got, want)
 
 
+def test_a_truncated_file_resumes_against_a_real_registry(tmp_path, registry, oras_tool_dir):
+    """Byte-range resume, proven against a registry rather than a fake curl.
+
+    The unit tests can assert which offset was requested, but only a real
+    registry can answer whether it honours `Range` at all — and whether curl's
+    `-C -` really appends rather than truncating. Both became load-bearing
+    after run 31497034118, where blob-granular resume deadlocked on 8.59 GB
+    layers and moved zero bytes in eight passes.
+    """
+    ref = f"{registry}/dcache-test/resume:t1"
+    src = tmp_path / "src"
+    src.mkdir()
+    blob = os.urandom(3 * 1024 * 1024 + 7)
+    (src / "big.bin").write_bytes(blob)
+    r = _run(f'dcache_push "{ref}" "{src}" big.bin', tmp_path, oras_tool_dir)
+    assert r.returncode == 0, r.stderr
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    # Exactly what an interrupted transfer leaves behind: a correct prefix.
+    keep = 2 * 1024 * 1024
+    (dest / "big.bin").write_bytes(blob[:keep])
+
+    r = _run(f'dcache_pull "{ref}" "{dest}"', tmp_path, oras_tool_dir)
+    assert r.returncode == 0, r.stderr
+    assert f"resuming big.bin at {keep}/{len(blob)} bytes" in r.stderr, r.stderr
+    assert (dest / "big.bin").read_bytes() == blob
+
+
+def test_a_corrupt_prefix_is_discarded_against_a_real_registry(tmp_path, registry,
+                                                               oras_tool_dir):
+    """A wrong prefix must not survive: resume, fail the digest, start clean."""
+    ref = f"{registry}/dcache-test/corrupt:t1"
+    src = tmp_path / "src"
+    src.mkdir()
+    blob = os.urandom(1024 * 1024 + 3)
+    (src / "big.bin").write_bytes(blob)
+    assert _run(f'dcache_push "{ref}" "{src}" big.bin', tmp_path,
+                oras_tool_dir).returncode == 0
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "big.bin").write_bytes(b"\x00" * 4096)   # a prefix that is not one
+
+    r = _run(f'DCACHE_RETRY_SLEEP=0 dcache_pull "{ref}" "{dest}"',
+             tmp_path, oras_tool_dir)
+    assert r.returncode == 0, r.stderr
+    assert "does not" in r.stderr and "match" in r.stderr, r.stderr
+    assert (dest / "big.bin").read_bytes() == blob
+
+
 def test_an_absent_tag_is_a_miss(tmp_path, registry, oras_tool_dir):
     """The one outcome that legitimately means "derive from scratch"."""
     ref = f"{registry}/dcache-test/never-pushed:t1"

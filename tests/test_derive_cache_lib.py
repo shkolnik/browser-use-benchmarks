@@ -25,49 +25,77 @@ import pytest
 LIB = Path(__file__).resolve().parent.parent / "builder" / "stage-lib" / "derive-cache.sh"
 
 
-def oras_artifact(files=(("a.dat", "payload"),), blob_fetch=None):
-    """A fake `oras` serving a real artifact: a manifest, and digest-exact blobs.
+DEFAULT_FILES = (("a.dat", "payload"),)
 
-    The digests are the true sha256 of what the fake writes, because
-    dcache__fetch_blobs decides whether a layer is already on disk by hashing
-    it. A fake with invented digests would model a registry that always lies,
-    and every skip-if-present test would pass for the wrong reason.
 
-    blob_fetch overrides the `blob fetch` body — for modelling a transfer that
-    dies partway.
+def oras_artifact(files=DEFAULT_FILES):
+    """A fake `oras` serving the manifest of a real artifact.
+
+    The digests are the true sha256 of what the matching fake curl writes,
+    because dcache__fetch_blobs decides whether a layer is already on disk by
+    hashing it. Invented digests would model a registry that always lies, and
+    every skip-if-present test would pass for the wrong reason.
+
+    Blobs are NOT served here: they no longer go through oras at all.
     """
-    layers, cases = [], []
+    layers = []
     for name, content in files:
         raw = content.encode()
-        digest = hashlib.sha256(raw).hexdigest()
         layers.append({
-            "digest": "sha256:" + digest,
+            "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
             "size": len(raw),
             "annotations": {"org.opencontainers.image.title": name},
         })
-        cases.append(f'    {digest}) printf %s {shlex.quote(content)} > "$out" ;;')
     manifest = json.dumps(
         {"artifactType": "application/vnd.beep.derived.v1", "layers": layers})
-    serve = blob_fetch or (
-        '  shift 2; out=""; ref=""\n'
-        '  while [ $# -gt 0 ]; do\n'
-        '    case "$1" in --output) out=$2; shift 2 ;; *) ref=$1; shift ;; esac\n'
-        '  done\n'
-        '  case "${ref##*@sha256:}" in\n'
-        + "\n".join(cases) + "\n"
-        '    *) echo "no such blob" >&2; exit 1 ;;\n'
-        '  esac\n'
-        '  exit 0\n'
-    )
     return (
         'if [ "$1 $2" = "manifest fetch" ]; then\n'
         f'  echo {shlex.quote(manifest)}\n'
         '  exit 0\n'
         'fi\n'
-        'if [ "$1 $2" = "blob fetch" ]; then\n'
-        + serve +
-        'fi\n'
         'exit 0\n'
+    )
+
+
+def fake_curl(files=DEFAULT_FILES, body=None):
+    """A fake `curl` that serves blobs the way a registry does — with ranges.
+
+    It answers the token endpoint, then serves a blob by digest, appending only
+    the bytes the caller does not already have. `$have` is the resume offset it
+    was asked for and is recorded to `curl.offsets`, which is how these tests
+    tell "resumed at 4" apart from "restarted at 0" — the distinction the whole
+    change is about, and one a fake serving whole blobs could not express.
+
+    body overrides the serving half, for modelling a transfer that dies.
+    """
+    cases = [f'    {hashlib.sha256(c.encode()).hexdigest()}) full={shlex.quote(c)} ;;'
+             for _, c in files]
+    serve = body or (
+        '  echo "$have" >> "$OFFSETS"\n'
+        '  printf %s "${full:$have}" >> "$out"\n'
+        '  echo 206\n'
+        '  exit 0\n'
+    )
+    return (
+        'out=""; url=""\n'
+        'while [ $# -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    -o) out=$2; shift 2 ;;\n'
+        '    -C|-H|-u|-w) shift 2 ;;\n'
+        '    -*) shift ;;\n'
+        '    *) url=$1; shift ;;\n'
+        '  esac\n'
+        'done\n'
+        'case "$url" in\n'
+        '  */token\\?*) echo \'{"token":"faketoken"}\'; exit 0 ;;\n'
+        'esac\n'
+        'digest=${url##*/sha256:}\n'
+        'case "$digest" in\n'
+        + "\n".join(cases) + "\n"
+        '  *) echo 404; exit 22 ;;\n'
+        'esac\n'
+        'have=$(stat -c %s "$out" 2>/dev/null || echo 0)\n'
+        + serve
     )
 
 
@@ -89,20 +117,42 @@ ORAS_NOT_AN_ARTIFACT = (
 )
 
 
-def run(body, tmp_path, fake_oras=ORAS_ARTIFACT, fake_docker="exit 1", env=None):
+def run(body, tmp_path, fake_oras=ORAS_ARTIFACT, fake_docker="exit 1",
+        fake_curl_=None, env=None):
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
-    for name, script in (("oras", fake_oras), ("docker", fake_docker)):
+    fakes = (("oras", fake_oras), ("docker", fake_docker),
+             ("curl", fake_curl() if fake_curl_ is None else fake_curl_))
+    for name, script in fakes:
         p = bin_ / name
         p.write_text(f"#!/bin/bash\necho \"{name} $*\" >> {tmp_path}/calls\n{script}\n")
         p.chmod(0o755)
     script = tmp_path / "t.sh"
     script.write_text(f"set -u\n. {LIB}\n" + textwrap.dedent(body))
     e = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}",
-         "DCACHE_SKIP_ORAS_INSTALL": "1", **(env or {})}
+         "DCACHE_SKIP_ORAS_INSTALL": "1",
+         # No test wants to sleep between passes, and the default 30s times
+         # eight passes turns one mis-wired fake into a four-minute "hang"
+         # that reads as an infinite loop. Tests that care set it back.
+         "DCACHE_RETRY_SLEEP": "0",
+         # Isolate from the developer's real Docker credentials: whether this
+         # machine happens to be logged in to ghcr must not change a result.
+         "DOCKER_CONFIG": str(tmp_path / "no-docker-config"),
+         "OFFSETS": str(tmp_path / "curl.offsets"),
+         **(env or {})}
     r = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=e, cwd=tmp_path)
     calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
     return r, calls
+
+
+def offsets(tmp_path):
+    """The resume offset of every blob request the fake curl served."""
+    f = tmp_path / "curl.offsets"
+    return [int(x) for x in f.read_text().split()] if f.exists() else []
+
+
+def blob_calls(calls):
+    return [c for c in calls if c.startswith("curl ") and "/blobs/" in c]
 
 
 def test_the_library_exists():
@@ -112,7 +162,7 @@ def test_the_library_exists():
 def test_a_pull_reads_the_oras_artifact(tmp_path):
     r, calls = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path)
     assert "FORMAT=oras" in r.stdout, r.stderr
-    assert any(c.startswith("oras blob fetch") for c in calls), calls
+    assert blob_calls(calls), calls
     # No docker anywhere on the read path: holding a cache image locally cost
     # roughly TWICE its content size on a runner whose disk is its scarcest
     # resource, and nothing ever read it after the export.
@@ -120,11 +170,25 @@ def test_a_pull_reads_the_oras_artifact(tmp_path):
     assert (tmp_path / "out" / "a.dat").read_text() == "payload"
 
 
+def test_a_blob_is_fetched_by_digest_against_the_repository(tmp_path):
+    """The URL is the contract with the registry; a wrong one 404s at 3am."""
+    _, calls = run('dcache_pull reg/x:t out', tmp_path)
+    want = hashlib.sha256(b"payload").hexdigest()
+    assert any(f"https://reg/v2/x/blobs/sha256:{want}" in c for c in blob_calls(calls)), calls
+
+
+def test_a_localhost_registry_is_reached_over_http(tmp_path):
+    """Docker treats localhost as insecure, and the round-trip test needs it."""
+    _, calls = run('dcache_pull localhost:5000/x:t out', tmp_path)
+    assert any("http://localhost:5000/v2/" in c for c in blob_calls(calls)), calls
+    assert not any("https://" in c for c in blob_calls(calls)), calls
+
+
 def test_every_layer_lands_as_its_own_file(tmp_path):
     """Blob-by-blob must extract exactly what `oras pull` would have."""
     files = (("a.dat", "one"), ("b.dat", "two"), (".sizes", "three"))
     r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
-               fake_oras=oras_artifact(files))
+               fake_oras=oras_artifact(files), fake_curl_=fake_curl(files))
     assert "HIT" in r.stdout, r.stderr
     for name, content in files:
         assert (tmp_path / "out" / name).read_text() == content
@@ -142,35 +206,84 @@ def test_a_layer_already_on_disk_is_not_fetched_again(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "a.dat").write_text("payload")   # already complete and correct
+    files = (("a.dat", "payload"), ("b.dat", "more"))
     _, calls = run(f'dcache_pull reg/x:t {dest}', tmp_path,
-                   fake_oras=oras_artifact((("a.dat", "payload"), ("b.dat", "more"))))
-    fetched = [c for c in calls if c.startswith("oras blob fetch")]
+                   fake_oras=oras_artifact(files), fake_curl_=fake_curl(files))
+    fetched = blob_calls(calls)
     assert len(fetched) == 1, f"a completed layer was re-fetched: {fetched}"
-    assert "b.dat" in fetched[0], fetched[0]
+    assert hashlib.sha256(b"more").hexdigest() in fetched[0], fetched[0]
 
 
-def test_a_truncated_leftover_is_refetched_not_trusted(tmp_path):
-    """A killed transfer leaves a short file; resuming must not accept it."""
+def test_a_truncated_leftover_resumes_from_where_it_stopped(tmp_path):
+    """The point of the byte-range rewrite, in one assertion.
+
+    Run 31497034118 lost vwa/classifieds AND webarena/gitlab to blob-granular
+    resume: 8.59 GB layers against a ~10-minute interruption period meant no
+    layer ever finished, so no pass could skip anything, and eight passes
+    moved zero bytes forward. A partial file must be built ON, not discarded.
+    """
     dest = tmp_path / "out"
     dest.mkdir()
-    (dest / "a.dat").write_text("payl")      # the interrupted write
-    _, calls = run(f'dcache_pull reg/x:t {dest}', tmp_path)
-    assert any("a.dat" in c for c in calls if c.startswith("oras blob fetch")), calls
+    (dest / "a.dat").write_text("payl")      # the interrupted write, 4 of 7
+    run(f'dcache_pull reg/x:t {dest}', tmp_path)
+    assert offsets(tmp_path) == [4], (
+        f"the fetch restarted from zero instead of resuming: {offsets(tmp_path)}")
     assert (dest / "a.dat").read_text() == "payload"
 
 
-def test_a_leftover_of_the_right_size_but_wrong_bytes_is_refetched(tmp_path):
+def test_a_leftover_of_the_right_size_but_wrong_bytes_is_restarted(tmp_path):
     """Size is the cheap screen, not the verdict.
 
-    Skipping on size alone would hand a benchmark image corrupt data that no
-    later step re-checks: oras verifies what IT downloads, and nothing else
-    verifies what a previous run left behind.
+    A full-length file that fails its digest cannot be resumed — there is
+    nothing past the end to ask for — so it is discarded and re-fetched from
+    zero. Skipping on size alone would hand a benchmark image corrupt data
+    that no later step re-checks.
     """
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "a.dat").write_text("PAYLOAD")   # same length, different bytes
-    _, calls = run(f'dcache_pull reg/x:t {dest}', tmp_path)
-    assert any("a.dat" in c for c in calls if c.startswith("oras blob fetch")), calls
+    run(f'dcache_pull reg/x:t {dest}', tmp_path)
+    assert offsets(tmp_path) == [0], offsets(tmp_path)
+    assert (dest / "a.dat").read_text() == "payload"
+
+
+def test_a_corrupt_prefix_is_discarded_rather_than_resumed_forever(tmp_path):
+    """Resuming makes a bad prefix immortal unless something deletes it.
+
+    The bytes already on disk are never re-read by the registry, so a wrong
+    prefix can only be caught by the digest of the ASSEMBLED file — after
+    which resuming again would append to the same wrong prefix and fail the
+    same way every pass, forever.
+    """
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dat").write_text("XXXX")      # right-length prefix, wrong bytes
+    r, _ = run(f'dcache_pull reg/x:t {dest} && echo HIT', tmp_path)
+    assert "HIT" in r.stdout, r.stderr
+    # Resumed at 4 onto the bad prefix, failed its digest, dropped the file,
+    # then started clean at 0 and succeeded.
+    assert offsets(tmp_path) == [4, 0], offsets(tmp_path)
+    assert "does not" in r.stderr and "match" in r.stderr, r.stderr
+    assert (dest / "a.dat").read_text() == "payload"
+
+
+def test_a_registry_that_refuses_the_range_starts_over_instead_of_looping(tmp_path):
+    """A 416, or curl's own exit 33, means this file can never complete."""
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dat").write_text("payl")
+    # Refuses any resumed request, serves a fresh one.
+    body = (
+        '  if [ "$have" != 0 ]; then echo 416; exit 22; fi\n'
+        '  echo "$have" >> "$OFFSETS"\n'
+        '  printf %s "$full" >> "$out"\n'
+        '  echo 200\n'
+        '  exit 0\n'
+    )
+    r, _ = run(f'dcache_pull reg/x:t {dest} && echo HIT', tmp_path,
+               fake_curl_=fake_curl(body=body))
+    assert "HIT" in r.stdout, r.stderr
+    assert "range request refused" in r.stderr, r.stderr
     assert (dest / "a.dat").read_text() == "payload"
 
 
@@ -182,34 +295,59 @@ def test_a_layer_title_that_escapes_the_destination_is_refused(tmp_path):
     assert not (tmp_path / "etc").exists()
 
 
-def test_an_interrupted_pass_resumes_instead_of_restarting(tmp_path):
-    """Pass 2 must re-fetch only what pass 1 did not finish."""
-    # Dies on b.dat the first time it is asked for, serves it the second.
-    serve = (
-        '  shift 2; out=""; ref=""\n'
-        '  while [ $# -gt 0 ]; do\n'
-        '    case "$1" in --output) out=$2; shift 2 ;; *) ref=$1; shift ;; esac\n'
-        '  done\n'
-        f'  case "$out" in *b.dat)\n'
-        f'    n=$(cat {tmp_path}/b.n 2>/dev/null || echo 0); n=$((n+1));'
-        f' echo $n > {tmp_path}/b.n\n'
-        '    if [ "$n" = 1 ]; then\n'
-        '      echo "stream error: PROTOCOL_ERROR; received from peer" >&2; exit 1\n'
-        '    fi\n'
-        '    printf %s two > "$out"; exit 0 ;;\n'
-        '  esac\n'
-        '  printf %s one > "$out"; exit 0\n'
+def test_a_blob_cut_off_mid_transfer_resumes_on_the_next_pass(tmp_path):
+    """The failure this exists for, end to end.
+
+    The first request delivers part of the blob and dies the way the runner's
+    teardowns do; the second must ask for the REMAINDER. Before byte ranges
+    this was the deadlock: the partial file was discarded, so every pass
+    re-fetched the same bytes and none ever finished.
+    """
+    body = (
+        '  echo "$have" >> "$OFFSETS"\n'
+        f'  n=$(cat {tmp_path}/n 2>/dev/null || echo 0); n=$((n+1)); echo $n > {tmp_path}/n\n'
+        '  if [ "$n" = 1 ]; then\n'
+        '    printf %s "${full:$have:3}" >> "$out"\n'
+        '    echo "stream error: stream ID 1; PROTOCOL_ERROR; received from peer" >&2\n'
+        '    echo 206; exit 18\n'
+        '  fi\n'
+        '  printf %s "${full:$have}" >> "$out"\n'
+        '  echo 206\n'
+        '  exit 0\n'
     )
-    r, calls = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
-                   fake_oras=oras_artifact((("a.dat", "one"), ("b.dat", "two")),
-                                           blob_fetch=serve),
-                   env={"DCACHE_RETRY_SLEEP": "0"})
+    r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
+               fake_curl_=fake_curl(body=body))
     assert "HIT" in r.stdout, r.stderr
-    fetched = [c for c in calls if c.startswith("oras blob fetch")]
-    # a.dat once (pass 1, kept), b.dat twice (failed, then retried in pass 2).
-    assert len([c for c in fetched if "a.dat" in c]) == 1, fetched
-    assert len([c for c in fetched if "b.dat" in c]) == 2, fetched
+    # Pass 1 asked from 0 and got 3 bytes in; pass 2 asked from 3, not 0.
+    assert offsets(tmp_path) == [0, 3], (
+        f"the interrupted blob restarted from zero: {offsets(tmp_path)}")
     assert "PROTOCOL_ERROR" in r.stderr, r.stderr
+    assert (tmp_path / "out" / "a.dat").read_text() == "payload"
+
+
+def test_every_pass_makes_progress_when_each_one_is_cut_off(tmp_path):
+    """Convergence, which is the property that actually failed on the runner.
+
+    vwa/classifieds got eight passes and finished nothing, because each pass
+    started over. With byte ranges the offsets must strictly increase — a pull
+    interrupted every single time still completes, given enough passes.
+    """
+    body = (
+        '  echo "$have" >> "$OFFSETS"\n'
+        '  printf %s "${full:$have:2}" >> "$out"\n'
+        '  if [ "$(stat -c %s "$out")" -lt "${#full}" ]; then\n'
+        '    echo "stream error: PROTOCOL_ERROR; received from peer" >&2\n'
+        '    echo 206; exit 18\n'
+        '  fi\n'
+        '  echo 206; exit 0\n'
+    )
+    r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
+               fake_curl_=fake_curl(body=body))
+    assert "HIT" in r.stdout, r.stderr
+    # 7 bytes, 2 per pass: 0, 2, 4, 6 — every pass strictly ahead of the last.
+    assert offsets(tmp_path) == [0, 2, 4, 6], offsets(tmp_path)
+    assert (tmp_path / "out" / "a.dat").read_text() == "payload"
+    assert "resuming a.dat at 4/7 bytes" in r.stderr, r.stderr
 
 
 def test_a_persistently_interrupted_pull_gives_up_after_its_passes(tmp_path):
@@ -220,10 +358,10 @@ def test_a_persistently_interrupted_pull_gives_up_after_its_passes(tmp_path):
     entry that exists — the exact cost this library was written to stop paying.
     """
     r, calls = run('dcache_pull reg/x:t out || echo MISS', tmp_path,
-                   fake_oras=oras_artifact(blob_fetch='  echo boom >&2; exit 1\n'),
-                   env={"DCACHE_PULL_TRIES": "3", "DCACHE_RETRY_SLEEP": "0"})
+                   fake_curl_=fake_curl(body='  echo boom >&2; echo 000; exit 18\n'),
+                   env={"DCACHE_PULL_TRIES": "3"})
     assert r.returncode != 0 and "MISS" not in r.stdout, r.stdout
-    assert len([c for c in calls if c.startswith("oras blob fetch")]) == 3, calls
+    assert len(blob_calls(calls)) == 3, calls
 
 
 def test_a_failed_transfer_reports_all_of_its_output(tmp_path):
@@ -233,10 +371,11 @@ def test_a_failed_transfer_reports_all_of_its_output(tmp_path):
     by relevance — and the attempt whose failure is fatal printed nothing at
     all, because only non-final attempts were logged.
     """
-    noisy = "\n".join(f'  echo "line{i}"' for i in range(1, 6)) + "\n  exit 1\n"
+    noisy = ("\n".join(f'  echo "line{i}" >&2' for i in range(1, 6))
+             + "\n  echo 000\n  exit 18\n")
     r, _ = run('dcache_pull reg/x:t out || true', tmp_path,
-               fake_oras=oras_artifact(blob_fetch=noisy),
-               env={"DCACHE_PULL_TRIES": "1", "DCACHE_RETRY_SLEEP": "0"})
+               fake_curl_=fake_curl(body=noisy),
+               env={"DCACHE_PULL_TRIES": "1"})
     for i in range(1, 6):
         assert f"line{i}" in r.stderr, r.stderr
 
@@ -328,18 +467,14 @@ RESET = "failed to copy: read tcp: read: connection reset by peer"
 
 
 def test_a_reset_transfer_is_retried_rather_than_called_a_miss(tmp_path):
-    """The oras path is the only path left; it must not regress to no-retry."""
-    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out '
-                   '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
-                   fake_oras=oras_artifact(blob_fetch=(
-                       f'  n=$(cat {tmp_path}/o.n 2>/dev/null || echo 0); n=$((n+1));'
-                       f' echo $n > {tmp_path}/o.n\n'
-                       f'  if [ "$n" = 1 ]; then echo "{RESET}" >&2; exit 1; fi\n'
-                       '  shift 2; out=""\n'
-                       '  while [ $# -gt 0 ]; do\n'
-                       '    case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac\n'
-                       '  done\n'
-                       '  printf %s payload > "$out"; exit 0\n')))
+    """A reset is transient by construction here; it must not read as a miss."""
+    r, _ = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
+               fake_curl_=fake_curl(body=(
+                   f'  n=$(cat {tmp_path}/o.n 2>/dev/null || echo 0); n=$((n+1));'
+                   f' echo $n > {tmp_path}/o.n\n'
+                   f'  if [ "$n" = 1 ]; then echo "{RESET}" >&2; echo 000; exit 56; fi\n'
+                   '  printf %s "${full:$have}" >> "$out"\n'
+                   '  echo 206; exit 0\n')))
     assert "FORMAT=oras" in r.stdout, (
         f"a transient reset was reported as a cache miss: {r.stdout!r} {r.stderr!r}")
 
