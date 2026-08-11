@@ -69,11 +69,16 @@ dcache__transfer() {
       [ "$i" = 1 ] || echo "derive-cache: $label succeeded on attempt $i" >&2
       return 0
     fi
-    if [ "$i" != "$tries" ]; then
-      echo "derive-cache: $label failed (attempt $i/$tries), retrying" >&2
-      printf '%s\n' "$_DCACHE_LAST_OUT" | tail -n 3 >&2
-      sleep "${DCACHE_RETRY_SLEEP:-30}"
-    fi
+    # The WHOLE output, and on the LAST attempt too. Both were wrong in run
+    # 31460767854: it burned ~30 minutes failing wikipedia's pull three times
+    # and the log still could not say how far any attempt got, because this
+    # printed `tail -n 3` of a CONCURRENT `oras pull` — three progress lines
+    # chosen by interleaving, not the three that mattered — and printed
+    # nothing at all for the final attempt, the one whose failure is fatal.
+    # A transfer worth retrying for half an hour is worth its ~30 lines.
+    echo "derive-cache: $label failed (attempt $i/$tries)" >&2
+    printf '%s\n' "$_DCACHE_LAST_OUT" >&2
+    [ "$i" = "$tries" ] || sleep "${DCACHE_RETRY_SLEEP:-30}"
   done
   return 1
 }
@@ -208,11 +213,31 @@ dcache_pull() {
   # fails on an entry we KNOW is there is transient by construction and gets
   # retried. An entry with no manifest is genuinely absent — a first build of a
   # new image — and must miss immediately rather than burning three attempts.
-  # docker keeps completed blobs in its content store between attempts, so a
-  # retry resumes rather than restarting the whole 88 GB.
+  # Note a retry is not free and does not resume: oras restarts the whole
+  # transfer, so three attempts at wikipedia is ~285 GB. (This comment used to
+  # claim docker's content store made retries resumable. That was true of the
+  # legacy reader and is not true of oras.)
+  #
+  # --concurrency 1, against oras's default of 3. Run 31460767854 failed all
+  # three attempts with
+  #
+  #   copy failed: stream error: stream ID 1; PROTOCOL_ERROR; received from peer
+  #
+  # always on wikipedia's SECOND part, ~9.5 min in. That is not bad data and
+  # not an unreachable registry: the same blob fetched clean and digest-exact
+  # off-runner (206 s), and a default-concurrency pull of the whole 95 GB
+  # artifact succeeded off-runner in 1156 s, from the same apartment network
+  # the runner is on. What the runner has that the sandbox does not is other
+  # builds competing for its disk. The reading that fits every one of those
+  # facts is back-pressure: three ~9.6 GB downloads writing to one contended
+  # volume, a stream that stalls long enough for GHCR to reset it, and the
+  # casualty being whichever of the first three concurrent streams is still
+  # open. One stream at a time cannot stall behind its own siblings. It is
+  # slower on an idle machine and that is an acceptable price for a transfer
+  # whose failure costs half an hour.
   if printf '%s' "$mf" | grep -q '"artifactType"'; then
     if dcache__transfer "oras pull of $ref" "${DCACHE_PULL_TRIES:-3}" \
-         oras pull "$ref" -o "$dest"; then
+         oras pull "$ref" -o "$dest" --concurrency 1; then
       DCACHE_HIT_FORMAT=oras
       return 0
     fi

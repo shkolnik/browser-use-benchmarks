@@ -63,6 +63,40 @@ def test_a_pull_prefers_the_oras_artifact(tmp_path):
     assert not any(c.startswith("docker pull") for c in calls), calls
 
 
+def test_a_pull_asks_for_one_stream_at_a_time(tmp_path):
+    """oras defaults to 3 concurrent downloads; this fleet asks for 1.
+
+    Run 31460767854 failed all three attempts at wikipedia's ~95 GB entry with
+    a PROTOCOL_ERROR reset from GHCR, always on the second of the three
+    concurrently-downloading parts. The blob was fine and the registry was
+    fine — both verified off-runner — so what is left is the contended disk
+    the runner writes to. Serial transfers cannot stall behind each other.
+
+    Pinned because it is a one-word deletion away from silently regressing,
+    and the symptom would not appear until the next 95 GB pull.
+    """
+    _, calls = run('dcache_pull reg/x:t out "*.dat"', tmp_path)
+    pull = next(c for c in calls if c.startswith("oras pull"))
+    assert "--concurrency 1" in pull, pull
+
+
+def test_a_failed_transfer_reports_all_of_its_output_every_attempt(tmp_path):
+    """Including the final attempt, whose failure is the fatal one.
+
+    The old `tail -n 3` truncation is why run 31460767854's log could not say
+    how many of the 13 blobs had transferred before the reset: on a concurrent
+    pull the last three lines are chosen by interleaving, not by relevance.
+    And the last attempt printed nothing at all.
+    """
+    noisy = "\n".join(f'echo "line{i}"' for i in range(1, 6)) + "\nexit 1\n"
+    fake = ORAS_ARTIFACT.replace("exit 0\n", noisy)
+    r, _ = run('dcache_pull reg/x:t out "*.dat" || true', tmp_path,
+               fake_oras=fake, env={"DCACHE_PULL_TRIES": "2", "DCACHE_RETRY_SLEEP": "0"})
+    for i in range(1, 6):
+        assert f"line{i}" in r.stderr, r.stderr
+    assert "attempt 1/2" in r.stderr and "attempt 2/2" in r.stderr, r.stderr
+
+
 def test_a_pull_falls_back_to_the_legacy_image(tmp_path):
     r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT',
                    tmp_path, fake_oras="exit 1", fake_docker="exit 0")
