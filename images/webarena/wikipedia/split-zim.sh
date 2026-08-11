@@ -57,10 +57,10 @@ set -euo pipefail
 : "${PREPARE_INPUT_SHA256:?run_prepare must export PREPARE_INPUT_SHA256}"
 : "${REGISTRY:?run_prepare must export REGISTRY}"
 
-# builder/stage-lib/derive-cache.sh: gives the READ side dual-format support
-# (an oras artifact preferred, the legacy `FROM scratch` image as fallback).
-# The WRITE side below stays on the legacy image on purpose — see the note
-# at "push derived-inputs cache" further down.
+# builder/stage-lib/derive-cache.sh: the shared derived-inputs cache protocol.
+# Both sides of it are used here now — dcache_pull to read, dcache_push to
+# write. This site was the last one still writing the legacy `FROM scratch`
+# image; see the note at "push derived-inputs cache" further down.
 . "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 # builder/docker.py calls `bin/build download` as a child python process whose
@@ -114,12 +114,7 @@ echo "=== checking derived-inputs cache: $CACHE ==="
 # size — measured 183 GB on this runner — and nothing reads it after export:
 # the wikipedia Dockerfile COPYs the parts from the datasets build context,
 # never from this image).
-# DCACHE_NO_MIGRATE: this entry is ~88 GB. Every other site converts to the
-# oras format on its first legacy hit, paying only an upload for bytes it
-# just downloaded — cheap. Here that upload would land inside a fleet run
-# sharing a 300-minute budget, so this one converts when it is next
-# re-derived instead, which is already a deliberate multi-hour operation.
-if DCACHE_NO_MIGRATE=1 dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
+if dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
   echo "split-zim: cache hit ($DCACHE_HIT_FORMAT format)"
   if [ ! -f "$DATASETS_DIR/$SIZES" ]; then
     echo "split-zim: cache entry has no $SIZES manifest — refusing to trust it" >&2
@@ -327,78 +322,37 @@ ls -l "$DATASETS_DIR/$STEM".zim??*
 # Publish them, so no later rebuild ever pays the ~24 h upstream fetch again.
 # This runs only on the miss path — a cache hit exited long before here.
 #
-# DELIBERATELY STILL THE LEGACY `docker build` + `docker push`, not
-# dcache_push — this entry is ~88 GB, and re-pushing it as oras opportunistically
-# on every future cache hit (the way the library migrates the other six) would
-# add that upload to the very next fleet run for no benefit today. The read
-# side above already accepts an oras artifact, so this entry converts for free
-# the next time it is genuinely re-derived (a RECIPE bump or an upstream ZIM
-# change) — it just isn't migrated ahead of that. See the plan's Global
-# Constraints.
-echo "=== push derived-inputs cache: $CACHE ==="
-work=$(mktemp -d "$DATASETS_DIR/.derive-work.XXXXXX")
-# Replaces the STAGING trap rather than adding to it: STAGING was already moved
-# away piece by piece above, and its directory is removed here too.
-trap 'rm -rf "$work" "$STAGING"' EXIT
-{
-  echo "FROM scratch"
-  for p in "$DATASETS_DIR/$STEM.zim"??*; do
-    n=$(basename "$p")
-    # Hardlink, not copy: same filesystem, and a second 88.7 GiB copy is disk
-    # and tens of minutes on a runner that has neither to spare.
-    ln "$p" "$work/$n"
-    echo "COPY $n /"
-    printf '%s %s\n' "$(stat -c %s "$p")" "$n" >> "$work/$SIZES"
-  done
-  echo "COPY $SIZES /"
-} > "$work/Dockerfile"
-docker build -t "$CACHE" "$work"
-# THIS USED TO BE non-fatal — `docker push || echo warning` — on the reasoning
-# that the parts are already on disk, so losing the push only costs the next
-# cold rebuild. That reasoning is wrong, and run 31259175714 demonstrated it:
-# the cache image was built locally, never reached GHCR, and the tag still
-# 404s. The push is not retryable, because builder/docker.py skips this whole
+# THIS USED TO BE `docker build` + `docker push` of a `FROM scratch` image, the
+# fleet's original cache format, kept here after the other six sites moved to
+# oras because converting THIS entry opportunistically (the way the library
+# migrates the others, on their first legacy hit) would have added an 88 GB
+# upload to the next fleet run. That reasoning applied to the migration, not to
+# a genuine re-derive: a run that reaches this line has already spent hours on
+# the split, and dcache_push is strictly cheaper than the legacy write it
+# replaces — no hardlink farm, no `docker build` of a 95.2 GB context for
+# buildkit to cache, and no local cache image that costs roughly twice its
+# content size on a runner whose disk is its scarcest resource.
+#
+# dcache_push carries the same retry-then-fail contract the legacy push was
+# given in #80, and for the same reason: builder/docker.py skips this whole
 # script once prepare_reuse_check finds the outputs present and the stamp
-# matching — so the ONE run that derives is the only run that ever pushes. A
-# warning there leaves the cache permanently empty while every later build
-# silently depends on one runner's disk keeping the parts alive, which is the
-# opposite of what this cache exists to guarantee.
-#
-# So: retry, then fail. Retries because a transient GHCR error should not throw
-# away a finished split; a hard failure because an unpushed cache must not be
-# stamped as a success that no later run will revisit.
-pushed=
-for attempt in 1 2 3; do
-  if docker push "$CACHE"; then
-    pushed=yes
-    break
-  fi
-  echo "cache push attempt $attempt/3 failed" >&2
-  [ "$attempt" = 3 ] || sleep 30
+# matching, so the ONE run that derives is the only run that ever pushes. A
+# swallowed failure would leave the cache permanently empty while every later
+# build believes it is populated.
+echo "=== push derived-inputs cache: $CACHE ==="
+# The sizes manifest is written beside the parts because dcache_push takes
+# paths relative to one directory, and is removed again below: it is a cache
+# artifact, not a prepare output, and image.toml's outputs list does not
+# mention it.
+: > "$DATASETS_DIR/$SIZES"
+files=()
+for p in "$DATASETS_DIR/$STEM.zim"??*; do
+  n=$(basename "$p")
+  files+=("$n")
+  printf '%s %s\n' "$(stat -c %s "$p")" "$n" >> "$DATASETS_DIR/$SIZES"
 done
-if [ -z "$pushed" ]; then
-  echo "split-zim: could not publish $CACHE after 3 attempts. Failing rather" \
-       "than stamping: prepare_reuse_check would skip this script on the next" \
-       "run, so nothing would ever retry the push and the cache would stay" \
-       "empty for good. The parts in $DATASETS_DIR are intact and correct." >&2
-  exit 1
-fi
+dcache_push "$CACHE" "$DATASETS_DIR" "${files[@]}" "$SIZES"
+rm -f "$DATASETS_DIR/$SIZES"
 
-# Give the disk back BEFORE the image build that follows, not at the end of the
-# job where build.yml's cleanup steps run. Run 31259175714 died here, and the
-# arithmetic is entirely in copies of one incompressible 95.2 GB file that were
-# all live at once: the source ZIM and the parts in DATASETS_DIR (95.2 each),
-# this cache image (183 — see the note on the hit path above), and then the
-# wikipedia image itself (another 183). That is 556 GB before buildkit's cache
-# of a 95.2 GB context and before smoke assembles the archive again.
-#
-# Both reclaims are unconditional. On a failed push the local copy is no use to
-# anyone either: the next run finds this cache by `docker pull`, which only ever
-# consults the registry.
-echo "=== reclaiming the local copies (the registry has them now) ==="
-docker rmi "$CACHE" >/dev/null 2>&1 || true
-# The context was 95.2 GB of parts and buildkit cached it. --reserved-space
-# matches build.yml's post-job sweep so this cannot evict more than that does.
-docker builder prune -f --reserved-space 20GB || true
 df -h "$DATASETS_DIR" | tail -n 1
 echo "split-zim: complete"

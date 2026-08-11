@@ -1,12 +1,16 @@
-"""All seven cache sites read through the shared library; the six also write
-through it.
+"""All seven cache sites read AND write through the shared library.
 
 Task 2 built `builder/stage-lib/derive-cache.sh`; this pins that every derive
 script actually sources and uses it, rather than the library existing next to
 scripts that still do their own `docker pull`/`docker build -t "$CACHE"`.
-Wikipedia is the one deliberate exception on the WRITE side (see the plan's
-Global Constraints — its cache is ~88 GB and this task gives it the dual-
-format read only), so its push path keeps building a legacy scratch image.
+
+Wikipedia used to be a deliberate exception on the WRITE side: its entry is
+~88 GB, so it kept building a legacy scratch image rather than gain an
+opportunistic oras re-push inside an ordinary fleet run. That exception ended
+when the entry was converted deliberately, out of band — nothing is left for
+it to protect, and a wikipedia re-derive that still wrote the legacy format
+would silently undo the conversion. So the parametrizations below cover all
+SEVEN, and there is no longer a per-site carve-out to pin.
 
 The export-filter invariant (#79) is not re-implemented here — it is already
 pinned, per-line, by tests/test_derive_export_filtered.py; this file only
@@ -43,47 +47,29 @@ def test_every_site_sources_the_shared_library(script):
         "cache protocol must live in one place, not be re-implemented per site")
 
 
-@pytest.mark.parametrize("script", SIX, ids=lambda p: p.parent.name)
-def test_the_six_no_longer_pull_the_cache_image_directly(script):
+@pytest.mark.parametrize("script", SEVEN, ids=lambda p: p.parent.name)
+def test_no_site_pulls_the_cache_image_directly(script):
     code = _code(script.read_text())
     assert not re.search(r"docker pull\s+\"\$CACHE\"", code), (
         f"{script}: still calls `docker pull \"$CACHE\"` directly instead of "
         "going through dcache_pull")
 
 
-@pytest.mark.parametrize("script", SIX, ids=lambda p: p.parent.name)
-def test_the_six_no_longer_build_the_cache_image_to_push(script):
+@pytest.mark.parametrize("script", SEVEN, ids=lambda p: p.parent.name)
+def test_no_site_builds_the_cache_image_to_push(script):
     code = _code(script.read_text())
     assert not re.search(r"docker build\s+-t\s+\"\$CACHE\"", code), (
         f"{script}: still builds a `FROM scratch` image to push instead of "
         "calling dcache_push directly on the files")
 
 
-@pytest.mark.parametrize("script", SIX, ids=lambda p: p.parent.name)
-def test_the_six_pull_through_the_library(script):
+@pytest.mark.parametrize("script", SEVEN, ids=lambda p: p.parent.name)
+def test_every_site_pulls_through_the_library(script):
     code = _code(script.read_text())
     assert "dcache_pull" in code, f"{script}: does not call dcache_pull"
 
 
-@pytest.mark.parametrize("script", SIX, ids=lambda p: p.parent.name)
-def test_the_six_push_through_the_library(script):
+@pytest.mark.parametrize("script", SEVEN, ids=lambda p: p.parent.name)
+def test_every_site_pushes_through_the_library(script):
     code = _code(script.read_text())
     assert "dcache_push" in code, f"{script}: does not call dcache_push"
-
-
-def test_wikipedia_pulls_through_the_library():
-    code = _code(WIKIPEDIA.read_text())
-    assert "dcache_pull" in code, "wikipedia's read side must use dcache_pull too"
-
-
-def test_wikipedia_still_builds_and_pushes_the_legacy_image():
-    """Task 3 gives wikipedia the dual-format READ only (Global Constraints):
-    its ~88 GB cache must not gain an opportunistic re-push on the next
-    ordinary rebuild. Its write path stays exactly as it was."""
-    code = _code(WIKIPEDIA.read_text())
-    assert re.search(r'docker build\s+-t\s+"\$CACHE"', code), (
-        "wikipedia's push path must still build the legacy scratch image — "
-        "converting it was explicitly out of scope for this task")
-    assert "dcache_push" not in code, (
-        "wikipedia must not opportunistically push its ~88 GB cache as oras; "
-        "that conversion happens only when it is next re-derived")
