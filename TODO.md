@@ -51,25 +51,27 @@ over the same apartment network, one blob fetched alone verified digest-exact in
 `systemctl list-timers` and anything reloading firewall rules on the runner VM and its host.
 Until then every large pull pays for it.
 
-`dcache_pull` now survives it (commit b12ced7): blob-by-blob fetch, skipping any layer whose
-size AND sha256 already match, so an interruption costs one blob instead of the whole
-transfer. Run 31483094508 was interrupted in passes 1, 2 and 3 and still completed in ~40 min.
-Before that change the retry loop could not converge at all: a clean pull needs ~19 min and
-interruptions arrive every 10-15.
+`dcache_pull` now survives it (PR #36): blob-by-blob fetch, skipping any layer whose size AND
+sha256 already match, so an interruption costs one blob instead of the whole transfer. Run
+31483094508 was interrupted in passes 1, 2 and 3 and still completed in ~40 min. Before that
+change the retry loop could not converge at all: a clean pull needs ~19 min and interruptions
+arrive every 10-15.
+
+LEGACY READER DELETED (PR #35): the fallback branch in `dcache_pull`,
+`dcache__migrate_legacy_hit`, `DCACHE_NO_MIGRATE` and the dead `FILTER` argument at all seven
+call sites are gone; a tag that is not an artifact is now a loud failure rather than a miss (a
+miss would send a caller off to re-derive over a format mismatch — up to ~24 h for wikipedia).
+All seven lock digests were re-resolved live on 2026-08-11 and written into
+`builder/derived-cache.lock`, header `Docker-Content-Digest` cross-checked against sha256 of
+the raw manifest body, all seven `artifactType application/vnd.unknown.artifact.v1`. That
+check is what licensed the deletion, and it closes the re-resolve item that stood here.
 
 REMAINING before this closes:
-1. Re-resolve ALL SEVEN digests in `builder/derived-cache.lock` — every line there is now a
-   pre-migration legacy digest, wikipedia's included. Six were re-resolved against the live
-   registry on 2026-08-11 (values in the branch's PR body); wikipedia's is the digest above.
-   Deliberately NOT done in `wikipedia-cache-oras`: `builder/**` is a shared build input, so
-   editing the lock rebuilds the whole fleet for a hex change. It lands with item 3.
-2. Tighten `dcache_require` to a real digest comparison (`derive-cache.sh` ~309-334 is still
-   ref-only, deliberately per commit ad73a9d).
-3. Delete the legacy-fallback branch in `dcache_pull`, plus `dcache__migrate_legacy_hit` and
-   `DCACHE_NO_MIGRATE`, and the now-dead `FILTER` argument at all seven call sites. UNBLOCKED:
-   run 31483094508 took a real oras read of the last unconverted entry, so nothing in the
-   fleet reads legacy any more. Written and open as PR #35, which predates the blob-by-blob
-   rewrite and so needs rebasing onto it before it merges.
+1. Tighten the digest lock from a provenance record to a real comparison. `dcache_require` is
+   the wrong home for it: it runs only after a MISS, so it never has a digest in hand. The
+   check belongs on the HIT path in `dcache_pull`, which already fetches the manifest and can
+   compare its digest against the lock before trusting the entry. Deliberately left out of the
+   deletion PR — it changes what a good build does, not just what a dead path contains.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 

@@ -58,9 +58,8 @@ set -euo pipefail
 : "${REGISTRY:?run_prepare must export REGISTRY}"
 
 # builder/stage-lib/derive-cache.sh: the shared derived-inputs cache protocol.
-# Both sides of it are used here now — dcache_pull to read, dcache_push to
-# write. This site was the last one still writing the legacy `FROM scratch`
-# image; see the note at "push derived-inputs cache" further down.
+# Both sides of it are used here — dcache_pull to read, dcache_push to write;
+# see the note at "push derived-inputs cache" further down.
 . "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 # builder/docker.py calls `bin/build download` as a child python process whose
@@ -98,23 +97,20 @@ SUB_BYTES=$((8 * 1024 * 1024 * 1024))
 # this script would now produce.
 RECIPE=r1
 CACHE="$REGISTRY/webarena-wikipedia-derived:${PREPARE_INPUT_SHA256:0:12}-$RECIPE"
-# Written into the cache image at push time and checked on pull. `docker export`
-# piped into tar under `set -o pipefail` already fails loudly on a truncated
-# stream, but that only proves the transfer ended cleanly, not that the parts
-# add up to an archive. This is the cheap version of the containment check for
-# the path where the source ZIM is never downloaded and so cannot be re-read.
+# Pushed as a layer of the cache entry and checked on every hit. oras verifies
+# each blob's digest, but that only proves the transfer ended cleanly, not that
+# the parts add up to an archive. This is the cheap version of the containment
+# check for the path where the source ZIM is never downloaded and so cannot be
+# re-read.
 SIZES=.zim-parts.sizes
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-# dcache_pull tries the oras artifact first and falls back to the legacy
-# `FROM scratch` image; either way the ONE covering wildcard is unchanged —
-# `*.zim*` covers parts, sub-files and the sizes manifest, and cannot match
-# anything docker's legacy export injects (#79). A legacy hit's local image is
-# already reclaimed by the library (holding it costs roughly TWICE its content
-# size — measured 183 GB on this runner — and nothing reads it after export:
-# the wikipedia Dockerfile COPYs the parts from the datasets build context,
-# never from this image).
-if dcache_pull "$CACHE" "$DATASETS_DIR" "*.zim*"; then
+# dcache_pull writes the entry's own layers — the parts, their sub-files and the
+# sizes manifest — straight into DATASETS_DIR, and nothing else: an oras layer
+# becomes a file only when it carries an `org.opencontainers.image.title`, so
+# there is no injected content to filter out (which is what #79 was about) and
+# no second local copy of ~95 GB to reclaim afterwards.
+if dcache_pull "$CACHE" "$DATASETS_DIR"; then
   echo "split-zim: cache hit ($DCACHE_HIT_FORMAT format)"
   if [ ! -f "$DATASETS_DIR/$SIZES" ]; then
     echo "split-zim: cache entry has no $SIZES manifest — refusing to trust it" >&2
@@ -325,7 +321,7 @@ ls -l "$DATASETS_DIR/$STEM".zim??*
 # THIS USED TO BE `docker build` + `docker push` of a `FROM scratch` image, the
 # fleet's original cache format, kept here after the other six sites moved to
 # oras because converting THIS entry opportunistically (the way the library
-# migrates the others, on their first legacy hit) would have added an 88 GB
+# then migrated the others, on their first legacy hit) would have added an 88 GB
 # upload to the next fleet run. That reasoning applied to the migration, not to
 # a genuine re-derive: a run that reaches this line has already spent hours on
 # the split, and dcache_push is strictly cheaper than the legacy write it

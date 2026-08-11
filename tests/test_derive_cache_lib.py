@@ -1,8 +1,16 @@
 """builder/stage-lib/derive-cache.sh, exercised without a registry.
 
 The round trip against a real registry lives in tests/integration/. These
-cover the decision table: which format is tried first, what a miss returns,
-and that a failed push is fatal exactly as #80 requires.
+cover the decision table: what counts as a hit, what a miss returns, which
+failures are fatal, and that a failed push is fatal exactly as #80 requires.
+
+There is one format now. The library used to read a legacy `FROM scratch`
+Docker image as well, and migrate it to oras on the fly; all seven entries in
+builder/derived-cache.lock were confirmed to be artifacts against the live
+registry on 2026-08-11, so that reader is gone. The tests that covered it are
+gone with it, replaced by the two that matter afterwards: a non-artifact tag
+must fail loudly rather than silently miss, and no legacy reader may return
+unnoticed.
 """
 import hashlib
 import json
@@ -67,10 +75,13 @@ def oras_artifact(files=(("a.dat", "payload"),), blob_fetch=None):
 # this library does. That is the signal dcache_pull decides on, so a fake that
 # stayed silent would model a tag that exists in no registry.
 ORAS_ARTIFACT = oras_artifact()
-# A legacy `FROM scratch` image: no artifactType, and — measured live against a
-# real registry with oras 1.3.3 on 2026-08-08 — `oras pull` still exits 0 while
-# writing nothing at all. Treating that as a hit is the false-hit bug.
-ORAS_LEGACY_TAG = (
+# A tag holding a Docker image rather than an artifact: a manifest, but no
+# artifactType. This is what the fleet's entries looked like before the
+# migration — and, measured live with oras 1.3.3 on 2026-08-08, `oras pull` of
+# one exits 0 while writing nothing at all, because oras materializes a layer
+# only when it carries an `org.opencontainers.image.title`. Deciding a hit on
+# the exit code would report success with an empty datasets dir.
+ORAS_NOT_AN_ARTIFACT = (
     'if [ "$1 $2" = "manifest fetch" ]; then\n'
     '  echo \'{"mediaType":"application/vnd.oci.image.index.v1+json"}\'\n'
     'fi\n'
@@ -98,20 +109,21 @@ def test_the_library_exists():
     assert LIB.is_file()
 
 
-def test_a_pull_prefers_the_oras_artifact(tmp_path):
-    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path)
-    assert "HIT" in r.stdout, r.stderr
+def test_a_pull_reads_the_oras_artifact(tmp_path):
+    r, calls = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path)
+    assert "FORMAT=oras" in r.stdout, r.stderr
     assert any(c.startswith("oras blob fetch") for c in calls), calls
-    # The whole point of preferring the artifact: no legacy image is fetched,
-    # so the ~2x local-storage cost of holding a cache image is never paid.
-    assert not any(c.startswith("docker pull") for c in calls), calls
+    # No docker anywhere on the read path: holding a cache image locally cost
+    # roughly TWICE its content size on a runner whose disk is its scarcest
+    # resource, and nothing ever read it after the export.
+    assert not any(c.startswith("docker") for c in calls), calls
     assert (tmp_path / "out" / "a.dat").read_text() == "payload"
 
 
 def test_every_layer_lands_as_its_own_file(tmp_path):
     """Blob-by-blob must extract exactly what `oras pull` would have."""
     files = (("a.dat", "one"), ("b.dat", "two"), (".sizes", "three"))
-    r, _ = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path,
+    r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
                fake_oras=oras_artifact(files))
     assert "HIT" in r.stdout, r.stderr
     for name, content in files:
@@ -130,7 +142,7 @@ def test_a_layer_already_on_disk_is_not_fetched_again(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "a.dat").write_text("payload")   # already complete and correct
-    _, calls = run(f'dcache_pull reg/x:t {dest} "*.dat"', tmp_path,
+    _, calls = run(f'dcache_pull reg/x:t {dest}', tmp_path,
                    fake_oras=oras_artifact((("a.dat", "payload"), ("b.dat", "more"))))
     fetched = [c for c in calls if c.startswith("oras blob fetch")]
     assert len(fetched) == 1, f"a completed layer was re-fetched: {fetched}"
@@ -142,7 +154,7 @@ def test_a_truncated_leftover_is_refetched_not_trusted(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "a.dat").write_text("payl")      # the interrupted write
-    _, calls = run(f'dcache_pull reg/x:t {dest} "*.dat"', tmp_path)
+    _, calls = run(f'dcache_pull reg/x:t {dest}', tmp_path)
     assert any("a.dat" in c for c in calls if c.startswith("oras blob fetch")), calls
     assert (dest / "a.dat").read_text() == "payload"
 
@@ -157,14 +169,14 @@ def test_a_leftover_of_the_right_size_but_wrong_bytes_is_refetched(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "a.dat").write_text("PAYLOAD")   # same length, different bytes
-    _, calls = run(f'dcache_pull reg/x:t {dest} "*.dat"', tmp_path)
+    _, calls = run(f'dcache_pull reg/x:t {dest}', tmp_path)
     assert any("a.dat" in c for c in calls if c.startswith("oras blob fetch")), calls
     assert (dest / "a.dat").read_text() == "payload"
 
 
 def test_a_layer_title_that_escapes_the_destination_is_refused(tmp_path):
     """The title is registry-controlled and is used as a path."""
-    r, _ = run('dcache_pull reg/x:t out "*.dat" || echo REFUSED', tmp_path,
+    r, _ = run('dcache_pull reg/x:t out || echo REFUSED', tmp_path,
                fake_oras=oras_artifact(((".././../etc/cron.d/x", "evil"),)))
     assert "not a bare filename" in r.stderr, r.stderr
     assert not (tmp_path / "etc").exists()
@@ -188,7 +200,7 @@ def test_an_interrupted_pass_resumes_instead_of_restarting(tmp_path):
         '  esac\n'
         '  printf %s one > "$out"; exit 0\n'
     )
-    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path,
+    r, calls = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
                    fake_oras=oras_artifact((("a.dat", "one"), ("b.dat", "two")),
                                            blob_fetch=serve),
                    env={"DCACHE_RETRY_SLEEP": "0"})
@@ -201,10 +213,16 @@ def test_an_interrupted_pass_resumes_instead_of_restarting(tmp_path):
 
 
 def test_a_persistently_interrupted_pull_gives_up_after_its_passes(tmp_path):
-    r, calls = run('dcache_pull reg/x:t out "*.dat"; echo "rc=$?"', tmp_path,
+    """Passes are bounded, and running out of them is NOT a miss.
+
+    The manifest already proved the entry is there, so a pull that still fails
+    is a real error. Returning 1 would send the caller off to re-derive an
+    entry that exists — the exact cost this library was written to stop paying.
+    """
+    r, calls = run('dcache_pull reg/x:t out || echo MISS', tmp_path,
                    fake_oras=oras_artifact(blob_fetch='  echo boom >&2; exit 1\n'),
                    env={"DCACHE_PULL_TRIES": "3", "DCACHE_RETRY_SLEEP": "0"})
-    assert "rc=0" not in r.stdout, r.stdout
+    assert r.returncode != 0 and "MISS" not in r.stdout, r.stdout
     assert len([c for c in calls if c.startswith("oras blob fetch")]) == 3, calls
 
 
@@ -216,129 +234,86 @@ def test_a_failed_transfer_reports_all_of_its_output(tmp_path):
     all, because only non-final attempts were logged.
     """
     noisy = "\n".join(f'  echo "line{i}"' for i in range(1, 6)) + "\n  exit 1\n"
-    r, _ = run('dcache_pull reg/x:t out "*.dat" || true', tmp_path,
+    r, _ = run('dcache_pull reg/x:t out || true', tmp_path,
                fake_oras=oras_artifact(blob_fetch=noisy),
                env={"DCACHE_PULL_TRIES": "1", "DCACHE_RETRY_SLEEP": "0"})
     for i in range(1, 6):
         assert f"line{i}" in r.stderr, r.stderr
 
 
-def test_a_pull_falls_back_to_the_legacy_image(tmp_path):
-    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT',
-                   tmp_path, fake_oras="exit 1", fake_docker="exit 0")
-    assert "HIT" in r.stdout, r.stderr
-    assert any(c.startswith("docker pull") for c in calls), calls
-
-
-def fake_docker_serving(tmp_path, *names):
-    """A docker whose `export` really emits a tar of NAMES.
-
-    A fake that just `exit 0`s models a legacy hit which extracts nothing —
-    a state that cannot occur — and then cannot distinguish "migrated the
-    entry" from "migrated whatever else was lying in $dest".
-    """
-    for n in names:
-        (tmp_path / n).write_text(f"content of {n}")
-    return (
-        'case "$1" in\n'
-        '  pull) exit 0 ;;\n'
-        '  create) echo cid; exit 0 ;;\n'
-        f'  export) tar -cf - -C {tmp_path} {" ".join(names)}; exit 0 ;;\n'
-        '  *) exit 0 ;;\n'
-        'esac\n'
-    )
-
-
-def test_a_legacy_hit_is_re_pushed_as_oras(tmp_path):
-    r, calls = run('dcache_pull reg/x:t out "*.dat"', tmp_path,
-                   fake_oras=ORAS_LEGACY_TAG,
-                   fake_docker=fake_docker_serving(tmp_path, "a.dat"))
-    assert any(c.startswith("oras push") for c in calls), (
-        f"a legacy hit did not migrate the entry, so it stays legacy forever: {r.stderr}")
-
-
-def test_a_re_push_failure_does_not_fail_the_build(tmp_path):
-    """Migration is opportunistic: the bytes are already in hand."""
-    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path,
-                   fake_oras="exit 1", fake_docker="exit 0")
-    assert "HIT" in r.stdout and r.returncode == 0, r.stderr
-
-
 def test_a_miss_returns_one_and_says_so(tmp_path):
-    r, calls = run('dcache_pull reg/x:t out "*.dat" || echo MISS', tmp_path,
-                   fake_oras="exit 1", fake_docker="exit 1")
+    r, calls = run('dcache_pull reg/x:t out || echo MISS', tmp_path, fake_oras="exit 1")
     assert "MISS" in r.stdout, r.stderr
 
 
-def test_a_push_retries_three_times_then_exits_nonzero(tmp_path):
-    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_push reg/x:t . a.dat; echo "rc=$?"',
+def test_an_absent_entry_misses_immediately_without_burning_retries(tmp_path):
+    """A first build of a NEW image has no entry, and must not pay 3 attempts.
+
+    This is why presence is decided by the manifest and not by the transfer:
+    an absent ref returns no manifest, so there is nothing to retry.
+    """
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out || echo MISS',
                    tmp_path, fake_oras="exit 1")
-    assert len([c for c in calls if c.startswith("oras push")]) == 3, calls
-    assert r.returncode != 0, "a failed push must be fatal (#80)"
+    assert "MISS" in r.stdout, r.stderr
+    assert not any(c.startswith("oras pull") for c in calls), (
+        f"an absent entry was pulled anyway: {calls}")
 
 
-def test_an_extract_filter_is_required(tmp_path):
-    """#79: an unfiltered docker export drops /dev,/etc,/proc,/sys into datasets."""
-    r, _ = run('dcache_pull reg/x:t out; echo "rc=$?"', tmp_path)
-    assert r.returncode != 0 or "rc=0" not in r.stdout
+def test_a_miss_carries_the_reason_it_missed(tmp_path):
+    """`denied`, a 503 and a genuinely absent tag must not look identical.
 
-
-def test_a_legacy_tag_is_not_mistaken_for_an_oras_hit(tmp_path):
-    """The false-hit bug: real oras exits 0 on a legacy image and writes nothing.
-
-    Measured 2026-08-08 against a local registry:2 with oras 1.3.3 —
-    `oras pull` of a `FROM scratch` image printed "Skipped pulling layers
-    without file name", wrote 0 files, and exited 0. Deciding on the exit code
-    would report a hit with nothing extracted, and nothing downstream would
-    know to fall back to the legacy reader.
+    Run 31268159790: webarena/shopping missed and spent two hours re-downloading
+    41 GB, and the log could not say why, because the idiom of the day threw the
+    error away. The manifest fetch is now the only thing that can explain a
+    miss, so its stderr has to survive.
     """
-    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo "FORMAT=$DCACHE_HIT_FORMAT"',
-                   tmp_path, fake_oras=ORAS_LEGACY_TAG, fake_docker="exit 0")
-    assert "FORMAT=legacy" in r.stdout, (
-        f"a legacy tag was read as an oras hit: {r.stdout!r} {r.stderr!r}")
+    r, _ = run('dcache_pull reg/x:t out || echo MISS', tmp_path,
+               fake_oras='echo "denied: requested access to the resource is denied" >&2\nexit 1\n')
+    assert "MISS" in r.stdout, r.stderr
+    assert "denied" in r.stderr, f"the miss swallowed its cause: {r.stderr!r}"
 
 
-def test_migration_pushes_only_the_entry_it_read(tmp_path):
-    """$dest is the SHARED datasets dir, not a clean directory.
+def test_a_non_artifact_tag_fails_loudly_instead_of_missing(tmp_path):
+    """The legacy format is no longer read — and that must not read as a miss.
 
-    The first version of dcache__migrate_legacy_hit pushed `find . -type f`
-    over $dest. On a runner that is DATASETS_DIR — every other image's inputs
-    and the multi-tens-of-GB upstream tars — so a legacy hit would have
-    replaced a good cache tag with an artifact containing all of it. The
-    round-trip test missed it because its destination was an empty temp dir,
-    where "everything in $dest" and "what the entry held" coincide.
+    A miss sends the caller off to re-derive; for wikipedia that is a ~24-hour,
+    ~95 GB upstream fetch, spent because a tag held the wrong FORMAT rather
+    than because anything was actually missing. Fail, and name the way out.
     """
-    dest = tmp_path / "datasets"
-    dest.mkdir()
-    # A neighbour that must never be swept into this image's cache entry.
-    (dest / "someone-elses-40gb-upstream.tar").write_text("not mine")
-    # A fake docker whose `export` emits a tar holding just this entry's file.
-    fake_docker = (
-        'case "$1" in\n'
-        '  pull) exit 0 ;;\n'
-        '  create) echo cid; exit 0 ;;\n'
-        f'  export) tar -cf - -C {tmp_path} entry.dat; exit 0 ;;\n'
-        '  *) exit 0 ;;\n'
-        'esac\n'
-    )
-    (tmp_path / "entry.dat").write_text("mine")
-    r, calls = run(f'dcache_pull reg/x:t {dest} "entry*"', tmp_path,
-                   fake_oras=ORAS_LEGACY_TAG, fake_docker=fake_docker)
-    push = [c for c in calls if c.startswith("oras push")]
-    assert push, f"no migration push happened at all: {calls} {r.stderr}"
-    assert "someone-elses-40gb-upstream.tar" not in push[0], (
-        f"the migration swept up an unrelated dataset: {push[0]}")
-    assert "entry.dat" in push[0], push[0]
+    r, calls = run('dcache_pull reg/x:t out || echo MISS', tmp_path,
+                   fake_oras=ORAS_NOT_AN_ARTIFACT)
+    assert r.returncode != 0, f"a non-artifact tag was tolerated: {r.stdout!r}"
+    assert "MISS" not in r.stdout, "a format problem was reported as a cache miss"
+    assert "not an oras artifact" in r.stderr, r.stderr
+    # The operator has to be told how to get out of it, not just what broke.
+    assert "RECIPE" in r.stderr, r.stderr
 
 
-def test_no_migrate_leaves_the_entry_alone(tmp_path):
-    """wikipedia's ~88 GB entry must not convert as a side effect of a build."""
-    r, calls = run('DCACHE_NO_MIGRATE=1 dcache_pull reg/x:t out "*.dat" && echo HIT',
-                   tmp_path, fake_oras=ORAS_LEGACY_TAG,
-                   fake_docker=fake_docker_serving(tmp_path, "a.dat"))
-    assert "HIT" in r.stdout, r.stderr
-    assert not any(c.startswith("oras push") for c in calls), (
-        f"an opted-out entry was migrated anyway: {calls}")
+def test_no_legacy_reader_remains(tmp_path):
+    """The deletion is the feature; a reader that creeps back is a regression.
+
+    `docker pull` of a cache ref, `docker export`, the migration push and the
+    DCACHE_NO_MIGRATE opt-out were one mechanism, and half of it returning
+    would be worse than all of it: a partially-restored fallback is a path
+    nothing on the fleet exercises.
+    """
+    code = "\n".join(l for l in LIB.read_text().splitlines()
+                      if not l.lstrip().startswith("#"))
+    for gone in ("docker pull", "docker export", "docker create",
+                 "DCACHE_NO_MIGRATE", "migrate_legacy_hit", "HIT_FORMAT=legacy"):
+        assert gone not in code, f"the legacy cache reader is back: {gone!r}"
+
+
+def test_a_pull_takes_no_filter_argument(tmp_path):
+    """#79's wildcard was a property of `docker export`, which is gone.
+
+    oras writes a layer as a file only when it carries an
+    `org.opencontainers.image.title`, so an artifact read has nothing injected
+    to filter out. A third argument now means a caller was left un-migrated.
+    """
+    src = LIB.read_text()
+    assert "local ref=$1 dest=$2\n" in src, (
+        "dcache_pull still binds a third positional argument")
 
 
 # --- a broken transfer is not a miss -----------------------------------------
@@ -352,57 +327,9 @@ def test_no_migrate_leaves_the_entry_alone(tmp_path):
 RESET = "failed to copy: read tcp: read: connection reset by peer"
 
 
-def flaky(cmd, fail_times, tmp_path, then="exit 0"):
-    """A fake CMD that fails `fail_times` times, then succeeds.
-
-    The counter is a file because each invocation is a fresh process.
-    """
-    return (
-        f'n=$(cat {tmp_path}/{cmd}.n 2>/dev/null || echo 0); n=$((n+1));'
-        f' echo $n > {tmp_path}/{cmd}.n\n'
-        f'if [ "$n" -le {fail_times} ]; then echo "{RESET}" >&2; exit 1; fi\n'
-        f'{then}\n'
-    )
-
-
 def test_a_reset_transfer_is_retried_rather_than_called_a_miss(tmp_path):
-    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" '
-                   '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
-                   fake_oras=ORAS_LEGACY_TAG,
-                   fake_docker=flaky("docker", 1, tmp_path,
-                                     then=fake_docker_serving(tmp_path, "a.dat")),
-                   env={"DCACHE_NO_MIGRATE": "1"})
-    assert "FORMAT=legacy" in r.stdout, (
-        f"a transient reset was reported as a cache miss: {r.stdout!r} {r.stderr!r}")
-    assert len([c for c in calls if c.startswith("docker pull")]) == 2, calls
-
-
-def test_an_absent_entry_misses_immediately_without_burning_retries(tmp_path):
-    """A first build of a NEW image has no entry, and must not pay 3 attempts.
-
-    This is why presence is decided by the manifest and not by the transfer:
-    an absent ref returns no manifest, so there is nothing to retry.
-    """
-    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" || echo MISS',
-                   tmp_path, fake_oras="exit 1", fake_docker="exit 1")
-    assert "MISS" in r.stdout, r.stderr
-    assert len([c for c in calls if c.startswith("docker pull")]) == 1, (
-        f"an absent entry was retried: {calls}")
-
-
-def test_a_persistently_broken_transfer_still_misses_and_says_why(tmp_path):
-    """Retries are bounded; the operator still gets the underlying error."""
-    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" || echo MISS',
-                   tmp_path, fake_oras=ORAS_LEGACY_TAG, fake_docker=f'echo "{RESET}" >&2; exit 1')
-    assert "MISS" in r.stdout, r.stderr
-    assert len([c for c in calls if c.startswith("docker pull")]) == 3, calls
-    assert "connection reset by peer" in r.stderr, (
-        f"the real cause was swallowed: {r.stderr}")
-
-
-def test_a_reset_oras_transfer_is_retried_too(tmp_path):
-    """The oras path is where the fleet ends up; it must not regress to no-retry."""
-    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" '
+    """The oras path is the only path left; it must not regress to no-retry."""
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out '
                    '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
                    fake_oras=oras_artifact(blob_fetch=(
                        f'  n=$(cat {tmp_path}/o.n 2>/dev/null || echo 0); n=$((n+1));'
@@ -412,7 +339,16 @@ def test_a_reset_oras_transfer_is_retried_too(tmp_path):
                        '  while [ $# -gt 0 ]; do\n'
                        '    case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac\n'
                        '  done\n'
-                       '  printf %s payload > "$out"; exit 0\n')),
-                   fake_docker="exit 1")
+                       '  printf %s payload > "$out"; exit 0\n')))
     assert "FORMAT=oras" in r.stdout, (
-        f"a reset oras pull was not retried: {r.stdout!r} {r.stderr!r}")
+        f"a transient reset was reported as a cache miss: {r.stdout!r} {r.stderr!r}")
+
+
+# --- writes ------------------------------------------------------------------
+
+
+def test_a_push_retries_three_times_then_exits_nonzero(tmp_path):
+    r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_push reg/x:t . a.dat; echo "rc=$?"',
+                   tmp_path, fake_oras="exit 1")
+    assert len([c for c in calls if c.startswith("oras push")]) == 3, calls
+    assert r.returncode != 0, "a failed push must be fatal (#80)"

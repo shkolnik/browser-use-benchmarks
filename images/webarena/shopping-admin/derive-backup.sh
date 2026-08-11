@@ -14,8 +14,8 @@
 #   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
 
-# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
-# to the legacy `FROM scratch` image, and pushes new entries as oras.
+# builder/stage-lib/derive-cache.sh: reads and writes this fleet's derived-inputs
+# cache entries as oras artifacts.
 . "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 UPSTREAM_TAR="$DATASETS_DIR/shopping_admin_final_0719.tar"
@@ -46,7 +46,7 @@ assert_dump_complete() {
 }
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if dcache_pull "$CACHE" "$DATASETS_DIR" 'shopping_admin_*'; then
+if dcache_pull "$CACHE" "$DATASETS_DIR"; then
   assert_dump_complete shopping_admin_db.sql.gz
   echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0

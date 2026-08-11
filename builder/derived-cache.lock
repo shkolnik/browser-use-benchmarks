@@ -1,8 +1,8 @@
 # Digest lock for the derived-inputs GHCR cache (see #42).
 #
 # One entry per line: `<ref> sha256:<64 hex>`. `dcache_require` (in
-# builder/stage-lib/derive-cache.sh) is called by each of the six
-# derive-backup.sh scripts right after a `dcache_pull` miss:
+# builder/stage-lib/derive-cache.sh) is called by each of the seven derive
+# scripts right after a `dcache_pull` miss:
 #   - ref PRESENT here + miss  -> fatal: the entry we depend on is gone.
 #   - ref ABSENT here + miss   -> not fatal: a new image, or a deliberate
 #     RECIPE bump, is expected to derive from scratch.
@@ -11,36 +11,41 @@
 #     .github/workflows/build.yml's workflow_dispatch input).
 #
 # WHAT IS AND IS NOT ENFORCED. `dcache_require` matches on the REF; the digest
-# column is a provenance record, not a comparison. That is deliberate for this
-# wave: every one of these six entries is still the legacy `FROM scratch`
-# image, and each will be REPUBLISHED as an oras artifact — with a different
-# manifest digest — the first time its image is rebuilt. Enforcing the digest
-# today would turn the migration these very digests describe into six red
-# builds. Once the fleet has converted, re-resolve them and tighten this to a
-# real comparison; `dcache_push` already prints the line to paste in.
+# column is a provenance record, not a comparison. The reason for that has now
+# changed. It used to be that enforcing would have failed the very migration
+# these digests described, because each entry's digest changed the first time
+# it was republished as an oras artifact. That migration is complete — see
+# below — so the remaining reason is narrower: a digest comparison belongs on
+# the HIT path in `dcache_pull`, not in `dcache_require`, which by construction
+# only runs after a MISS and so never has a digest to compare. Wiring that up
+# is its own change; these digests are what it will be wired to.
 #
-# Every digest below was resolved against the LIVE registry on 2026-08-08,
+# Every digest below was re-resolved against the LIVE registry on 2026-08-11,
 # never invented or copied from a log: a bearer token was minted from
 # `gh auth token` via https://ghcr.io/token, then each ref's manifest was
 # fetched from https://ghcr.io/v2/shkolnik/<package>/manifests/<tag> with
-# Accept listing both application/vnd.oci.image.index.v1+json and
-# application/vnd.docker.distribution.manifest.v2+json (the wrong Accept
-# header silently returns a different manifest, and therefore a different,
-# WRONG digest). The Docker-Content-Digest response header was cross-checked
-# against sha256 of the raw manifest body for two of the six and matched
-# exactly; see the Task 4 report for the full command and every pair.
+# Accept listing the OCI manifest, the OCI index and the Docker v2 manifest
+# types (the wrong Accept header silently returns a different manifest, and
+# therefore a different, WRONG digest). For ALL SEVEN the Docker-Content-Digest
+# response header was cross-checked against sha256 of the raw manifest body and
+# matched exactly, and all seven reported
+# `artifactType: application/vnd.unknown.artifact.v1` — that is the check that
+# says the fleet has fully converted and the legacy reader could be deleted.
 #
-# Wikipedia IS pinned, and its case is the reverse of the other six. Task 3
-# left its WRITE path on the legacy format, so its entry is the one that
-# will NOT be republished with a new digest by the migration — and it
-# guards the most expensive miss in the fleet: a ~24-hour, ~95 GB upstream
-# fetch, now that the lab mirror is gone from its manifest. Excluding it
-# would leave the costliest re-download as the only unguarded one.
+# Wikipedia was the last entry to convert, and it did not convert the way the
+# others did: its ~95 GB of parts were fetched blob-by-blob from the legacy
+# manifest, verified against the ZIM pin in image.toml, and republished through
+# `dcache_push` (PR #34). Its previous legacy manifest,
+# sha256:1de4846366e0ac1940e486e5f48463ae27cbe7f9937fac1db42ec8915fe1d2c6, is
+# still addressable by digest until GHCR collects it — the recovery handle if
+# the republished entry ever proves wrong. It guards the most expensive miss in
+# the fleet: a ~24-hour, ~95 GB upstream fetch, now that the lab mirror is gone
+# from its manifest.
 
-ghcr.io/shkolnik/vwa-classifieds-derived:a2a794da92f6-r1 sha256:b13e9c247c2e911e6280f4b531f54150d7e5a477b672c64af3b56bb72060fc43
-ghcr.io/shkolnik/webarena-gitlab-derived:6269a90527a6-r1 sha256:b9cb548076631ed13c4891cd5003f8406309a48a622bd915228e0f25557a2b05
-ghcr.io/shkolnik/webarena-reddit-derived:6ff70f73bc80-r2 sha256:4d2840dd215d1ad267810c0ccfaa4522849e112e47f3590565b84b16ac0a18fb
-ghcr.io/shkolnik/webarena-shopping-derived:2052430ee930-r2 sha256:6c365e9621848a2d944306640a3c69687e7f6be39969a24ee6ed8ad64b697857
-ghcr.io/shkolnik/webarena-shopping-admin-derived:ad607557a79f-r2 sha256:4d271dd0c0368b7b86c894f3c5252043f62b8556231d7325260fd608ec08e1e6
-ghcr.io/shkolnik/webshop-server-derived:fbb2df1f2a0e-r1 sha256:7f704ee115a403da9968a27d63a6684b8dc5a70361fc6849d6a5af8e9502ea28
-ghcr.io/shkolnik/webarena-wikipedia-derived:f12163513307-r1 sha256:1de4846366e0ac1940e486e5f48463ae27cbe7f9937fac1db42ec8915fe1d2c6
+ghcr.io/shkolnik/vwa-classifieds-derived:a2a794da92f6-r1 sha256:57347cf87227ddd766d987afbeb1ccc7f6059e3177474ae758d72763118321e8
+ghcr.io/shkolnik/webarena-gitlab-derived:6269a90527a6-r1 sha256:603ad315204a51f4f50525b539ec4edc68b363a44dee4fc881f59884252bdd57
+ghcr.io/shkolnik/webarena-reddit-derived:6ff70f73bc80-r2 sha256:c3bcda00518947929deaf6076ba2ed9cb8cd943a9fd54081393a09f6055db962
+ghcr.io/shkolnik/webarena-shopping-derived:2052430ee930-r2 sha256:1e818eec8c4950b5d07f3c6336eee3b2532e84211db7c1d353e5ccdb2b658fd8
+ghcr.io/shkolnik/webarena-shopping-admin-derived:ad607557a79f-r2 sha256:c3efef0e156851b0fe17f9c062bc7cfaf51835bdc68933568a4a362aa0720599
+ghcr.io/shkolnik/webshop-server-derived:fbb2df1f2a0e-r1 sha256:b0a5777a5d2e1d46cad69ccd7c646456d77cc8a3a0a4a79987d61a2216b4ba65
+ghcr.io/shkolnik/webarena-wikipedia-derived:f12163513307-r1 sha256:7184991800ee212a1626a2fc021e3125411a53939f5d15000d5e4c6550f0ddd2
