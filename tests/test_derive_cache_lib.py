@@ -4,7 +4,10 @@ The round trip against a real registry lives in tests/integration/. These
 cover the decision table: which format is tried first, what a miss returns,
 and that a failed push is fatal exactly as #80 requires.
 """
+import hashlib
+import json
 import os
+import shlex
 import subprocess
 import textwrap
 from pathlib import Path
@@ -14,15 +17,56 @@ import pytest
 LIB = Path(__file__).resolve().parent.parent / "builder" / "stage-lib" / "derive-cache.sh"
 
 
+def oras_artifact(files=(("a.dat", "payload"),), blob_fetch=None):
+    """A fake `oras` serving a real artifact: a manifest, and digest-exact blobs.
+
+    The digests are the true sha256 of what the fake writes, because
+    dcache__fetch_blobs decides whether a layer is already on disk by hashing
+    it. A fake with invented digests would model a registry that always lies,
+    and every skip-if-present test would pass for the wrong reason.
+
+    blob_fetch overrides the `blob fetch` body — for modelling a transfer that
+    dies partway.
+    """
+    layers, cases = [], []
+    for name, content in files:
+        raw = content.encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        layers.append({
+            "digest": "sha256:" + digest,
+            "size": len(raw),
+            "annotations": {"org.opencontainers.image.title": name},
+        })
+        cases.append(f'    {digest}) printf %s {shlex.quote(content)} > "$out" ;;')
+    manifest = json.dumps(
+        {"artifactType": "application/vnd.beep.derived.v1", "layers": layers})
+    serve = blob_fetch or (
+        '  shift 2; out=""; ref=""\n'
+        '  while [ $# -gt 0 ]; do\n'
+        '    case "$1" in --output) out=$2; shift 2 ;; *) ref=$1; shift ;; esac\n'
+        '  done\n'
+        '  case "${ref##*@sha256:}" in\n'
+        + "\n".join(cases) + "\n"
+        '    *) echo "no such blob" >&2; exit 1 ;;\n'
+        '  esac\n'
+        '  exit 0\n'
+    )
+    return (
+        'if [ "$1 $2" = "manifest fetch" ]; then\n'
+        f'  echo {shlex.quote(manifest)}\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1 $2" = "blob fetch" ]; then\n'
+        + serve +
+        'fi\n'
+        'exit 0\n'
+    )
+
+
 # The default fake answers `manifest fetch` the way a real artifact pushed by
 # this library does. That is the signal dcache_pull decides on, so a fake that
 # stayed silent would model a tag that exists in no registry.
-ORAS_ARTIFACT = (
-    'if [ "$1 $2" = "manifest fetch" ]; then\n'
-    '  echo \'{"artifactType":"application/vnd.beep.derived.v1","layers":[]}\'\n'
-    'fi\n'
-    'exit 0\n'
-)
+ORAS_ARTIFACT = oras_artifact()
 # A legacy `FROM scratch` image: no artifactType, and — measured live against a
 # real registry with oras 1.3.3 on 2026-08-08 — `oras pull` still exits 0 while
 # writing nothing at all. Treating that as a hit is the false-hit bug.
@@ -57,10 +101,126 @@ def test_the_library_exists():
 def test_a_pull_prefers_the_oras_artifact(tmp_path):
     r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path)
     assert "HIT" in r.stdout, r.stderr
-    assert any(c.startswith("oras pull") for c in calls), calls
+    assert any(c.startswith("oras blob fetch") for c in calls), calls
     # The whole point of preferring the artifact: no legacy image is fetched,
     # so the ~2x local-storage cost of holding a cache image is never paid.
     assert not any(c.startswith("docker pull") for c in calls), calls
+    assert (tmp_path / "out" / "a.dat").read_text() == "payload"
+
+
+def test_every_layer_lands_as_its_own_file(tmp_path):
+    """Blob-by-blob must extract exactly what `oras pull` would have."""
+    files = (("a.dat", "one"), ("b.dat", "two"), (".sizes", "three"))
+    r, _ = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path,
+               fake_oras=oras_artifact(files))
+    assert "HIT" in r.stdout, r.stderr
+    for name, content in files:
+        assert (tmp_path / "out" / name).read_text() == content
+
+
+def test_a_layer_already_on_disk_is_not_fetched_again(tmp_path):
+    """The whole point: an interrupted pull keeps what it finished.
+
+    Runs 31460767854 and 31464177083 failed six times against wikipedia's
+    95 GB entry, and one of those attempts transferred 19 GB correctly before
+    being cut off — then threw it away, because `oras pull` restarts from
+    zero. With interruptions arriving every 10-15 minutes and a clean pull
+    needing ~19, that loop never terminates however many retries it gets.
+    """
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dat").write_text("payload")   # already complete and correct
+    _, calls = run(f'dcache_pull reg/x:t {dest} "*.dat"', tmp_path,
+                   fake_oras=oras_artifact((("a.dat", "payload"), ("b.dat", "more"))))
+    fetched = [c for c in calls if c.startswith("oras blob fetch")]
+    assert len(fetched) == 1, f"a completed layer was re-fetched: {fetched}"
+    assert "b.dat" in fetched[0], fetched[0]
+
+
+def test_a_truncated_leftover_is_refetched_not_trusted(tmp_path):
+    """A killed transfer leaves a short file; resuming must not accept it."""
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dat").write_text("payl")      # the interrupted write
+    _, calls = run(f'dcache_pull reg/x:t {dest} "*.dat"', tmp_path)
+    assert any("a.dat" in c for c in calls if c.startswith("oras blob fetch")), calls
+    assert (dest / "a.dat").read_text() == "payload"
+
+
+def test_a_leftover_of_the_right_size_but_wrong_bytes_is_refetched(tmp_path):
+    """Size is the cheap screen, not the verdict.
+
+    Skipping on size alone would hand a benchmark image corrupt data that no
+    later step re-checks: oras verifies what IT downloads, and nothing else
+    verifies what a previous run left behind.
+    """
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dat").write_text("PAYLOAD")   # same length, different bytes
+    _, calls = run(f'dcache_pull reg/x:t {dest} "*.dat"', tmp_path)
+    assert any("a.dat" in c for c in calls if c.startswith("oras blob fetch")), calls
+    assert (dest / "a.dat").read_text() == "payload"
+
+
+def test_a_layer_title_that_escapes_the_destination_is_refused(tmp_path):
+    """The title is registry-controlled and is used as a path."""
+    r, _ = run('dcache_pull reg/x:t out "*.dat" || echo REFUSED', tmp_path,
+               fake_oras=oras_artifact(((".././../etc/cron.d/x", "evil"),)))
+    assert "not a bare filename" in r.stderr, r.stderr
+    assert not (tmp_path / "etc").exists()
+
+
+def test_an_interrupted_pass_resumes_instead_of_restarting(tmp_path):
+    """Pass 2 must re-fetch only what pass 1 did not finish."""
+    # Dies on b.dat the first time it is asked for, serves it the second.
+    serve = (
+        '  shift 2; out=""; ref=""\n'
+        '  while [ $# -gt 0 ]; do\n'
+        '    case "$1" in --output) out=$2; shift 2 ;; *) ref=$1; shift ;; esac\n'
+        '  done\n'
+        f'  case "$out" in *b.dat)\n'
+        f'    n=$(cat {tmp_path}/b.n 2>/dev/null || echo 0); n=$((n+1));'
+        f' echo $n > {tmp_path}/b.n\n'
+        '    if [ "$n" = 1 ]; then\n'
+        '      echo "stream error: PROTOCOL_ERROR; received from peer" >&2; exit 1\n'
+        '    fi\n'
+        '    printf %s two > "$out"; exit 0 ;;\n'
+        '  esac\n'
+        '  printf %s one > "$out"; exit 0\n'
+    )
+    r, calls = run('dcache_pull reg/x:t out "*.dat" && echo HIT', tmp_path,
+                   fake_oras=oras_artifact((("a.dat", "one"), ("b.dat", "two")),
+                                           blob_fetch=serve),
+                   env={"DCACHE_RETRY_SLEEP": "0"})
+    assert "HIT" in r.stdout, r.stderr
+    fetched = [c for c in calls if c.startswith("oras blob fetch")]
+    # a.dat once (pass 1, kept), b.dat twice (failed, then retried in pass 2).
+    assert len([c for c in fetched if "a.dat" in c]) == 1, fetched
+    assert len([c for c in fetched if "b.dat" in c]) == 2, fetched
+    assert "PROTOCOL_ERROR" in r.stderr, r.stderr
+
+
+def test_a_persistently_interrupted_pull_gives_up_after_its_passes(tmp_path):
+    r, calls = run('dcache_pull reg/x:t out "*.dat"; echo "rc=$?"', tmp_path,
+                   fake_oras=oras_artifact(blob_fetch='  echo boom >&2; exit 1\n'),
+                   env={"DCACHE_PULL_TRIES": "3", "DCACHE_RETRY_SLEEP": "0"})
+    assert "rc=0" not in r.stdout, r.stdout
+    assert len([c for c in calls if c.startswith("oras blob fetch")]) == 3, calls
+
+
+def test_a_failed_transfer_reports_all_of_its_output(tmp_path):
+    """The old `tail -n 3` is why run 31460767854's log could not be read.
+
+    On a concurrent pull the last three lines are chosen by interleaving, not
+    by relevance — and the attempt whose failure is fatal printed nothing at
+    all, because only non-final attempts were logged.
+    """
+    noisy = "\n".join(f'  echo "line{i}"' for i in range(1, 6)) + "\n  exit 1\n"
+    r, _ = run('dcache_pull reg/x:t out "*.dat" || true', tmp_path,
+               fake_oras=oras_artifact(blob_fetch=noisy),
+               env={"DCACHE_PULL_TRIES": "1", "DCACHE_RETRY_SLEEP": "0"})
+    for i in range(1, 6):
+        assert f"line{i}" in r.stderr, r.stderr
 
 
 def test_a_pull_falls_back_to_the_legacy_image(tmp_path):
@@ -244,12 +404,15 @@ def test_a_reset_oras_transfer_is_retried_too(tmp_path):
     """The oras path is where the fleet ends up; it must not regress to no-retry."""
     r, calls = run('DCACHE_RETRY_SLEEP=0 dcache_pull reg/x:t out "*.dat" '
                    '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path,
-                   fake_oras=(
-                       'if [ "$1 $2" = "manifest fetch" ]; then\n'
-                       '  echo \'{"artifactType":"application/vnd.beep.derived.v1"}\'\n'
-                       '  exit 0\n'
-                       'fi\n'
-                       + flaky("oraspull", 1, tmp_path)),
+                   fake_oras=oras_artifact(blob_fetch=(
+                       f'  n=$(cat {tmp_path}/o.n 2>/dev/null || echo 0); n=$((n+1));'
+                       f' echo $n > {tmp_path}/o.n\n'
+                       f'  if [ "$n" = 1 ]; then echo "{RESET}" >&2; exit 1; fi\n'
+                       '  shift 2; out=""\n'
+                       '  while [ $# -gt 0 ]; do\n'
+                       '    case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac\n'
+                       '  done\n'
+                       '  printf %s payload > "$out"; exit 0\n')),
                    fake_docker="exit 1")
     assert "FORMAT=oras" in r.stdout, (
         f"a reset oras pull was not retried: {r.stdout!r} {r.stderr!r}")
