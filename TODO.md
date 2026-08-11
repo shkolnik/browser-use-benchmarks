@@ -22,20 +22,35 @@ MIGRATION WAVE IS DONE — all six eligible datasets converted during run 312848
 oras artifacts on GHCR now (verified against live manifests: artifactType
 `application/vnd.unknown.artifact.v1`, push timestamps inside that run's window). That run
 concluded "failure" only because of wikipedia transfer/nginx readiness issues, fixed in PR #24
-(merged 2026-08-09); the migrations landed anyway. `webarena-wikipedia-derived:f12163513307-r1`
-remains legacy BY DESIGN (`DCACHE_NO_MIGRATE=1` held; confirmed again in run 31293520004).
+(merged 2026-08-09); the migrations landed anyway.
+
+WIKIPEDIA IS CONVERTED TOO (2026-08-11, branch `wikipedia-cache-oras`). It could never migrate
+opportunistically — ~88 GB inside a 300-min CI budget — so it was converted out of band without
+re-deriving: the legacy manifest's 13 blobs were fetched straight from GHCR, each verified
+against its manifest digest, extracted, checked (12 parts == image.toml's outputs; sizes ==
+the manifest; concatenated sha256 == the ZIM pin `f1216351…eea021`; both Xapian indexes still
+whole inside one part), then re-pushed through `dcache_push`. The tag now resolves to
+`sha256:7184991800ee212a1626a2fc021e3125411a53939f5d15000d5e4c6550f0ddd2`, artifactType
+`application/vnd.unknown.artifact.v1`, 13 layers, sizes identical to the verified bytes. The
+old legacy manifest `sha256:1de48463…d2c6` stays reachable by digest until GHCR GCs it —
+that's the recovery handle if anything is wrong.
 
 REMAINING before this closes:
 1. Observe one real oras read (`cache hit (oras)` / `DCACHE_HIT_FORMAT=oras`). No run has
-   taken it yet — every build since skips derive entirely via the prepare-outputs reuse stamp,
-   so the oras read path is exercised only by tests. May need to force one by invalidating a
-   reuse stamp.
-2. Re-resolve the six migrated digests in `builder/derived-cache.lock` — the lock still holds
-   the pre-migration legacy digests (only wikipedia's still matches the registry).
+   taken it yet — every build since skips derive entirely via the prepare-outputs reuse stamp.
+   `wikipedia-cache-oras` edits `split-zim.sh`, which changes its `script_sha256` and so
+   invalidates the reuse stamp: that build re-runs prepare and takes the oras read for real.
+2. Re-resolve ALL SEVEN digests in `builder/derived-cache.lock` — every line there is now a
+   pre-migration legacy digest, wikipedia's included. Six were re-resolved against the live
+   registry on 2026-08-11 (values in the branch's PR body); wikipedia's is the digest above.
+   Deliberately NOT done in `wikipedia-cache-oras`: `builder/**` is a shared build input, so
+   editing the lock rebuilds the whole fleet for a hex change. It lands with item 4.
 3. Tighten `dcache_require` to a real digest comparison (`derive-cache.sh` ~309-334 is still
    ref-only, deliberately per commit ad73a9d).
-4. Delete the legacy-fallback branch in `dcache_pull` — only after wikipedia is re-derived and
-   pushed as oras, since its entry is still legacy.
+4. Delete the legacy-fallback branch in `dcache_pull`, plus `dcache__migrate_legacy_hit` and
+   `DCACHE_NO_MIGRATE`, and the now-dead `FILTER` argument at all seven call sites. Unblocked
+   once the `wikipedia-cache-oras` build is green — nothing in the fleet reads legacy after
+   that.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 
