@@ -113,6 +113,143 @@ for layer in m.get("layers", []):
 '
 }
 
+# dcache__scheme REGISTRY
+#
+# localhost is implicitly insecure — the same rule Docker itself applies, and
+# what lets the round-trip test run against a plain-HTTP `registry:2`.
+dcache__scheme() {
+  case $1 in
+    localhost|localhost:*|127.0.0.1|127.0.0.1:*) echo http ;;
+    *) echo https ;;
+  esac
+}
+
+# dcache__registry_creds REGISTRY — prints `user:password`, or nothing.
+#
+# Read from the Docker config `docker login` already writes, so this library
+# needs no credentials of its own; on the runner that is the GITHUB_TOKEN the
+# `login to ghcr` step logs in with. Nothing is printed when the entry is
+# missing or held by a credential helper, and an anonymous token is tried
+# instead — which is enough for a public package, and for a private one the
+# fetch then fails loudly rather than writing a 401 body into a blob file.
+dcache__registry_creds() {
+  python3 - "$1" <<'PY'
+import base64, json, os, sys
+registry = sys.argv[1]
+path = os.path.join(os.environ.get("DOCKER_CONFIG") or
+                    os.path.expanduser("~/.docker"), "config.json")
+try:
+    with open(path) as fh:
+        auths = (json.load(fh) or {}).get("auths") or {}
+except (OSError, ValueError):
+    sys.exit(0)
+for key in (registry, "https://" + registry, "https://" + registry + "/v1/"):
+    entry = auths.get(key) or {}
+    if entry.get("auth"):
+        try:
+            print(base64.b64decode(entry["auth"]).decode())
+        except (ValueError, UnicodeDecodeError):
+            pass
+        break
+PY
+}
+
+# dcache__token REGISTRY REPO_PATH — prints a pull-scope bearer token, or
+# nothing when the registry does not use token auth (a local `registry:2`
+# wants no Authorization header at all, and sending one is not an error).
+dcache__token() {
+  local registry=$1 repo_path=$2 creds out url
+  url="$(dcache__scheme "$registry")://$registry/token?service=$registry&scope=repository:$repo_path:pull"
+  creds=$(dcache__registry_creds "$registry")
+  if [ -n "$creds" ]; then
+    out=$(curl -fsS -u "$creds" "$url" 2>/dev/null) || return 0
+  else
+    out=$(curl -fsS "$url" 2>/dev/null) || return 0
+  fi
+  printf '%s' "$out" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+print(d.get("token") or d.get("access_token") or "")
+'
+}
+
+# dcache__fetch_blob REPO DIGEST SIZE OUT
+#
+# One blob, resumed from whatever is already in OUT. This is the level below
+# `oras blob fetch`, and it exists because blob granularity turned out not to
+# be fine enough — see the note on dcache__fetch_blobs.
+#
+# The resume is a byte range and the check is the whole digest, which is the
+# only safe combination: a `Range` request can be answered by a different
+# backend than served the first half, a leftover file can be anything, and
+# appending to the wrong prefix produces a file of exactly the right SIZE and
+# the wrong content. So nothing is trusted until sha256 over the assembled
+# file matches, and a file that fails is deleted rather than resumed again —
+# otherwise a bad prefix is immortal, re-appended every pass forever.
+dcache__fetch_blob() {
+  local repo=$1 digest=$2 size=$3 out=$4
+  local registry=${repo%%/*} repo_path=${repo#*/}
+  local url have token code rc got
+  url="$(dcache__scheme "$registry")://$registry/v2/$repo_path/blobs/$digest"
+
+  have=0
+  # An `&&` one-liner here would return 1 when the file is absent, and every
+  # caller of this library runs under `set -e`.
+  if [ -f "$out" ]; then have=$(stat -c %s "$out"); fi
+  # At or past the full length and still not verified (the caller checked
+  # before calling), so the bytes are wrong, not incomplete. Resuming from
+  # here would ask for a range past the end and 416; start clean instead.
+  if [ "$have" -ge "$size" ]; then
+    rm -f "$out"
+    have=0
+  fi
+
+  local -a auth=()
+  token=$(dcache__token "$registry" "$repo_path")
+  [ -z "$token" ] || auth=(-H "Authorization: Bearer $token")
+
+  # -C - resumes at the current file length; without it curl truncates, which
+  # is the whole bug. -L because a registry answers a blob GET with a redirect
+  # to storage (curl drops the Authorization header across hosts, which is
+  # correct — the redirect URL carries its own signature).
+  : >>"$out"
+  if code=$(curl -fsS -L -C - "${auth[@]}" -w '%{http_code}' -o "$out" "$url"); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" != 0 ]; then
+    # 416 means the server would not honour the range, and 33 is curl's own
+    # "cannot resume". Both leave a file that can never complete, so drop it
+    # and let the next pass start from zero rather than loop on it.
+    case "$code:$rc" in
+      416:*|*:33)
+        rm -f "$out"
+        echo "derive-cache: range request refused (HTTP $code, curl $rc) —" \
+             "restarting $(basename "$out") from zero next pass" >&2
+        ;;
+    esac
+    return "$rc"
+  fi
+
+  got=$(stat -c %s "$out")
+  if [ "$got" != "$size" ]; then
+    echo "derive-cache: $(basename "$out") ended at $got of $size bytes" >&2
+    return 1
+  fi
+  if [ "$(sha256sum <"$out" | cut -d' ' -f1)" != "${digest#sha256:}" ]; then
+    rm -f "$out"
+    echo "derive-cache: $(basename "$out") completed but its sha256 does not" \
+         "match $digest — discarded, not resumed" >&2
+    return 1
+  fi
+  return 0
+}
+
 # dcache__fetch_blobs REF DEST MANIFEST
 #
 # The resumable replacement for `oras pull`. Fetches each layer separately and
@@ -136,10 +273,21 @@ for layer in m.get("layers", []):
 # arriving every 10-15 minutes and an uninterrupted pull needing ~19, whole-
 # transfer retries can fail forever while making real progress every time.
 #
-# Blob granularity is as far as this goes: a fetch that dies mid-blob still
-# loses that blob (up to ~9.6 GB), because resuming inside one needs HTTP
-# range requests and its own auth handling. Twelve resumable steps is the
-# difference between converging and not.
+# BLOB GRANULARITY WAS NOT ENOUGH. That was the first version's stated floor,
+# and run 31497034118 hit it twice in one run: vwa/classifieds (9 layers of
+# 8.59 GB) and webarena/gitlab (8.59, 8.59, 2.78) each burned all eight passes
+# on part-00 and never completed a single layer. The runner was getting under
+# ~15 MB/s, so an 8.59 GB layer needed ~10 minutes — the same period as the
+# teardowns. Two jobs, ~2 hours, zero bytes of progress, because a pass can
+# only skip what a previous pass FINISHED. Resumption coarser than the
+# interruption period does not converge; it just fails more slowly.
+#
+# So the unit is now the byte, not the blob (dcache__fetch_blob). Progress is
+# monotone regardless of how blob size compares to the interruption period: an
+# interruption costs the bytes in flight and nothing else. Yesterday's numbers
+# say both problems had to be present to deadlock — at the 82 MB/s measured
+# off-runner that layer takes 105 s and fits in any window — which is exactly
+# why the fix must not depend on either one.
 dcache__fetch_blobs() {
   local ref=$1 dest=$2 mf=$3
   # A tagged ref's repository is everything before the LAST colon; blobs are
@@ -147,7 +295,7 @@ dcache__fetch_blobs() {
   # `localhost:5000/x:t` because the port's colon is not the last one.
   local repo=${ref%:*}
   local passes=${DCACHE_PULL_TRIES:-8}
-  local layers pass digest size title f want failed
+  local layers pass digest size title f want failed have
 
   layers=$(printf '%s' "$mf" | dcache__layers) || return 1
   [ -n "$layers" ] || dcache__die "$ref carries no file layers — nothing to pull." \
@@ -165,14 +313,25 @@ dcache__fetch_blobs() {
       # file, so the common case is rejected without hashing 9.6 GB. Then the
       # digest — this is the ONLY check standing between a half-written file
       # left behind by a previous run and a benchmark image built on corrupt
-      # data. oras verifies what IT downloads; nothing else verifies what it
-      # finds already there.
+      # data. Nothing else verifies what a previous run left on disk, and with
+      # byte-range resume that partial file is now something we deliberately
+      # build on rather than something we merely tolerate.
       if [ -f "$f" ] && [ "$(stat -c %s "$f")" = "$size" ] \
          && [ "$(sha256sum <"$f" | cut -d' ' -f1)" = "$want" ]; then
         continue
       fi
+      # Announced HERE, not inside dcache__fetch_blob, because dcache__transfer
+      # captures its command's output and prints it only on failure — so a
+      # message about work that SUCCEEDS would never be seen. This line is how
+      # an operator watching a 95 GB pull can tell resumption is working,
+      # rather than inferring it from the absence of a complaint.
+      have=0
+      if [ -f "$f" ]; then have=$(stat -c %s "$f"); fi
+      if [ "$have" -gt 0 ] && [ "$have" -lt "$size" ]; then
+        echo "derive-cache: resuming $title at $have/$size bytes" >&2
+      fi
       if ! dcache__transfer "fetch of $title" 1 \
-             oras blob fetch --output "$f" "$repo@$digest"; then
+             dcache__fetch_blob "$repo" "$digest" "$size" "$f"; then
         # Stop the pass rather than grinding through the rest: whatever is
         # killing transfers is usually still doing it a second later, and the
         # sleep before the next pass is the point.
@@ -186,7 +345,7 @@ dcache__fetch_blobs() {
 
     if [ "$pass" != "$passes" ]; then
       echo "derive-cache: pass $pass/$passes of $ref was interrupted — retrying;" \
-           "layers already complete will be skipped, not re-fetched" >&2
+           "completed layers are skipped and a partial one resumes where it stopped" >&2
       sleep "${DCACHE_RETRY_SLEEP:-30}"
     fi
   done
