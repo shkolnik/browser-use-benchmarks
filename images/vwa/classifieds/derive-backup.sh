@@ -18,8 +18,8 @@
 #   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
 
-# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
-# to the legacy `FROM scratch` image, and pushes new entries as oras.
+# builder/stage-lib/derive-cache.sh: reads and writes this fleet's derived-inputs
+# cache entries as oras artifacts.
 . "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 # Pinned by digest rather than mirrored: the image is 76.86 GB, so hosting a tar
@@ -34,14 +34,14 @@ UPSTREAM_SHA=${UPSTREAM#*@sha256:}
 CACHE="$REGISTRY/vwa-classifieds-derived:${UPSTREAM_SHA:0:12}-$RECIPE"
 
 reassemble_outputs() {
-  # dcache_pull's filter (#79) already wrote the split parts straight into
-  # DATASETS_DIR for both hit formats — this just puts them back together.
+  # dcache_pull already wrote the split parts straight into DATASETS_DIR —
+  # this just puts them back together.
   cat "$DATASETS_DIR"/classifieds_uploads.tar.part-* > "$DATASETS_DIR/classifieds_uploads.tar"
   rm -f "$DATASETS_DIR"/classifieds_uploads.tar.part-*
 }
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if dcache_pull "$CACHE" "$DATASETS_DIR" 'classifieds_*'; then
+if dcache_pull "$CACHE" "$DATASETS_DIR"; then
   reassemble_outputs
   echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0

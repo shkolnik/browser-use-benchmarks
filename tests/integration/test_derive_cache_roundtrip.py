@@ -3,8 +3,9 @@
 tests/test_derive_cache_lib.py never touches a network or a real image; it
 only asserts on which commands the library invokes, with fake `oras`/`docker`
 standing in. This is the test that proves the library actually moves bytes
-correctly through both formats, and that a legacy hit really migrates the
-registry entry to oras — not just logs a line saying it tried.
+correctly, and that its two non-hit outcomes — an absent tag and a tag holding
+something that is not an artifact — behave against a REAL registry rather than
+against a fake's idea of one.
 """
 import hashlib
 import os
@@ -101,7 +102,7 @@ def test_oras_round_trip_is_byte_identical(tmp_path, registry, oras_tool_dir):
     assert r.returncode == 0, r.stderr
 
     dest = tmp_path / "dest"
-    r = _run(f'dcache_pull "{ref}" "{dest}" "*.txt" && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+    r = _run(f'dcache_pull "{ref}" "{dest}" && echo "FORMAT=$DCACHE_HIT_FORMAT"',
               tmp_path, oras_tool_dir)
     assert r.returncode == 0, r.stderr
     assert "FORMAT=oras" in r.stdout, r.stdout
@@ -110,61 +111,44 @@ def test_oras_round_trip_is_byte_identical(tmp_path, registry, oras_tool_dir):
     assert got == want, (got, want)
 
 
-def test_legacy_hit_falls_back_and_migrates(tmp_path, registry, oras_tool_dir):
-    ref = f"{registry}/dcache-test/legacy:t1"
-    files_dir = tmp_path / "legacy_src"
-    files_dir.mkdir()
-    (files_dir / "x_one.dat").write_bytes(b"legacy one\n")
-    (files_dir / "x_two.dat").write_bytes(b"legacy two\n")
-    want = {p.name: _sha(p) for p in files_dir.iterdir()}
+def test_an_absent_tag_is_a_miss(tmp_path, registry, oras_tool_dir):
+    """The one outcome that legitimately means "derive from scratch"."""
+    ref = f"{registry}/dcache-test/never-pushed:t1"
+    dest = tmp_path / "dest"
+    r = _run(f'DCACHE_RETRY_SLEEP=0 dcache_pull "{ref}" "{dest}" || echo MISS',
+             tmp_path, oras_tool_dir)
+    assert r.returncode == 0, r.stderr
+    assert "MISS" in r.stdout, (r.stdout, r.stderr)
 
-    # Build the legacy `FROM scratch` image exactly as the six derive scripts
-    # do today and push it — this is the format a real cache entry is in
-    # before this task's library ever touches it.
+
+def test_a_legacy_image_is_refused_rather_than_read(tmp_path, registry, oras_tool_dir):
+    """The old `FROM scratch` format is gone, and a tag still holding one fails.
+
+    Built and pushed exactly the way the six derive scripts used to, so this is
+    a real legacy entry, not a fake's approximation of one. Two things must be
+    true of the refusal: it is NOT reported as a miss — that would send a caller
+    off to re-derive, up to ~24 h for wikipedia, over a format mismatch — and it
+    leaves the destination untouched. `oras pull` of such a tag exits 0 while
+    writing nothing, so a reader that trusted the exit code would hand back an
+    empty directory and call it a hit.
+    """
+    ref = f"{registry}/dcache-test/legacy:t1"
     work = tmp_path / "legacy_work"
     work.mkdir()
-    for f in files_dir.iterdir():
-        shutil.copy(f, work / f.name)
-    dockerfile = "FROM scratch\n" + "".join(
-        f"COPY {f.name} /\n" for f in sorted(files_dir.iterdir()))
-    (work / "Dockerfile").write_text(dockerfile)
+    (work / "x_one.dat").write_bytes(b"legacy one\n")
+    (work / "x_two.dat").write_bytes(b"legacy two\n")
+    (work / "Dockerfile").write_text(
+        "FROM scratch\nCOPY x_one.dat /\nCOPY x_two.dat /\n")
     subprocess.run(["docker", "build", "-t", ref, str(work)],
-                    capture_output=True, text=True, check=True)
+                   capture_output=True, text=True, check=True)
     subprocess.run(["docker", "push", ref], capture_output=True, text=True, check=True)
     try:
-        # First pull: the registry only has the legacy image. dcache_pull
-        # must fall back and still return the files correctly.
-        dest1 = tmp_path / "dest1"
-        # NOT an empty directory. On a runner $dest is DATASETS_DIR, shared by
-        # every image and full of other people's inputs — and this fixture
-        # being clean is exactly why the first migration implementation, which
-        # pushed `find . -type f` over $dest, passed review. The neighbour
-        # below must never appear in the migrated artifact.
-        dest1.mkdir()
-        neighbour = dest1 / "someone-elses-upstream.tar"
-        neighbour.write_bytes(b"another image's 40GB input, in miniature\n")
-        r = _run(f'dcache_pull "{ref}" "{dest1}" "x_*" '
-                  '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path, oras_tool_dir)
-        assert r.returncode == 0, r.stderr
-        assert "FORMAT=legacy" in r.stdout, r.stdout
-        got = {p.name: _sha(p) for p in dest1.iterdir()
-               if p.is_file() and p.name != neighbour.name}
-        assert got == want, (got, want)
-
-        # #79 regression guard: `docker export` unfiltered would have dropped
-        # dev/, etc/, proc/, sys/ and .dockerenv alongside the real outputs.
-        names = _tree_names(dest1)
-        assert not (names & {"dev", "etc", "proc", "sys", ".dockerenv"}), names
-
-        # Second pull, fresh dest: the first pull's non-fatal migration must
-        # have replaced the registry's tag with an oras artifact — proven by
-        # actually re-reading the registry, not by inspecting a log line.
-        dest2 = tmp_path / "dest2"
-        r = _run(f'dcache_pull "{ref}" "{dest2}" "x_*" '
-                  '&& echo "FORMAT=$DCACHE_HIT_FORMAT"', tmp_path, oras_tool_dir)
-        assert r.returncode == 0, r.stderr
-        assert "FORMAT=oras" in r.stdout, r.stdout
-        got2 = {p.name: _sha(p) for p in dest2.iterdir() if p.is_file()}
-        assert got2 == want, (got2, want)
+        dest = tmp_path / "dest"
+        r = _run(f'dcache_pull "{ref}" "{dest}" || echo MISS', tmp_path, oras_tool_dir)
+        assert r.returncode != 0, f"a legacy entry was accepted: {r.stdout!r}"
+        assert "MISS" not in r.stdout, "a format mismatch was reported as a miss"
+        assert "not an oras artifact" in r.stderr, r.stderr
+        assert _tree_names(dest) == set(), (
+            f"a refused read still wrote into the destination: {_tree_names(dest)}")
     finally:
         subprocess.run(["docker", "rmi", "-f", ref], capture_output=True)

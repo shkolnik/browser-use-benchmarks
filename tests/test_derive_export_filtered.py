@@ -1,4 +1,5 @@
-"""Every `docker export` of a cache image must extract through a filter.
+"""No cache read may extract a `docker export` stream, and if one ever
+returns, it must extract through a filter.
 
 `docker export` does not hand back only the files a `FROM scratch` image
 COPYed in. Docker injects `/dev`, `/etc`, `/proc`, `/sys` and `/.dockerenv`
@@ -25,12 +26,13 @@ from pathlib import Path
 
 import pytest
 
-# The idiom used to live in each of the seven derive scripts under images/;
-# Task 3 of the derived-cache plan centralized the legacy extract into
-# builder/stage-lib/derive-cache.sh's dcache_pull, so the ONE place doing a
-# raw `docker export | tar` today is the library, not the per-site scripts.
-# Scan both trees so this guard keeps covering wherever the idiom actually
-# lives instead of going quietly vacuous.
+# The idiom used to live in each of the seven derive scripts under images/,
+# was centralized into builder/stage-lib/derive-cache.sh's legacy reader, and
+# is now gone entirely: every cache entry is an oras artifact, so nothing on
+# the fleet exports a container to read one. Scan both trees anyway. The
+# reasoning above is not obsolete, it is unexercised — the day someone reaches
+# for the idiom again, these rules are what they need, and a guard that only
+# exists while the thing it guards exists is no guard at all.
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = sorted((REPO / "images").glob("*/*/*.sh")) + \
     sorted((REPO / "builder" / "stage-lib").glob("*.sh"))
@@ -61,11 +63,17 @@ def _cases():
 CASES = _cases()
 
 
-def test_there_are_cases():
-    # One occurrence lives today, in the shared library's legacy fallback path
-    # (dcache_pull). A collection bug that found none would make every test
-    # below vacuous, and a vacuous suite looks like a green one.
-    assert len(CASES) >= 1, f"expected the fleet's export idiom, found {len(CASES)}"
+def test_the_idiom_is_gone():
+    """Zero occurrences is the expected state, not a collection bug.
+
+    Every derived-inputs entry is an oras artifact (builder/derived-cache.lock,
+    all seven re-resolved live on 2026-08-11), and dcache_pull reads only that
+    format. If this fails, either a legacy reader came back — in which case the
+    two parametrized rules below now apply to it — or the scan broke.
+    """
+    assert CASES == [], (
+        "a `docker export | tar` cache read is back on the fleet: "
+        f"{[str(c.values[0]) for c in CASES]}")
 
 
 @pytest.mark.parametrize("script,line", CASES)

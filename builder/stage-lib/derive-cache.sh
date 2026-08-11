@@ -4,22 +4,23 @@
 # Sourced, not executed — every function here must behave correctly whether
 # the caller runs under `set -euo pipefail` (every derive-backup.sh does) or
 # a looser mode, so a failure that should be fatal is a bare statement or an
-# explicit `exit`, and a failure that must NOT be fatal (the opportunistic
-# migration push below) is always wrapped so it cannot trip the caller's -e.
+# explicit `exit`.
 #
-# THE TWO FORMATS. Every one of the seven sites has, today, a `FROM scratch`
-# Docker image whose only content is the derived files (`docker create` +
-# `docker export | tar` reads it back — see #79 on why that extract must be
-# filtered). This library adds a second, preferred format: an oras artifact
-# at the SAME tag. A read tries oras first and falls back to the legacy image;
-# a legacy hit re-pushes the bytes it just extracted as oras, non-fatally, so
-# the format migrates on the next ordinary rebuild instead of a separate
-# multi-tens-of-GB transfer job. Writes always go out as oras.
+# ONE FORMAT: an oras artifact. This fleet's cache entries used to be `FROM
+# scratch` Docker images read back with `docker create` + `docker export | tar`
+# (#79 is why that extract needed a wildcard filter), and for one wave this
+# library read BOTH formats, re-pushing a legacy hit as oras so the fleet
+# converted on ordinary rebuilds. That wave is over: all seven entries in
+# builder/derived-cache.lock were confirmed `artifactType` artifacts against the
+# live registry on 2026-08-11, so the legacy reader, its migration push and the
+# DCACHE_NO_MIGRATE opt-out are gone rather than kept as untested code that
+# nothing on the fleet can reach. A tag that is somehow NOT an artifact is now
+# a loud failure, not a silent miss — see dcache_pull.
 #
 # Usage, from a derive script (after `set -euo pipefail`):
 #
 #   . "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
-#   if dcache_pull "$CACHE" "$DATASETS_DIR" '*gitlab*'; then
+#   if dcache_pull "$CACHE" "$DATASETS_DIR"; then
 #     ... reassemble split parts, as before ...
 #     exit 0
 #   fi
@@ -229,82 +230,37 @@ dcache_ensure_oras() {
   export PATH
 }
 
-# Opportunistic: the bytes for $2 are already on disk (a legacy hit just put
-# them there), so a failed migration push costs nothing but the format staying
-# legacy one more rebuild — the NEXT hit tries again. That is why this is a
-# single attempt with no retry/backoff (unlike dcache_push): #80's retry-then-
-# fail contract exists because a failed WRITE is the only copy of a finished
-# derivation; a failed migration risks nothing but trying again later, and
-# never allowed to fail the caller's build.
-dcache__migrate_legacy_hit() {
-  local ref=$1 dest=$2 extracted=$3
-
-  # Opt-out for entries too big to convert as a side effect of an ordinary
-  # build. Only wikipedia sets it: its entry is ~88 GB, and re-pushing that
-  # during a fleet run would add the upload to a job already sharing a
-  # 300-minute run budget. It converts when it is next re-derived, which is
-  # already an expensive, deliberate operation. Everything else migrates on
-  # first hit, paying only the upload for bytes it has just downloaded anyway.
-  if [ "${DCACHE_NO_MIGRATE:-}" = 1 ]; then
-    echo "derive-cache: DCACHE_NO_MIGRATE=1 — leaving $ref in its legacy format" >&2
-    return 0
-  fi
-
-  # Push EXACTLY what came out of the legacy entry, never "what is in $dest".
-  # $dest is DATASETS_DIR — the runner's shared datasets directory, holding
-  # every other image's inputs and the multi-tens-of-GB upstream tars. The
-  # first version of this function pushed `find . -type f` over that directory,
-  # which would have replaced a good cache tag with an artifact containing the
-  # entire datasets dir. It survived review because the round-trip test used a
-  # clean temp dir as the destination, where "everything in $dest" and "what
-  # the entry contained" are the same set. They are not the same on a runner.
-  local -a files=()
-  local f
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    case $f in */) continue ;; esac   # tar -v lists directories too
-    [ -f "$dest/$f" ] || continue
-    files+=("$f")
-  done <<<"$extracted"
-
-  if [ ${#files[@]} -eq 0 ]; then
-    echo "derive-cache: legacy hit for $ref extracted no files; not migrating" >&2
-    return 0
-  fi
-
-  ( cd "$dest" && oras push "$ref" "${files[@]}" ) >/dev/null 2>&1 \
-    || echo "derive-cache: opportunistic migration of $ref to oras failed; still legacy" >&2
-}
-
-# dcache_pull REF DEST_DIR FILTER
+# dcache_pull REF DEST_DIR
 #
 # Returns 0 on a hit with files written into DEST_DIR, 1 on a miss. Sets
-# DCACHE_HIT_FORMAT to "oras" or "legacy". FILTER is REQUIRED even though only
-# the legacy path uses it — #79: an unfiltered `docker export` drops Docker's
-# injected /dev, /etc, /proc, /sys and /.dockerenv into the shared datasets
-# dir, so there is no safe default and no caller may opt out.
+# DCACHE_HIT_FORMAT to "oras" on a hit.
 dcache_pull() {
-  local ref=$1 dest=$2 filter=$3
+  local ref=$1 dest=$2
   mkdir -p "$dest"
   dcache_ensure_oras
   DCACHE_HIT_FORMAT=
 
   # Exit code alone is NOT a hit signal — measured live (2026-08-08) against a
-  # tag that is still the legacy `FROM scratch` Docker image: `oras pull`
+  # tag that was still the legacy `FROM scratch` Docker image: `oras pull`
   # exits 0 and writes NOTHING, because oras only materializes a layer as a
   # file when it carries an `org.opencontainers.image.title` annotation, and
   # `docker build`'s COPY layers never set one. Trusting the exit code alone
   # would report a false hit with nothing written — worse than a miss, because
-  # nothing downstream would know to fall back.
+  # nothing downstream would know it had no inputs.
   #
-  # Ask the MANIFEST which format the tag holds, rather than reading oras's
-  # log prose or checking whether DEST_DIR gained files. Both alternatives are
+  # So ask the MANIFEST what the tag holds, rather than reading oras's log
+  # prose or checking whether DEST_DIR gained files. Both alternatives are
   # unsound here: the log line is not a stable interface, and DEST_DIR is the
-  # shared datasets directory, which is already full of other files. Measured
-  # on the same pair: an artifact this library pushed carries `artifactType`,
-  # the legacy image has none.
-  local mf out
-  mf=$(oras manifest fetch "$ref" 2>/dev/null || true)
+  # shared datasets directory, which is already full of other files. An
+  # artifact this library pushed carries `artifactType`; a Docker image, of
+  # either flavour, does not.
+  # Keep the manifest fetch's stderr. It is now the ONLY evidence a miss has:
+  # discarding it is how run 31268159790 became unexplainable (see below), and
+  # `denied`, `unauthorized`, a 503 and a genuinely absent tag all reach the
+  # miss below looking identical without it.
+  local mf mferr
+  mferr=$(mktemp)
+  mf=$(oras manifest fetch "$ref" 2>"$mferr" || true)
 
   # PRESENCE AND TRANSFER ARE DIFFERENT QUESTIONS, and conflating them is what
   # cost this fleet two long re-downloads. Run 31284811602's wikipedia job:
@@ -327,52 +283,40 @@ dcache_pull() {
   # whole-transfer retry discards every byte it had finished, which against
   # this runner's periodic connection teardown never converges.
   if printf '%s' "$mf" | grep -q '"artifactType"'; then
+    rm -f "$mferr"
     if dcache__fetch_blobs "$ref" "$dest" "$mf"; then
       DCACHE_HIT_FORMAT=oras
       return 0
     fi
     # The manifest says this IS our artifact, so a failed pull is a real
     # error, not a reason to go looking for a legacy image that is not there.
-    dcache__die "oras pull of $ref failed after its manifest identified it as an artifact"
+    dcache__die "pull of $ref failed after its manifest identified it as an artifact"
   fi
 
-  # Capture the failure instead of discarding it. Run 31268159790 is the reason:
+  # A manifest that is NOT an artifact is a hard failure, not a miss. Returning
+  # 1 here would send the caller off to re-derive — for wikipedia a ~24 h,
+  # ~95 GB upstream fetch — over what is really "this tag holds a format this
+  # library stopped reading". Nothing on the fleet should ever reach this: it
+  # means the legacy image came back, or a tag collided with something that is
+  # not ours. Say so, and name the way out.
+  if [ -n "$mf" ]; then
+    rm -f "$mferr"
+    dcache__die "$ref exists but is not an oras artifact (no artifactType)." \
+      "This library no longer reads the legacy \`FROM scratch\` image format." \
+      "Delete the tag and re-derive, or bump the RECIPE so a fresh entry is" \
+      "pushed under a new tag."
+  fi
+
+  # Report the failure instead of discarding it. Run 31268159790 is the reason:
   # webarena/shopping missed this cache and spent two hours re-downloading 41 GB
-  # from metis, and the log could not say WHY it missed, because the idiom this
-  # replaces was `docker pull "$CACHE" 2>/dev/null`. The entry was verified
+  # from metis, and the log could not say WHY it missed, because the idiom of
+  # the day was `docker pull "$CACHE" 2>/dev/null`. The entry was verified
   # intact afterwards — every blob HTTP 200 — so the cause was runner-side and
   # is now unknowable. A miss that cannot explain itself is the defect; out of
   # disk, denied and 503 must not all look like "not cached".
-  # No manifest at all means genuinely absent, and a first build of a new image
-  # legitimately lands here — one attempt, then miss. A manifest we could read
-  # means the entry is there and only the transfer can fail, so it retries.
-  local dtries=1
-  [ -z "$mf" ] || dtries=${DCACHE_PULL_TRIES:-3}
-  local dout
-  if dcache__transfer "docker pull of $ref" "$dtries" docker pull "$ref"; then
-    dout=$_DCACHE_LAST_OUT
-    DCACHE_HIT_FORMAT=legacy
-    local cid
-    cid=$(docker create "$ref" true)
-    # Same idiom as every derive-backup.sh today, unchanged: ONE wildcard
-    # pattern, because GNU tar exits 2 on any pattern that matches nothing, so
-    # a second shape would break every extract that legitimately lacks it.
-    # `-v` because the migration below must push EXACTLY these files and
-    # nothing else. $dest is the runner's shared datasets directory, holding
-    # every other image's inputs, so "everything under $dest" is never the
-    # right answer — see dcache__migrate_legacy_hit.
-    local extracted
-    extracted=$(docker export "$cid" | tar -x -v -C "$dest" --wildcards "$filter")
-    docker rm "$cid" >/dev/null
-    docker rmi "$ref" >/dev/null 2>&1 || true
-    dcache__migrate_legacy_hit "$ref" "$dest" "$extracted"
-    return 0
-  fi
-  dout=$_DCACHE_LAST_OUT
-
-  echo "derive-cache: no cache entry for $ref — neither format could be read." >&2
-  echo "  oras manifest fetch: ${mf:-<no manifest returned>}" >&2
-  echo "  docker pull: $dout" >&2
+  echo "derive-cache: no cache entry for $ref — no manifest at that tag." >&2
+  echo "  oras manifest fetch: $(cat "$mferr")" >&2
+  rm -f "$mferr"
   return 1
 }
 

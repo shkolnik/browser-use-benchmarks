@@ -12,9 +12,9 @@ it to protect, and a wikipedia re-derive that still wrote the legacy format
 would silently undo the conversion. So the parametrizations below cover all
 SEVEN, and there is no longer a per-site carve-out to pin.
 
-The export-filter invariant (#79) is not re-implemented here — it is already
-pinned, per-line, by tests/test_derive_export_filtered.py; this file only
-checks that the filter is still wired through `dcache_pull`.
+The export-filter invariant (#79) is not re-implemented here, and no longer
+applies to any live path: the legacy `docker export` reader is gone, and
+tests/test_derive_export_filtered.py now pins that it stays gone.
 """
 import re
 from pathlib import Path

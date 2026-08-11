@@ -20,8 +20,8 @@
 #   REPO_ROOT     to source the shared derive-cache library
 set -euo pipefail
 
-# builder/stage-lib/derive-cache.sh: read prefers an oras artifact, falls back
-# to the legacy `FROM scratch` image, and pushes new entries as oras.
+# builder/stage-lib/derive-cache.sh: reads and writes this fleet's derived-inputs
+# cache entries as oras artifacts.
 . "$REPO_ROOT/builder/stage-lib/derive-cache.sh"
 
 UPSTREAM_TAR="$DATASETS_DIR/postmill-populated-exposed-withimg.tar"
@@ -74,7 +74,7 @@ reassemble_outputs() {
 }
 
 echo "=== checking derived-inputs cache: $CACHE ==="
-if dcache_pull "$CACHE" "$DATASETS_DIR" 'reddit_*'; then
+if dcache_pull "$CACHE" "$DATASETS_DIR"; then
   reassemble_outputs
   # The floors apply to the CACHE path too. They used to guard only fresh
   # derivation, so this branch returned unchecked artifacts — which is the one
