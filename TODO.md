@@ -35,22 +35,41 @@ whole inside one part), then re-pushed through `dcache_push`. The tag now resolv
 old legacy manifest `sha256:1de48463…d2c6` stays reachable by digest until GHCR GCs it —
 that's the recovery handle if anything is wrong.
 
+THE FIRST REAL ORAS READ HAPPENED, run 31483094508 (2026-08-11, branch
+`wikipedia-pull-concurrency`): `split-zim: cache hit (oras format)`, 95 GB extracted and
+verified against the manifest. It took four attempts to get there, and what it cost is worth
+recording because it is not a derived-cache defect and will bite every large pull:
+
+THE RUNNER'S CONNECTIONS ARE TORN DOWN ON A `*/5` SCHEDULE. Nine transfer failures across
+three runs (31460767854, 31464177083, 31483094508), every one of them
+`stream error: PROTOCOL_ERROR; received from peer`, and every one landing on second `:00` of
+a five-minute clock mark — 05:20:00, 05:30:00, 05:40:00, 06:30:00, 06:40:00, 06:55:00,
+10:45:00, 10:55:00, 11:10:00. Nine for nine on the same second is a periodic job near the
+runner, not oras, not GHCR, not the path: the same entry pulled clean off-runner in 1156 s
+over the same apartment network, one blob fetched alone verified digest-exact in 206 s, and
+`--concurrency 1` changed nothing. NOT YET FOUND — worth a look at `crontab -l`,
+`systemctl list-timers` and anything reloading firewall rules on the runner VM and its host.
+Until then every large pull pays for it.
+
+`dcache_pull` now survives it (commit b12ced7): blob-by-blob fetch, skipping any layer whose
+size AND sha256 already match, so an interruption costs one blob instead of the whole
+transfer. Run 31483094508 was interrupted in passes 1, 2 and 3 and still completed in ~40 min.
+Before that change the retry loop could not converge at all: a clean pull needs ~19 min and
+interruptions arrive every 10-15.
+
 REMAINING before this closes:
-1. Observe one real oras read (`cache hit (oras)` / `DCACHE_HIT_FORMAT=oras`). No run has
-   taken it yet — every build since skips derive entirely via the prepare-outputs reuse stamp.
-   `wikipedia-cache-oras` edits `split-zim.sh`, which changes its `script_sha256` and so
-   invalidates the reuse stamp: that build re-runs prepare and takes the oras read for real.
-2. Re-resolve ALL SEVEN digests in `builder/derived-cache.lock` — every line there is now a
+1. Re-resolve ALL SEVEN digests in `builder/derived-cache.lock` — every line there is now a
    pre-migration legacy digest, wikipedia's included. Six were re-resolved against the live
    registry on 2026-08-11 (values in the branch's PR body); wikipedia's is the digest above.
    Deliberately NOT done in `wikipedia-cache-oras`: `builder/**` is a shared build input, so
-   editing the lock rebuilds the whole fleet for a hex change. It lands with item 4.
-3. Tighten `dcache_require` to a real digest comparison (`derive-cache.sh` ~309-334 is still
+   editing the lock rebuilds the whole fleet for a hex change. It lands with item 3.
+2. Tighten `dcache_require` to a real digest comparison (`derive-cache.sh` ~309-334 is still
    ref-only, deliberately per commit ad73a9d).
-4. Delete the legacy-fallback branch in `dcache_pull`, plus `dcache__migrate_legacy_hit` and
-   `DCACHE_NO_MIGRATE`, and the now-dead `FILTER` argument at all seven call sites. Unblocked
-   once the `wikipedia-cache-oras` build is green — nothing in the fleet reads legacy after
-   that.
+3. Delete the legacy-fallback branch in `dcache_pull`, plus `dcache__migrate_legacy_hit` and
+   `DCACHE_NO_MIGRATE`, and the now-dead `FILTER` argument at all seven call sites. UNBLOCKED:
+   run 31483094508 took a real oras read of the last unconverted entry, so nothing in the
+   fleet reads legacy any more. Written and open as PR #35, which predates the blob-by-blob
+   rewrite and so needs rebasing onto it before it merges.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 
