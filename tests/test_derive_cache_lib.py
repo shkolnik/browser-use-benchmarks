@@ -15,9 +15,11 @@ unnoticed.
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -82,6 +84,10 @@ def fake_curl(files=DEFAULT_FILES, body=None):
         '  case "$1" in\n'
         '    -o) out=$2; shift 2 ;;\n'
         '    -C|-H|-u|-w) shift 2 ;;\n'
+        # Named rather than swept up by the -* arm below, so their values are
+        # consumed as values. Left to `-*) shift`, each one would fall through
+        # to the `*)` arm and be mistaken for the URL.
+        '    --connect-timeout|--max-time|--speed-limit|--speed-time) shift 2 ;;\n'
         '    -*) shift ;;\n'
         '    *) url=$1; shift ;;\n'
         '  esac\n'
@@ -285,6 +291,87 @@ def test_a_registry_that_refuses_the_range_starts_over_instead_of_looping(tmp_pa
     assert "HIT" in r.stdout, r.stderr
     assert "range request refused" in r.stderr, r.stderr
     assert (dest / "a.dat").read_text() == "payload"
+
+
+def test_a_blob_fetch_is_bounded_so_a_dead_socket_cannot_hang_the_pull(tmp_path):
+    """Byte-range resume is unreachable while curl is still blocked in recv().
+
+    curl applies no transfer timeout by default. A connection that is
+    blackholed rather than reset — a WAN failover on a flow that already
+    exists — leaves it waiting on a socket the kernel still believes is open
+    until tcp_retries2 expires, ~15 minutes and unbounded if the peer keeps
+    the window alive. Nothing has failed, so no pass retries and no byte is
+    resumed: the job is not slow, it is stopped, and it looks identical to
+    working from outside. The stall floor is what converts that into an error
+    the retry loop can act on.
+    """
+    _, calls = run('dcache_pull reg/x:t out', tmp_path)
+    blob = blob_calls(calls)[0]
+    assert "--speed-limit 102400" in blob, blob
+    assert "--speed-time 60" in blob, blob
+    assert "--connect-timeout 30" in blob, blob
+
+
+def test_the_token_request_is_bounded_too(tmp_path):
+    """It runs before every blob, and hanging here stalls the pull just as
+    completely — with nothing growing on disk for the watcher to report on."""
+    _, calls = run('dcache_pull reg/x:t out', tmp_path)
+    tok = [c for c in calls if c.startswith("curl ") and "/token?" in c]
+    assert tok, calls
+    assert "--max-time 60" in tok[0], tok[0]
+
+
+def test_progress_is_reported_while_a_blob_is_in_flight(tmp_path):
+    """Slow and stuck must be different lines in the log, not the same silence.
+
+    Between "resuming" and its outcome a 95 GB pull used to print nothing at
+    all — hours in which a working transfer and a dead socket are reported
+    identically. The watcher polls the file, because curl's own progress goes
+    into dcache__transfer's capture buffer and is printed only on failure.
+    """
+    body = (
+        '  echo "$have" >> "$OFFSETS"\n'
+        '  i=$have\n'
+        '  while [ "$i" -lt 3 ]; do\n'
+        '    printf %s "${full:$i:1}" >> "$out"; i=$((i+1)); sleep 1\n'
+        '  done\n'
+        '  printf %s "${full:$i}" >> "$out"\n'
+        '  echo 206; exit 0\n'
+    )
+    r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
+               fake_curl_=fake_curl(body=body),
+               env={"DCACHE_PROGRESS_SECS": "1"})
+    assert "HIT" in r.stdout, r.stderr
+    assert re.search(r"derive-cache: a\.dat [1-6]/7 bytes \(\d+%, \d+ KB/s\)",
+                     r.stderr), r.stderr
+    assert "a.dat complete (7 bytes)" in r.stderr, r.stderr
+
+
+def test_a_transfer_that_moves_no_bytes_is_named_as_stalled(tmp_path):
+    """The distinction the operator actually needs at 3am.
+
+    A transfer crawling at 200 KB/s and one that has been dead for four
+    minutes both print nothing without this. STALLED, with a count of seconds
+    since the last byte, is the line that says which one is happening.
+    """
+    body = '  sleep 3\n  echo "Operation timed out" >&2\n  echo 000; exit 28\n'
+    r, _ = run('dcache_pull reg/x:t out || true', tmp_path,
+               fake_curl_=fake_curl(body=body),
+               env={"DCACHE_PROGRESS_SECS": "1", "DCACHE_PULL_TRIES": "1"})
+    assert re.search(r"a\.dat STALLED at 0/7 bytes \(0%\) — no new bytes in \d+s",
+                     r.stderr), r.stderr
+
+
+def test_the_watcher_does_not_outlive_the_blob_it_watches(tmp_path):
+    """A watcher left running holds the pull open for a whole poll interval
+    per layer, and survives a fatal exit to print into a job already dead."""
+    start = time.monotonic()
+    r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
+               env={"DCACHE_PROGRESS_SECS": "60"})
+    assert "HIT" in r.stdout, r.stderr
+    # The `wait` after the kill would block for the full 60s poll if the
+    # watcher were still alive.
+    assert time.monotonic() - start < 20, "the pull waited on its own watcher"
 
 
 def test_a_layer_title_that_escapes_the_destination_is_refused(tmp_path):

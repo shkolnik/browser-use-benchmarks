@@ -35,6 +35,12 @@
 #                             for the network
 #   DCACHE_RETRY_SLEEP       seconds between push retries (default 30) —
 #                             overridable so a test does not sleep 90s
+#   DCACHE_MIN_BPS           bytes/sec below which a transfer counts as stalled
+#                             (default 102400 = 100 KB/s)
+#   DCACHE_STALL_SECS        how long it must stay below that before curl gives
+#                             up and the pass resumes it (default 60)
+#   DCACHE_PROGRESS_SECS     seconds between progress lines (default 30; 0
+#                             disables the watcher)
 
 set -u
 
@@ -161,10 +167,14 @@ dcache__token() {
   local registry=$1 repo_path=$2 creds out url
   url="$(dcache__scheme "$registry")://$registry/token?service=$registry&scope=repository:$repo_path:pull"
   creds=$(dcache__registry_creds "$registry")
+  # Bounded, because this runs before every blob fetch and a hung token request
+  # stalls the pull just as completely as a hung blob does — with none of the
+  # progress reporting, since no file is growing to watch.
+  local -a t=(--connect-timeout 20 --max-time 60)
   if [ -n "$creds" ]; then
-    out=$(curl -fsS -u "$creds" "$url" 2>/dev/null) || return 0
+    out=$(curl -fsS "${t[@]}" -u "$creds" "$url" 2>/dev/null) || return 0
   else
-    out=$(curl -fsS "$url" 2>/dev/null) || return 0
+    out=$(curl -fsS "${t[@]}" "$url" 2>/dev/null) || return 0
   fi
   printf '%s' "$out" | python3 -c '
 import json, sys
@@ -215,8 +225,23 @@ dcache__fetch_blob() {
   # is the whole bug. -L because a registry answers a blob GET with a redirect
   # to storage (curl drops the Authorization header across hosts, which is
   # correct — the redirect URL carries its own signature).
+  #
+  # --speed-limit/--speed-time is what makes the resume above REACHABLE. curl
+  # has no transfer timeout by default, so a connection that is blackholed
+  # rather than reset — which is exactly what a WAN failover does to a flow
+  # that already exists — leaves curl blocked in recv() on a socket the kernel
+  # still thinks is open, for however long tcp_retries2 takes to expire (~15
+  # min, unbounded if the peer keeps the window alive). Nothing has failed, so
+  # nothing retries: the pass counter never advances and the job looks hung
+  # rather than slow. Falling under 100 KB/s for a solid minute is not a slow
+  # link — the runner measures ~15 MB/s and off-runner ~82 MB/s — it is a dead
+  # one, and the right response is to drop the socket and resume, which now
+  # costs only the bytes in flight.
+  local -a limit=(--connect-timeout 30
+                  --speed-limit "${DCACHE_MIN_BPS:-102400}"
+                  --speed-time "${DCACHE_STALL_SECS:-60}")
   : >>"$out"
-  if code=$(curl -fsS -L -C - "${auth[@]}" -w '%{http_code}' -o "$out" "$url"); then
+  if code=$(curl -fsS -L -C - "${limit[@]}" "${auth[@]}" -w '%{http_code}' -o "$out" "$url"); then
     rc=0
   else
     rc=$?
@@ -248,6 +273,55 @@ dcache__fetch_blob() {
     return 1
   fi
   return 0
+}
+
+# dcache__watch FILE SIZE LABEL PARENT_PID
+#
+# Runs in the background for the duration of one blob and reports how far the
+# file has got, so that a slow transfer and a dead one are DIFFERENT LINES in
+# the log rather than the same silence. Before this, a 95 GB pull printed
+# nothing between "resuming" and its outcome — for wikipedia that is a
+# multi-hour gap in which "working at 3 MB/s", "blocked on a blackholed
+# socket" and "hashing a 9.6 GB file" are indistinguishable from outside.
+#
+# It watches the FILE rather than parsing curl's progress meter because curl's
+# output goes into dcache__transfer's capture buffer and is only ever printed
+# on failure — the file length is the one signal available from out here, and
+# it happens to be the one that matters: bytes on disk.
+dcache__watch() {
+  local f=$1 size=$2 label=$3 parent=$4
+  local every=${DCACHE_PROGRESS_SECS:-30}
+  [ "$every" -gt 0 ] || return 0
+  local last=0 now stalled=0 rate pct sleeper=
+  if [ -f "$f" ]; then last=$(stat -c %s "$f"); fi
+
+  # A bare `sleep "$every"` in the loop below would OUTLIVE the kill that stops
+  # this watcher: the signal reaches this subshell, not its child. The orphaned
+  # sleep goes on holding the job's stderr open, so every layer would end with
+  # a dead pause of up to one poll interval before anything downstream saw the
+  # output. Run it as a job this watcher can take down with itself.
+  trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+
+  while :; do
+    sleep "$every" & sleeper=$!
+    wait "$sleeper" 2>/dev/null || true
+    # Never outlive the pull. Without this a watcher survives a dcache__die and
+    # keeps printing into a job that has already failed.
+    kill -0 "$parent" 2>/dev/null || return 0
+    now=0
+    if [ -f "$f" ]; then now=$(stat -c %s "$f"); fi
+    pct=$(( size > 0 ? now * 100 / size : 0 ))
+    if [ "$now" -le "$last" ]; then
+      stalled=$(( stalled + every ))
+      echo "derive-cache: $label STALLED at $now/$size bytes (${pct}%) —" \
+           "no new bytes in ${stalled}s" >&2
+    else
+      rate=$(( (now - last) / every / 1024 ))
+      stalled=0
+      echo "derive-cache: $label $now/$size bytes (${pct}%, ${rate} KB/s)" >&2
+    fi
+    last=$now
+  done
 }
 
 # dcache__fetch_blobs REF DEST MANIFEST
@@ -295,7 +369,7 @@ dcache__fetch_blobs() {
   # `localhost:5000/x:t` because the port's colon is not the last one.
   local repo=${ref%:*}
   local passes=${DCACHE_PULL_TRIES:-8}
-  local layers pass digest size title f want failed have
+  local layers pass digest size title f want failed have watcher rc
 
   layers=$(printf '%s' "$mf" | dcache__layers) || return 1
   [ -n "$layers" ] || dcache__die "$ref carries no file layers — nothing to pull." \
@@ -316,9 +390,15 @@ dcache__fetch_blobs() {
       # data. Nothing else verifies what a previous run left on disk, and with
       # byte-range resume that partial file is now something we deliberately
       # build on rather than something we merely tolerate.
-      if [ -f "$f" ] && [ "$(stat -c %s "$f")" = "$size" ] \
-         && [ "$(sha256sum <"$f" | cut -d' ' -f1)" = "$want" ]; then
-        continue
+      if [ -f "$f" ] && [ "$(stat -c %s "$f")" = "$size" ]; then
+        # Announced because it is SLOW and silent: hashing wikipedia's twelve
+        # layers is 95 GB of sha256 per pass, minutes in which the job looks
+        # every bit as hung as a blackholed socket does.
+        echo "derive-cache: verifying $title ($size bytes) against its digest" >&2
+        if [ "$(sha256sum <"$f" | cut -d' ' -f1)" = "$want" ]; then
+          echo "derive-cache: $title verified, already complete" >&2
+          continue
+        fi
       fi
       # Announced HERE, not inside dcache__fetch_blob, because dcache__transfer
       # captures its command's output and prints it only on failure — so a
@@ -329,15 +409,29 @@ dcache__fetch_blobs() {
       if [ -f "$f" ]; then have=$(stat -c %s "$f"); fi
       if [ "$have" -gt 0 ] && [ "$have" -lt "$size" ]; then
         echo "derive-cache: resuming $title at $have/$size bytes" >&2
+      else
+        echo "derive-cache: fetching $title ($size bytes)" >&2
       fi
-      if ! dcache__transfer "fetch of $title" 1 \
-             dcache__fetch_blob "$repo" "$digest" "$size" "$f"; then
+
+      # Started here, around the transfer, for the same reason the line above
+      # is here: everything dcache__fetch_blob writes is captured.
+      dcache__watch "$f" "$size" "$title" "$$" & watcher=$!
+      rc=0
+      dcache__transfer "fetch of $title" 1 \
+        dcache__fetch_blob "$repo" "$digest" "$size" "$f" || rc=$?
+      # `|| true` on both: the watcher is killed by design, so its non-zero
+      # status is the expected outcome, and this runs under set -e.
+      kill "$watcher" 2>/dev/null || true
+      wait "$watcher" 2>/dev/null || true
+
+      if [ "$rc" != 0 ]; then
         # Stop the pass rather than grinding through the rest: whatever is
         # killing transfers is usually still doing it a second later, and the
         # sleep before the next pass is the point.
         failed=1
         break
       fi
+      echo "derive-cache: $title complete ($size bytes)" >&2
     done <<< "$layers"
 
     # Nothing failed means every layer either verified or was just fetched.
