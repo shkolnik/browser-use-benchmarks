@@ -83,6 +83,115 @@ dcache__transfer() {
   return 1
 }
 
+# dcache__layers — reads a manifest on stdin, prints one
+# `digest<TAB>size<TAB>filename` line per layer that names a file.
+#
+# Only layers carrying `org.opencontainers.image.title` become files; that is
+# oras's own rule, and matching it is what keeps a blob-by-blob fetch
+# equivalent to `oras pull`.
+#
+# The title comes from the registry, and it is used as a PATH. A title of
+# `../../etc/cron.d/x` would otherwise write outside DEST_DIR, so anything
+# that is not a bare filename is refused rather than sanitised — every entry
+# this fleet pushes is a basename, so a title that isn't one means something
+# is wrong that quietly stripping slashes would hide.
+dcache__layers() {
+  python3 -c '
+import json, sys
+try:
+    m = json.load(sys.stdin)
+except ValueError as e:
+    sys.exit("derive-cache: manifest is not JSON: %s" % e)
+for layer in m.get("layers", []):
+    title = (layer.get("annotations") or {}).get("org.opencontainers.image.title")
+    if not title:
+        continue
+    if "/" in title or title in (".", ".."):
+        sys.exit("derive-cache: refusing layer title %r: not a bare filename" % title)
+    print("%s\t%d\t%s" % (layer["digest"], layer["size"], title))
+'
+}
+
+# dcache__fetch_blobs REF DEST MANIFEST
+#
+# The resumable replacement for `oras pull`. Fetches each layer separately and
+# skips any that is already on disk and verifies, so an interrupted transfer
+# keeps everything it finished — within this run and across runs.
+#
+# WHY THIS EXISTS. `oras pull` is one transfer: interrupt it at 99% and it
+# starts over. That is survivable on a flaky link and fatal on a hostile one.
+# Runs 31460767854 and 31464177083 failed all six of their attempts against
+# wikipedia's 95 GB entry with
+#
+#   copy failed: stream error: stream ID N; PROTOCOL_ERROR; received from peer
+#
+# and every one of the six landed on second :00 of a five-minute clock mark —
+# 05:20:00, 05:30:00, 05:40:00, 06:30:00, 06:40:00, 06:55:00. Six for six on
+# the same second is a periodic job tearing down connections near the runner,
+# not a limit in oras, in GHCR or on the path: the same entry pulled clean
+# off-runner in 1156 s over the same apartment network, and --concurrency 1
+# changed nothing. Attempt 1 of the second run transferred 19 GB correctly and
+# then threw all of it away, which is the actual defect — with interruptions
+# arriving every 10-15 minutes and an uninterrupted pull needing ~19, whole-
+# transfer retries can fail forever while making real progress every time.
+#
+# Blob granularity is as far as this goes: a fetch that dies mid-blob still
+# loses that blob (up to ~9.6 GB), because resuming inside one needs HTTP
+# range requests and its own auth handling. Twelve resumable steps is the
+# difference between converging and not.
+dcache__fetch_blobs() {
+  local ref=$1 dest=$2 mf=$3
+  # A tagged ref's repository is everything before the LAST colon; blobs are
+  # addressed by digest against the repository, not the tag. Safe for
+  # `localhost:5000/x:t` because the port's colon is not the last one.
+  local repo=${ref%:*}
+  local passes=${DCACHE_PULL_TRIES:-8}
+  local layers pass digest size title f want failed
+
+  layers=$(printf '%s' "$mf" | dcache__layers) || return 1
+  [ -n "$layers" ] || dcache__die "$ref carries no file layers — nothing to pull." \
+    "An artifact with no titled layer would extract to an empty directory and" \
+    "report a hit, which is the false-hit bug in a different costume."
+
+  for (( pass=1; pass<=passes; pass++ )); do
+    # A here-string runs the loop in THIS shell, not a subshell, so `failed`
+    # survives it. With a pipe it would not, and every pass would look clean.
+    failed=0
+    while IFS=$'\t' read -r digest size title; do
+      f="$dest/$title"
+      want=${digest#sha256:}
+      # Size first: it is free, and a transfer killed mid-write leaves a short
+      # file, so the common case is rejected without hashing 9.6 GB. Then the
+      # digest — this is the ONLY check standing between a half-written file
+      # left behind by a previous run and a benchmark image built on corrupt
+      # data. oras verifies what IT downloads; nothing else verifies what it
+      # finds already there.
+      if [ -f "$f" ] && [ "$(stat -c %s "$f")" = "$size" ] \
+         && [ "$(sha256sum <"$f" | cut -d' ' -f1)" = "$want" ]; then
+        continue
+      fi
+      if ! dcache__transfer "fetch of $title" 1 \
+             oras blob fetch --output "$f" "$repo@$digest"; then
+        # Stop the pass rather than grinding through the rest: whatever is
+        # killing transfers is usually still doing it a second later, and the
+        # sleep before the next pass is the point.
+        failed=1
+        break
+      fi
+    done <<< "$layers"
+
+    # Nothing failed means every layer either verified or was just fetched.
+    [ "$failed" = 0 ] && return 0
+
+    if [ "$pass" != "$passes" ]; then
+      echo "derive-cache: pass $pass/$passes of $ref was interrupted — retrying;" \
+           "layers already complete will be skipped, not re-fetched" >&2
+      sleep "${DCACHE_RETRY_SLEEP:-30}"
+    fi
+  done
+  return 1
+}
+
 # Resolved relative to this file's own location, not the caller's cwd, so
 # dcache_require works from every derive script regardless of where it runs
 # from. builder/stage-lib/derive-cache.sh -> ../derived-cache.lock.
@@ -213,31 +322,12 @@ dcache_pull() {
   # fails on an entry we KNOW is there is transient by construction and gets
   # retried. An entry with no manifest is genuinely absent — a first build of a
   # new image — and must miss immediately rather than burning three attempts.
-  # Note a retry is not free and does not resume: oras restarts the whole
-  # transfer, so three attempts at wikipedia is ~285 GB. (This comment used to
-  # claim docker's content store made retries resumable. That was true of the
-  # legacy reader and is not true of oras.)
-  #
-  # --concurrency 1, against oras's default of 3. Run 31460767854 failed all
-  # three attempts with
-  #
-  #   copy failed: stream error: stream ID 1; PROTOCOL_ERROR; received from peer
-  #
-  # always on wikipedia's SECOND part, ~9.5 min in. That is not bad data and
-  # not an unreachable registry: the same blob fetched clean and digest-exact
-  # off-runner (206 s), and a default-concurrency pull of the whole 95 GB
-  # artifact succeeded off-runner in 1156 s, from the same apartment network
-  # the runner is on. What the runner has that the sandbox does not is other
-  # builds competing for its disk. The reading that fits every one of those
-  # facts is back-pressure: three ~9.6 GB downloads writing to one contended
-  # volume, a stream that stalls long enough for GHCR to reset it, and the
-  # casualty being whichever of the first three concurrent streams is still
-  # open. One stream at a time cannot stall behind its own siblings. It is
-  # slower on an idle machine and that is an acceptable price for a transfer
-  # whose failure costs half an hour.
+  # How that retry happens is dcache__fetch_blobs's problem, and the reason it
+  # is not simply `oras pull` with a loop around it is written out there: a
+  # whole-transfer retry discards every byte it had finished, which against
+  # this runner's periodic connection teardown never converges.
   if printf '%s' "$mf" | grep -q '"artifactType"'; then
-    if dcache__transfer "oras pull of $ref" "${DCACHE_PULL_TRIES:-3}" \
-         oras pull "$ref" -o "$dest" --concurrency 1; then
+    if dcache__fetch_blobs "$ref" "$dest" "$mf"; then
       DCACHE_HIT_FORMAT=oras
       return 0
     fi
