@@ -40,16 +40,35 @@ THE FIRST REAL ORAS READ HAPPENED, run 31483094508 (2026-08-11, branch
 verified against the manifest. It took four attempts to get there, and what it cost is worth
 recording because it is not a derived-cache defect and will bite every large pull:
 
-THE RUNNER'S CONNECTIONS ARE TORN DOWN ON A `*/5` SCHEDULE. Nine transfer failures across
-three runs (31460767854, 31464177083, 31483094508), every one of them
+LONG TRANSFERS ARE TORN DOWN ON A `*/5` BOUNDARY. Nine failures across three runs
+(31460767854, 31464177083, 31483094508), every one of them
 `stream error: PROTOCOL_ERROR; received from peer`, and every one landing on second `:00` of
 a five-minute clock mark — 05:20:00, 05:30:00, 05:40:00, 06:30:00, 06:40:00, 06:55:00,
-10:45:00, 10:55:00, 11:10:00. Nine for nine on the same second is a periodic job near the
-runner, not oras, not GHCR, not the path: the same entry pulled clean off-runner in 1156 s
-over the same apartment network, one blob fetched alone verified digest-exact in 206 s, and
-`--concurrency 1` changed nothing. NOT YET FOUND — worth a look at `crontab -l`,
-`systemctl list-timers` and anything reloading firewall rules on the runner VM and its host.
-Until then every large pull pays for it.
+10:45:00, 10:55:00, 11:10:00. Nine for nine on the same second is a scheduled event, not
+oras, not GHCR, not the path: the same entry pulled clean off-runner in 1156 s over the same
+apartment network, one blob fetched alone verified digest-exact in 206 s, and
+`--concurrency 1` changed nothing.
+
+STILL NOT FOUND. Worth a look at `crontab -l`, `systemctl list-timers` and anything reloading
+firewall rules on the runner VM and its host. Ruled out by the operator: the dual-WAN ISP
+flapping described below is a DIFFERENT problem — it began with today's weather, and these
+teardowns predate it. Until the cause is found every large pull pays for it, and blob-by-blob
+resume is what keeps that cost bounded.
+
+A SECOND, UNRELATED NETWORK PROBLEM, 2026-08-11: run 31496425002 lost three images —
+webarena/shopping (16:00:02) and webarena/shopping-admin (16:07:08) to composer against
+mirror.mage-os.org, webshop/server (17:06:52) to pip against files.pythonhosted.org. Cause is
+known and is upstream of CI: the apartment has two ISPs, one of them line-of-sight radio that
+degrades in precipitation, and the router's SLA thresholds were flapping it in and out of
+service on a bad-weather day.
+
+The number worth keeping from that: each failure timed out after 300005 ms having received
+ZERO bytes, though no outage lasted more than 1-2 minutes. A failover does not have to last as
+long as the damage it does — it blackholes the flows that already exist, and curl then sits on
+a dead socket until its own timeout expires. So every in-flight download at the instant of a
+flap pays a full 5-minute timeout regardless of how brief the flap was. That is the argument
+for classifying a build's network failures and retrying only those, and against assuming a
+short outage costs a short delay.
 
 `dcache_pull` now survives it (PR #36): blob-by-blob fetch, skipping any layer whose size AND
 sha256 already match, so an interruption costs one blob instead of the whole transfer. Run
