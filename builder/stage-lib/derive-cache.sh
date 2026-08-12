@@ -41,6 +41,10 @@
 #                             up and the pass resumes it (default 60)
 #   DCACHE_PROGRESS_SECS     seconds between progress lines (default 30; 0
 #                             disables the watcher)
+#   DCACHE_LOCK              path to the digest lock (default the checked-in
+#                             builder/derived-cache.lock) — an override so a
+#                             test can pin a fake ref without editing the
+#                             fleet's real lock
 
 set -u
 
@@ -444,10 +448,84 @@ dcache__fetch_blobs() {
   return 1
 }
 
-# Resolved relative to this file's own location, not the caller's cwd, so
-# dcache_require works from every derive script regardless of where it runs
-# from. builder/stage-lib/derive-cache.sh -> ../derived-cache.lock.
-_DCACHE_LOCK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/derived-cache.lock"
+# Resolved relative to this file's own location, not the caller's cwd, so the
+# lock is found from every derive script regardless of where it runs from.
+# builder/stage-lib/derive-cache.sh -> ../derived-cache.lock.
+_DCACHE_LOCK="${DCACHE_LOCK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/derived-cache.lock}"
+
+# dcache__lock_digest REF — prints the digest pinned for REF and returns 0 if
+# REF appears in the lock at all, 1 if it does not. A pinned ref with no digest
+# column prints nothing and still returns 0: "pinned" and "pinned to a specific
+# digest" are different questions, and the two callers ask different ones —
+# dcache_require only needs to know the ref was depended on before, while
+# dcache__check_pin needs something to compare against.
+dcache__lock_digest() {
+  local ref=$1 line lref ldigest
+  [ -f "$_DCACHE_LOCK" ] || return 1
+  while IFS= read -r line; do
+    line=${line%%#*}
+    read -r lref ldigest _ <<<"$line" || true
+    [ -n "${lref:-}" ] || continue
+    if [ "$lref" = "$ref" ]; then
+      printf '%s\n' "${ldigest:-}"
+      return 0
+    fi
+  done < "$_DCACHE_LOCK"
+  return 1
+}
+
+# dcache__check_pin REF MANIFEST_DIGEST — the other half of #42, on the HIT
+# path. dcache_require can only ever police a MISS; this is what makes the
+# lock's digest column a comparison rather than a record of what was true once.
+#
+# WHAT A MATCH BUYS. The manifest digest is the root of a hash chain that
+# already covers everything else: the manifest names each layer by sha256 and
+# by size, and dcache__fetch_blobs refuses any blob whose bytes do not hash to
+# what the manifest said. So "this manifest is the one in the lock" extends to
+# "every byte extracted into the datasets directory is the reviewed byte" —
+# without it, the chain is intact but anchored to whatever the tag happens to
+# point at today, and a tag is mutable. Checked BEFORE the blobs are fetched:
+# an entry we are about to reject should not first cost 95 GB of transfer.
+#
+# A MISMATCH IS FATAL, and deliberately has no workflow_dispatch escape hatch
+# next to allow_derive_cache_miss. That input means "GHCR is unwell, derive
+# instead"; this means "the tag we pinned now resolves to different content",
+# which is either a legitimate re-push — fixed by editing the lock, which is a
+# reviewed diff, which is the entire point of checking the lock in — or
+# something nobody intended. Clicking past it would use unreviewed inputs.
+# ALLOW_DERIVE_CACHE_DIGEST_MISMATCH=1 exists for the person re-pinning by
+# hand and is not exposed to CI.
+dcache__check_pin() {
+  local ref=$1 got=$2 want
+  if ! want=$(dcache__lock_digest "$ref"); then
+    # Not pinned: a new image or a deliberate RECIPE bump, exactly as on the
+    # miss path. Print the line to add rather than making whoever pins it
+    # retype a 64-hex digest — same courtesy dcache_push extends after a push.
+    echo "derive-cache: $ref is not pinned. To pin it, add to" \
+         "builder/derived-cache.lock:" >&2
+    echo "  $ref $got" >&2
+    return 0
+  fi
+  [ -z "$want" ] && return 0
+  [ "$want" = "$got" ] && return 0
+
+  if [ "${ALLOW_DERIVE_CACHE_DIGEST_MISMATCH:-}" = 1 ]; then
+    echo "derive-cache: WARNING: $ref resolves to $got but is pinned to $want" \
+         "in builder/derived-cache.lock, and" \
+         "ALLOW_DERIVE_CACHE_DIGEST_MISMATCH=1 downgrades this to a warning —" \
+         "using the entry the registry served." >&2
+    return 0
+  fi
+  # Both digests on their own lines: whoever reads this is about to compare
+  # 64 hex characters, and a wrapped one-liner is where that comparison goes
+  # wrong.
+  echo "derive-cache: $ref resolves to a manifest this fleet has not pinned:" >&2
+  echo "  pinned:   $want" >&2
+  echo "  resolved: $got" >&2
+  dcache__die "The tag moved. Either the entry was re-pushed — in which case update" \
+    "builder/derived-cache.lock to $got in a reviewed diff — or it points at" \
+    "content nobody here published. Refusing to build on it either way."
+}
 
 # dcache_ensure_oras — puts a pinned `oras` on PATH. Idempotent: a no-op if
 # `oras` already resolves (a pre-provisioned runner) or if this already ran in
@@ -509,9 +587,17 @@ dcache_pull() {
   # discarding it is how run 31268159790 became unexplainable (see below), and
   # `denied`, `unauthorized`, a 503 and a genuinely absent tag all reach the
   # miss below looking identical without it.
-  local mf mferr
+  local mf mferr mfile
   mferr=$(mktemp)
-  mf=$(oras manifest fetch "$ref" 2>"$mferr" || true)
+  mfile=$(mktemp)
+  # Written to a FILE rather than captured, because the manifest is about to be
+  # hashed and an entry's digest is the sha256 of the manifest's raw bytes.
+  # `$(...)` strips trailing newlines, so hashing what command substitution
+  # returns would compute the digest of bytes the registry never sent — a check
+  # that fails on entries that are perfectly fine. $mfile is what gets hashed;
+  # $mf is only ever parsed, where a missing trailing newline cannot matter.
+  oras manifest fetch -o "$mfile" "$ref" 2>"$mferr" || true
+  mf=$(cat "$mfile")
 
   # PRESENCE AND TRANSFER ARE DIFFERENT QUESTIONS, and conflating them is what
   # cost this fleet two long re-downloads. Run 31284811602's wikipedia job:
@@ -534,7 +620,12 @@ dcache_pull() {
   # whole-transfer retry discards every byte it had finished, which against
   # this runner's periodic connection teardown never converges.
   if printf '%s' "$mf" | grep -q '"artifactType"'; then
-    rm -f "$mferr"
+    # Computed here rather than read from `oras manifest fetch --descriptor`:
+    # the descriptor is the registry's claim about the bytes, and this is the
+    # one place where checking the bytes themselves costs nothing (they are
+    # already on disk, and a manifest is a few KB).
+    dcache__check_pin "$ref" "sha256:$(sha256sum <"$mfile" | cut -d' ' -f1)"
+    rm -f "$mferr" "$mfile"
     if dcache__fetch_blobs "$ref" "$dest" "$mf"; then
       DCACHE_HIT_FORMAT=oras
       return 0
@@ -551,7 +642,7 @@ dcache_pull() {
   # means the legacy image came back, or a tag collided with something that is
   # not ours. Say so, and name the way out.
   if [ -n "$mf" ]; then
-    rm -f "$mferr"
+    rm -f "$mferr" "$mfile"
     dcache__die "$ref exists but is not an oras artifact (no artifactType)." \
       "This library no longer reads the legacy \`FROM scratch\` image format." \
       "Delete the tag and re-derive, or bump the RECIPE so a fresh entry is" \
@@ -567,7 +658,7 @@ dcache_pull() {
   # disk, denied and 503 must not all look like "not cached".
   echo "derive-cache: no cache entry for $ref — no manifest at that tag." >&2
   echo "  oras manifest fetch: $(cat "$mferr")" >&2
-  rm -f "$mferr"
+  rm -f "$mferr" "$mfile"
   return 1
 }
 
@@ -618,27 +709,19 @@ dcache_push() {
 #     it would for a genuinely new image or a deliberate RECIPE bump.
 dcache_require() {
   local ref=$1
-  [ -f "$_DCACHE_LOCK" ] || return 0
+  # Only presence matters here — a miss has no digest to compare, which is why
+  # the digest half of the lock is enforced in dcache_pull instead.
+  dcache__lock_digest "$ref" >/dev/null || return 0
 
-  local line
-  while IFS= read -r line; do
-    line="${line%%#*}"
-    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [ -z "$line" ] && continue
-    local lref=${line%% *}
-    if [ "$lref" = "$ref" ]; then
-      if [ "${ALLOW_DERIVE_CACHE_MISS:-}" = 1 ]; then
-        echo "derive-cache: WARNING: $ref is pinned in builder/derived-cache.lock" \
-             "but missed, and ALLOW_DERIVE_CACHE_MISS=1 downgrades this to a" \
-             "warning — deriving from scratch instead." >&2
-        return 0
-      fi
-      dcache__die "$ref is pinned in builder/derived-cache.lock but missed on" \
-        "pull. This entry has served builds before, so a miss now means the" \
-        "cache lost it, not that this is a new image — failing rather than" \
-        "silently re-deriving (and re-paying) it. If this is a deliberate" \
-        "GHCR outage, re-run with ALLOW_DERIVE_CACHE_MISS=1."
-    fi
-  done < "$_DCACHE_LOCK"
-  return 0
+  if [ "${ALLOW_DERIVE_CACHE_MISS:-}" = 1 ]; then
+    echo "derive-cache: WARNING: $ref is pinned in builder/derived-cache.lock" \
+         "but missed, and ALLOW_DERIVE_CACHE_MISS=1 downgrades this to a" \
+         "warning — deriving from scratch instead." >&2
+    return 0
+  fi
+  dcache__die "$ref is pinned in builder/derived-cache.lock but missed on" \
+    "pull. This entry has served builds before, so a miss now means the" \
+    "cache lost it, not that this is a new image — failing rather than" \
+    "silently re-deriving (and re-paying) it. If this is a deliberate" \
+    "GHCR outage, re-run with ALLOW_DERIVE_CACHE_MISS=1."
 }

@@ -63,12 +63,23 @@ All seven lock digests were re-resolved live on 2026-08-11 and written into
 the raw manifest body, all seven `artifactType application/vnd.unknown.artifact.v1`. That
 check is what licensed the deletion, and it closes the re-resolve item that stood here.
 
+THE DIGEST LOCK IS NOW ENFORCED, not just recorded (PR #41). `dcache_pull` hashes the manifest
+the tag resolved to and compares it against `builder/derived-cache.lock` before fetching a
+single blob; a mismatch is fatal and names both digests. Since the manifest names every layer
+by sha256 and the fetch already refuses a blob whose bytes disagree, a matching pin means every
+byte extracted is the reviewed byte — the tag stops being the thing trusted. An unpinned ref
+still pulls and prints the line to add. No CI escape hatch for a mismatch on purpose: the fix
+is a reviewed edit to the lock, which is the whole reason it is checked in
+(`ALLOW_DERIVE_CACHE_DIGEST_MISMATCH=1` exists for re-pinning by hand). Proven against a live
+`registry:2` as well as fakes — including that sha256 over the raw manifest bytes is the same
+digest the registry itself reports, which is the way this check would otherwise be subtly
+wrong.
+
 REMAINING before this closes:
-1. Tighten the digest lock from a provenance record to a real comparison. `dcache_require` is
-   the wrong home for it: it runs only after a MISS, so it never has a digest in hand. The
-   check belongs on the HIT path in `dcache_pull`, which already fetches the manifest and can
-   compare its digest against the lock before trusting the entry. Deliberately left out of the
-   deletion PR — it changes what a good build does, not just what a dead path contains.
+1. Delete the pre-ORAS cache image repositories on GHCR. Nothing reads them: the legacy reader
+   is gone (PR #35) and all seven entries are artifacts. Keep in mind the legacy wikipedia
+   manifest `sha256:1de48463…d2c6` is the documented recovery handle for the republished
+   entry, so it goes last, if at all. Inventory first, confirm the list, then delete.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 
