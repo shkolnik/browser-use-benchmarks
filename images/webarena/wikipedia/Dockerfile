@@ -11,7 +11,7 @@
 # Version parity with WebArena's environment_docker/README.md, which runs
 # ghcr.io/kiwix/kiwix-serve:3.3.0. Digest-pinned in the fleet's usual style so
 # a moved tag cannot silently change the server under us.
-FROM ghcr.io/kiwix/kiwix-serve:3.3.0@sha256:889f08dcbfe94b44a506060632618d671ea0d8ce4aed8a2878e0a24890984374
+FROM ghcr.io/kiwix/kiwix-serve:3.8.2@sha256:57baa553c46cd30770905df15a9a687258aa5471c30c8edaefe278f1784e1aa8
 
 # Overrides the base's inherited label (which points at openzim/kiwix-tools) so
 # GHCR links this package to this repo and inherits its visibility.
