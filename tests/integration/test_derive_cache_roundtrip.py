@@ -8,7 +8,9 @@ something that is not an artifact — behave against a REAL registry rather than
 against a fake's idea of one.
 """
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import textwrap
@@ -203,3 +205,70 @@ def test_a_legacy_image_is_refused_rather_than_read(tmp_path, registry, oras_too
             f"a refused read still wrote into the destination: {_tree_names(dest)}")
     finally:
         subprocess.run(["docker", "rmi", "-f", ref], capture_output=True)
+
+
+def _descriptor_digest(tool_dir, ref):
+    """What the REGISTRY says the manifest's digest is."""
+    r = subprocess.run([str(tool_dir / "oras"), "manifest", "fetch", "--descriptor", ref],
+                       capture_output=True, text=True, check=True)
+    return json.loads(r.stdout)["digest"]
+
+
+def test_the_digest_the_lock_is_checked_against_is_the_registrys_own(tmp_path, registry,
+                                                                     oras_tool_dir):
+    """#42's hit-path check computes an entry's digest itself, as sha256 over
+    the manifest bytes, rather than believing a `--descriptor` field. That is
+    only sound if the two agree on a REAL registry — a fake can be made to
+    agree by construction. Off-by-a-trailing-newline is the specific way this
+    goes wrong, and it would reject every entry in the lock.
+    """
+    ref = f"{registry}/dcache-test/pin:t1"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"pinned\n")
+    assert _run(f'dcache_push "{ref}" "{src}" a.txt', tmp_path, oras_tool_dir).returncode == 0
+
+    empty = tmp_path / "empty.lock"
+    empty.write_text("# nothing pinned\n")
+    r = _run(f'dcache_pull "{ref}" "{tmp_path}/dest"', tmp_path, oras_tool_dir,
+             env={"DCACHE_LOCK": str(empty)})
+    assert r.returncode == 0, r.stderr
+    # The unpinned path prints the line to add, which is where the digest the
+    # library computed is observable.
+    m = re.search(r"^\s+(\S+) (sha256:[0-9a-f]{64})$", r.stderr, re.M)
+    assert m, r.stderr
+    assert m.group(1) == ref
+    assert m.group(2) == _descriptor_digest(oras_tool_dir, ref)
+
+
+def test_a_tag_that_moved_off_its_pin_is_refused_against_a_real_registry(tmp_path, registry,
+                                                                         oras_tool_dir):
+    """Push, pin, then re-push DIFFERENT content to the same tag — the moved
+    tag a lock exists to catch. Nothing may be extracted from it.
+    """
+    ref = f"{registry}/dcache-test/moved:t1"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"first\n")
+    assert _run(f'dcache_push "{ref}" "{src}" a.txt', tmp_path, oras_tool_dir).returncode == 0
+    pinned = _descriptor_digest(oras_tool_dir, ref)
+
+    lock = tmp_path / "pinned.lock"
+    lock.write_text(f"{ref} {pinned}\n")
+    dest = tmp_path / "dest"
+    r = _run(f'dcache_pull "{ref}" "{dest}"', tmp_path, oras_tool_dir,
+             env={"DCACHE_LOCK": str(lock)})
+    assert r.returncode == 0, r.stderr
+    assert (dest / "a.txt").read_bytes() == b"first\n"
+
+    (src / "a.txt").write_bytes(b"second, and nobody reviewed it\n")
+    assert _run(f'dcache_push "{ref}" "{src}" a.txt', tmp_path, oras_tool_dir).returncode == 0
+    assert _descriptor_digest(oras_tool_dir, ref) != pinned
+
+    dest2 = tmp_path / "dest2"
+    r = _run(f'dcache_pull "{ref}" "{dest2}" || echo MISS', tmp_path, oras_tool_dir,
+             env={"DCACHE_LOCK": str(lock)})
+    assert r.returncode != 0, f"a moved tag was accepted: {r.stdout!r}"
+    assert "MISS" not in r.stdout, "a moved tag reported as a miss would re-derive"
+    assert pinned in r.stderr, r.stderr
+    assert _tree_names(dest2) == set(), _tree_names(dest2)

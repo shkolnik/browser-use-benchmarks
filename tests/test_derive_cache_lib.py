@@ -40,6 +40,10 @@ def oras_artifact(files=DEFAULT_FILES):
 
     Blobs are NOT served here: they no longer go through oras at all.
     """
+    return _fake_oras(artifact_manifest(files))
+
+
+def artifact_manifest(files=DEFAULT_FILES):
     layers = []
     for name, content in files:
         raw = content.encode()
@@ -48,11 +52,28 @@ def oras_artifact(files=DEFAULT_FILES):
             "size": len(raw),
             "annotations": {"org.opencontainers.image.title": name},
         })
-    manifest = json.dumps(
+    return json.dumps(
         {"artifactType": "application/vnd.beep.derived.v1", "layers": layers})
+
+
+def _fake_oras(manifest):
+    """A fake `oras manifest fetch` that honours `-o`, because the library now
+    asks for the manifest as a file and hashes those exact bytes to get the
+    entry's digest. A fake that only ever wrote to stdout would leave the
+    library hashing an empty file and would model no registry at all.
+
+    `printf %s`, not `echo`: the trailing newline `echo` adds is not in the
+    manifest the registry serves, and it would change the digest.
+    """
     return (
         'if [ "$1 $2" = "manifest fetch" ]; then\n'
-        f'  echo {shlex.quote(manifest)}\n'
+        '  shift 2\n'
+        '  out=-\n'
+        '  while [ $# -gt 0 ]; do\n'
+        '    case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac\n'
+        '  done\n'
+        f'  if [ "$out" = - ]; then printf %s {shlex.quote(manifest)};\n'
+        f'  else printf %s {shlex.quote(manifest)} > "$out"; fi\n'
         '  exit 0\n'
         'fi\n'
         'exit 0\n'
@@ -115,12 +136,8 @@ ORAS_ARTIFACT = oras_artifact()
 # one exits 0 while writing nothing at all, because oras materializes a layer
 # only when it carries an `org.opencontainers.image.title`. Deciding a hit on
 # the exit code would report success with an empty datasets dir.
-ORAS_NOT_AN_ARTIFACT = (
-    'if [ "$1 $2" = "manifest fetch" ]; then\n'
-    '  echo \'{"mediaType":"application/vnd.oci.image.index.v1+json"}\'\n'
-    'fi\n'
-    'exit 0\n'
-)
+ORAS_NOT_AN_ARTIFACT = _fake_oras(
+    '{"mediaType":"application/vnd.oci.image.index.v1+json"}')
 
 
 def run(body, tmp_path, fake_oras=ORAS_ARTIFACT, fake_docker="exit 1",
@@ -576,3 +593,109 @@ def test_a_push_retries_three_times_then_exits_nonzero(tmp_path):
                    tmp_path, fake_oras="exit 1")
     assert len([c for c in calls if c.startswith("oras push")]) == 3, calls
     assert r.returncode != 0, "a failed push must be fatal (#80)"
+
+
+# --- the digest lock, enforced on the hit path (#42) --------------------------
+#
+# `dcache_require` can only police a MISS, so until now the lock's digest
+# column was a record of what was true when someone last looked. These cover
+# the other half: on a HIT, the manifest the tag resolves to must be the
+# manifest that was reviewed into builder/derived-cache.lock.
+
+MANIFEST_DIGEST = "sha256:" + hashlib.sha256(artifact_manifest().encode()).hexdigest()
+
+
+def lock(tmp_path, *lines):
+    p = tmp_path / "test.lock"
+    p.write_text("# a test lock\n" + "".join(f"{l}\n" for l in lines))
+    return {"DCACHE_LOCK": str(p)}
+
+
+def test_a_pinned_entry_whose_digest_matches_is_pulled(tmp_path):
+    r, calls = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+                   tmp_path, env=lock(tmp_path, f"reg/x:t {MANIFEST_DIGEST}"))
+    assert "FORMAT=oras" in r.stdout, r.stderr
+    assert blob_calls(calls), "a matching pin must not stop the pull"
+
+
+def test_the_digest_compared_is_the_sha256_of_the_raw_manifest_bytes(tmp_path):
+    """Not oras's descriptor, and not a hash of something re-serialized.
+
+    An entry's digest is defined over the exact bytes the registry served, so
+    this is the only definition that can ever agree with the registry — and
+    with the way every digest in the lock was resolved. The unpinned path
+    prints the line to add, which is where the computed value is observable.
+    """
+    r, _ = run('dcache_pull reg/x:t out', tmp_path, env=lock(tmp_path))
+    assert f"reg/x:t {MANIFEST_DIGEST}" in r.stderr, r.stderr
+
+
+def test_a_pinned_entry_whose_digest_moved_is_fatal(tmp_path):
+    r, calls = run('dcache_pull reg/x:t out; echo "rc=$?"', tmp_path,
+                   env=lock(tmp_path, f"reg/x:t sha256:{'b' * 64}"))
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "rc=" not in r.stdout, "a moved tag must stop the caller, not return to it"
+    assert MANIFEST_DIGEST in r.stderr and "b" * 64 in r.stderr, (
+        "both digests must be printed — the reader has to compare them")
+
+
+def test_a_moved_tag_is_refused_before_any_bytes_are_transferred(tmp_path):
+    """The check is worth nothing if it lands after a 95 GB download."""
+    _, calls = run('dcache_pull reg/x:t out', tmp_path,
+                   env=lock(tmp_path, f"reg/x:t sha256:{'b' * 64}"))
+    assert not blob_calls(calls), calls
+
+
+def test_a_moved_tag_is_not_reported_as_a_miss(tmp_path):
+    """A miss sends the caller off to re-derive — up to ~24 h for wikipedia —
+    over what is really "this is not the entry we pinned"."""
+    r, _ = run('dcache_pull reg/x:t out || echo MISS', tmp_path,
+               env=lock(tmp_path, f"reg/x:t sha256:{'b' * 64}"))
+    assert "MISS" not in r.stdout, r.stdout
+
+
+def test_an_unpinned_entry_is_pulled_and_names_the_line_to_add(tmp_path):
+    """A new image, or a deliberate RECIPE bump: expected, and not fatal."""
+    r, calls = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+                   tmp_path, env=lock(tmp_path, f"reg/other:t {MANIFEST_DIGEST}"))
+    assert "FORMAT=oras" in r.stdout, r.stderr
+    assert blob_calls(calls), calls
+    assert "not pinned" in r.stderr and f"reg/x:t {MANIFEST_DIGEST}" in r.stderr
+
+
+def test_the_mismatch_escape_hatch_is_not_the_miss_escape_hatch(tmp_path):
+    """ALLOW_DERIVE_CACHE_MISS means "GHCR is unwell, derive instead". It must
+    not also mean "accept content nobody pinned" — those are different risks,
+    and the CI input is wired to the first one only.
+    """
+    r, _ = run('dcache_pull reg/x:t out', tmp_path,
+               env={**lock(tmp_path, f"reg/x:t sha256:{'b' * 64}"),
+                    "ALLOW_DERIVE_CACHE_MISS": "1"})
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_the_mismatch_escape_hatch_downgrades_to_a_warning(tmp_path):
+    r, calls = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+                   tmp_path,
+                   env={**lock(tmp_path, f"reg/x:t sha256:{'b' * 64}"),
+                        "ALLOW_DERIVE_CACHE_DIGEST_MISMATCH": "1"})
+    assert "FORMAT=oras" in r.stdout, r.stderr
+    assert "WARNING" in r.stderr, r.stderr
+    assert blob_calls(calls), calls
+
+
+def test_an_entry_pinned_without_a_digest_is_still_pulled(tmp_path):
+    """"Pinned" and "pinned to a digest" are different claims: a ref listed
+    with no digest column still makes a miss fatal (dcache_require), but there
+    is nothing to compare on a hit, and inventing a failure there would break
+    a lock that is merely incomplete."""
+    r, _ = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+               tmp_path, env=lock(tmp_path, "reg/x:t"))
+    assert "FORMAT=oras" in r.stdout, r.stderr
+
+
+def test_a_comment_after_an_entry_is_not_read_as_its_digest(tmp_path):
+    r, _ = run('dcache_pull reg/x:t out && echo "FORMAT=$DCACHE_HIT_FORMAT"',
+               tmp_path,
+               env=lock(tmp_path, f"reg/x:t {MANIFEST_DIGEST}  # rebuilt 2026-08-11"))
+    assert "FORMAT=oras" in r.stdout, r.stderr
