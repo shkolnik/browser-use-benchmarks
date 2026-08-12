@@ -3,10 +3,21 @@ name: build-images
 # falls back to the default (push runs keep their commit-message title).
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('build {0}', inputs.target) || '' }}
 
-# One run at a time: concurrent runs would race on the runner's shared
-# datasets cache (two jobs appending the same .part download) and double-pay
-# the expensive prepare/derive phases. Queue, never cancel — every push's
-# build must actually run so its commit status is truthful.
+# One RUN at a time. This is not what serialized the matrix — `max-parallel`
+# was, and it is gone (see the build job) — so this costs the burst fan-out
+# nothing: jobs within a run still start together.
+#
+# Its original reason (two runs racing on the home runner's shared datasets
+# cache, appending the same .part download) does die with per-job VMs. It is
+# kept for a second reason that does not: two runs of the same ref would each
+# `bin/build push` the same image to `:latest` and then attest whatever their
+# own `docker inspect` resolved locally, so the losing run can stamp a
+# provenance attestation onto a digest that is no longer what `:latest` points
+# at. Serializing runs is the cheap way to keep the published digest and its
+# attestation the same object.
+#
+# Queue, never cancel — every push's build must actually run so its commit
+# status is truthful.
 concurrency:
   group: build-images
   cancel-in-progress: false
@@ -50,6 +61,16 @@ on:
 
 jobs:
   discover:
+    # Deliberately NOT `[self-hosted, burst]`: this job is a checkout, a `git
+    # diff` and one `gh` call, and spending a whole ephemeral VM on it would add
+    # boot latency to every run for no gain. It stays on the home runner.
+    #
+    # Caveat worth knowing: every self-hosted runner carries the implicit
+    # `self-hosted` label, burst VMs included, so an idle burst VM COULD pick
+    # this up. Harmless (the job is cheap and needs nothing runner-specific),
+    # and burst never boots a VM for it, since only `burst`-labeled jobs are
+    # counted. Give the home runner a distinguishing label and name it here if
+    # that ever needs to be airtight.
     runs-on: self-hosted
     outputs:
       images: ${{ steps.ls.outputs.images }}
@@ -113,7 +134,11 @@ jobs:
     # A push can legitimately touch no enabled image (e.g. only an excluded
     # one); skip instead of handing the matrix an empty list.
     if: needs.discover.outputs.images != '[]'
-    runs-on: self-hosted
+    # One ephemeral AWS VM per matrix job, booted by burst-actions (burst.toml).
+    # Both labels are load-bearing and exact: burst's `--auto` decides how many
+    # VMs to boot by counting queued jobs that carry `burst`. Until the operator
+    # has burst running against this repo, jobs here simply sit queued.
+    runs-on: [self-hosted, burst]
     # Without this the job inherits GitHub's 6h default. Twice on 2026-08-06 a
     # job stopped making progress and kept the `build-images` concurrency slot,
     # so every queued image waited on a job that was doing nothing — once as a
@@ -124,14 +149,27 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      max-parallel: 1   # one huge build at a time; the disk is the constraint
+      # No max-parallel. It used to read "one huge build at a time; the disk is
+      # the constraint" — true when every image shared one runner's disk, and
+      # false now that each job gets its own single-tenant VM. Removing it is
+      # the whole point of the burst move: the fleet's wall-clock drops from the
+      # SUM of the image build times to the slowest single image. The disk
+      # constraint did not disappear, it moved: it is now a per-VM volume-size
+      # requirement, documented in docs/burst-runners.md.
       matrix:
         image: ${{ fromJSON(needs.discover.outputs.images) }}
     steps:
       - uses: actions/checkout@v7
       - name: login to ghcr
         run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-      - name: download datasets (cached on runner)
+      # NOT cached any more. This used to say "(cached on runner)" and that was
+      # the home runner's persistent $HOME; a burst VM is created for this job
+      # and destroyed after it, so --datasets-dir starts empty every time and
+      # every build is cold, docker layer cache included. The expensive misses
+      # this could hide are exactly the ones builder/derived-cache.lock now
+      # covers from GHCR, which is why cold builds are affordable at all —
+      # wikipedia's uncached path is a ~24-hour, ~89 GiB upstream fetch.
+      - name: download datasets
         run: bin/build download '${{ matrix.image }}' --datasets-dir "$HOME/benchmark-datasets"
       - name: build
         # ALLOW_DERIVE_CACHE_MISS: builder/stage-lib/derive-cache.sh's dcache_require
@@ -217,6 +255,12 @@ jobs:
       # job leaves docker the way it found it — only the datasets cache
       # ($HOME/benchmark-datasets) and a bounded builder cache persist.
       # always() so a failed build's partial images still get reclaimed.
+      #
+      # On a burst VM this and the prune below are near no-ops — the whole
+      # machine is discarded minutes later. Kept anyway: they cost seconds, they
+      # are what makes this workflow still correct if a job is ever run on the
+      # home runner again, and a build that dies with 200 GiB of layers on a VM
+      # that outlives it by a TTL window is not a hypothetical worth inviting.
       - name: clean up images
         if: always()
         run: bin/build clean '${{ matrix.image }}'

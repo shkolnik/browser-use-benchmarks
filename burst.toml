@@ -1,0 +1,14 @@
+# Config for burst-actions (https://github.com/shkolnik/burst-actions), which
+# boots one ephemeral AWS runner per queued job carrying the `burst` label.
+#
+# What this buys here: the build matrix in .github/workflows/build.yml used to
+# run `max-parallel: 1` because every image shared one runner's disk. On a
+# per-job VM that constraint is gone, so the fleet's wall-clock becomes the
+# SLOWEST image rather than the SUM of all of them.
+#
+# Sizing the VM volume is the one thing the burst side cannot infer from this
+# file. See docs/burst-runners.md for the measured per-image peak-disk figures
+# and the recommended volume size — wikipedia is the binding constraint, and it
+# needs far more than a default GitHub-hosted runner has.
+[burst]
+repo = "shkolnik/browser-use-benchmarks"
