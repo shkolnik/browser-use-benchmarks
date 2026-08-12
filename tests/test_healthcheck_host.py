@@ -22,6 +22,8 @@ Connect to the address that is fixed; send the name that is not.
 import re
 from pathlib import Path
 
+from builder.manifest import load_manifest
+
 REPO = Path(__file__).resolve().parent.parent
 IMAGES = REPO / "images"
 
@@ -108,3 +110,31 @@ def test_host_pinned_apps_are_probed_under_their_configured_name():
         f"Add -H \"Host: ${{HTTP_HOST}}\": a literal hostname here only ever passes "
         f"under the one HTTP_HOST that happens to match it, so the container goes "
         f"permanently unhealthy on every other deployment while serving correctly.")
+
+
+def test_every_image_declares_a_healthcheck():
+    """No HEALTHCHECK is not a milder defect than a bad one — it is a worse one.
+
+    `bin/build smoke` refuses to boot an image without one, because
+    `docker compose up --wait` on such an image degrades to waiting for RUNNING,
+    which a container that never serves a byte also reaches. That refusal is a
+    good gate but a late one: it costs a full download and build to reach.
+
+    Both map images shipped without a HEALTHCHECK — none of the three upstream
+    bases declares one (osrm-backend, openstreetmap-tile-server and
+    mediagis/nominatim all inspect to `null`), and nothing static said so. This
+    is the check that would have said so in 70 seconds.
+    """
+    missing = sorted(
+        str(d.parent.relative_to(IMAGES))
+        for d in IMAGES.glob("*/*/Dockerfile")
+        # probe/synthetic is the one image that is not a service: it exists to
+        # measure registry layer limits and declares no [service] at all, which
+        # is exactly why `bin/build smoke probe` failing loud on it is correct
+        # (docs/registry-limits.md). Scope this to images that claim to serve.
+        if load_manifest(d.parent).healthcheck
+        and "HEALTHCHECK" not in re.sub(r"\\\n\s*", " ", d.read_text()))
+    assert not missing, (
+        f"image(s) with no HEALTHCHECK: {missing}. `bin/build smoke` will refuse "
+        f"to boot them. Inheriting one from the base image does not count and is "
+        f"not the common case — add one to the Dockerfile.")
