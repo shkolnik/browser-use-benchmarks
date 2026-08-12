@@ -46,7 +46,15 @@ COPY --from=restore /data/car/ /data/car/
 COPY --from=restore /data/bike/ /data/bike/
 COPY --from=restore /data/foot/ /data/foot/
 COPY entrypoint.sh /entrypoint.sh
+COPY healthcheck.sh /healthcheck.sh
 # The base image sets no ENTRYPOINT and CMD ["bash"] (verified by inspecting its
 # config blob), which is why upstream passes `osrm-routed …` as the run command.
 EXPOSE 5000 5001 5002
+# Required, not optional: the base declares no HEALTHCHECK, and `bin/build
+# smoke` refuses to boot an image without one — `docker compose up --wait` on
+# such an image degrades to waiting for RUNNING, which a container that never
+# serves a byte also reaches. The probe checks all three profiles; see the
+# script for why it speaks HTTP over bash's /dev/tcp.
+HEALTHCHECK --start-period=180s --interval=15s --timeout=15s --retries=5 \
+  CMD /bin/bash /healthcheck.sh || exit 1
 ENTRYPOINT ["/bin/bash", "/entrypoint.sh"]

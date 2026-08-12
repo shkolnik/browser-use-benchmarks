@@ -66,6 +66,18 @@ Two layers, deliberately separated:
   *"Required files are missing, cannot continue"*, observed by running the base image against a
   directory holding only `.mldgr`. An earlier version checked `.mldgr` alone, which would have passed
   a tar missing every sibling and deferred the failure to the smoke step.
+- **In-container, behavioural**: the `HEALTHCHECK` routes on **all three** profiles before the
+  container reports healthy. The base image ships no HTTP client at all — no curl, no wget, no nc —
+  so `healthcheck.sh` speaks HTTP over bash's `/dev/tcp`, and it matches `"code":"Ok"` in the body
+  rather than trusting the status line, because OSRM answers 200 with `"code":"NoRoute"` for a
+  request it understood but could not route. Checking only car would let `up --wait` report healthy
+  while foot routing was still unavailable.
+
+  The request sends `Connection: close`, which is load-bearing: `osrm-routed` does not close an
+  HTTP/1.0 socket after answering — it waits out its own ~5s idle timeout first. Without the header
+  that is 5s per profile, 15s for three, and the first version of this probe timed out at exactly
+  15s while the server's own log showed all three profiles answering 200 in 6ms. With it, the whole
+  three-profile check runs in 17ms.
 - **Pre-push, behavioural**: the pipeline's `smoke` step boots this image and polls
   `[service].healthcheck` — a real route request — *before* the push step. An image that assembles but
   cannot route never reaches the registry.
