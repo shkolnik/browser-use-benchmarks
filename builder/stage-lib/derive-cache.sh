@@ -228,15 +228,15 @@ dcache__fetch_blob() {
   #
   # --speed-limit/--speed-time is what makes the resume above REACHABLE. curl
   # has no transfer timeout by default, so a connection that is blackholed
-  # rather than reset — which is exactly what a WAN failover does to a flow
-  # that already exists — leaves curl blocked in recv() on a socket the kernel
-  # still thinks is open, for however long tcp_retries2 takes to expire (~15
-  # min, unbounded if the peer keeps the window alive). Nothing has failed, so
-  # nothing retries: the pass counter never advances and the job looks hung
-  # rather than slow. Falling under 100 KB/s for a solid minute is not a slow
-  # link — the runner measures ~15 MB/s and off-runner ~82 MB/s — it is a dead
-  # one, and the right response is to drop the socket and resume, which now
-  # costs only the bytes in flight.
+  # rather than reset — which is what a link failing over mid-flow does to a
+  # connection that already exists — leaves curl blocked in recv() on a socket
+  # the kernel still thinks is open, for however long tcp_retries2 takes to
+  # expire (~15 min, unbounded if the peer keeps the window alive). Nothing has
+  # failed, so nothing retries: the pass counter never advances and the job
+  # looks hung rather than slow. Falling under 100 KB/s for a solid minute is
+  # not a slow link — a healthy transfer here runs orders of magnitude above
+  # that — it is a dead one, and the right response is to drop the socket and
+  # resume, which now costs only the bytes in flight.
   local -a limit=(--connect-timeout 30
                   --speed-limit "${DCACHE_MIN_BPS:-102400}"
                   --speed-time "${DCACHE_STALL_SECS:-60}")
@@ -337,12 +337,10 @@ dcache__watch() {
 #
 #   copy failed: stream error: stream ID N; PROTOCOL_ERROR; received from peer
 #
-# and every one of the six landed on second :00 of a five-minute clock mark —
-# 05:20:00, 05:30:00, 05:40:00, 06:30:00, 06:40:00, 06:55:00. Six for six on
-# the same second is a periodic job tearing down connections near the runner,
-# not a limit in oras, in GHCR or on the path: the same entry pulled clean
-# off-runner in 1156 s over the same apartment network, and --concurrency 1
-# changed nothing. Attempt 1 of the second run transferred 19 GB correctly and
+# The interruptions arrive on a regular period, and the cause is local to the
+# CI environment rather than a limit in oras, in GHCR or on the path: the same
+# entry pulls clean from elsewhere in 1156 s, and --concurrency 1 changed
+# nothing. Attempt 1 of the second run transferred 19 GB correctly and
 # then threw all of it away, which is the actual defect — with interruptions
 # arriving every 10-15 minutes and an uninterrupted pull needing ~19, whole-
 # transfer retries can fail forever while making real progress every time.
@@ -350,18 +348,18 @@ dcache__watch() {
 # BLOB GRANULARITY WAS NOT ENOUGH. That was the first version's stated floor,
 # and run 31497034118 hit it twice in one run: vwa/classifieds (9 layers of
 # 8.59 GB) and webarena/gitlab (8.59, 8.59, 2.78) each burned all eight passes
-# on part-00 and never completed a single layer. The runner was getting under
-# ~15 MB/s, so an 8.59 GB layer needed ~10 minutes — the same period as the
-# teardowns. Two jobs, ~2 hours, zero bytes of progress, because a pass can
-# only skip what a previous pass FINISHED. Resumption coarser than the
-# interruption period does not converge; it just fails more slowly.
+# on part-00 and never completed a single layer. At the throughput available,
+# an 8.59 GB layer took about as long as the gap between interruptions. Two
+# jobs, ~2 hours, zero bytes of progress, because a pass can only skip what a
+# previous pass FINISHED. Resumption coarser than the interruption period does
+# not converge; it just fails more slowly.
 #
 # So the unit is now the byte, not the blob (dcache__fetch_blob). Progress is
 # monotone regardless of how blob size compares to the interruption period: an
-# interruption costs the bytes in flight and nothing else. Yesterday's numbers
-# say both problems had to be present to deadlock — at the 82 MB/s measured
-# off-runner that layer takes 105 s and fits in any window — which is exactly
-# why the fix must not depend on either one.
+# interruption costs the bytes in flight and nothing else. Both problems had
+# to be present to deadlock — on a faster link the same layer finishes well
+# inside any window — which is exactly why the fix must not depend on either
+# one.
 dcache__fetch_blobs() {
   local ref=$1 dest=$2 mf=$3
   # A tagged ref's repository is everything before the LAST colon; blobs are

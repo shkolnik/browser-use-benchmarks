@@ -40,16 +40,13 @@ THE FIRST REAL ORAS READ HAPPENED, run 31483094508 (2026-08-11, branch
 verified against the manifest. It took four attempts to get there, and what it cost is worth
 recording because it is not a derived-cache defect and will bite every large pull:
 
-THE RUNNER'S CONNECTIONS ARE TORN DOWN ON A `*/5` SCHEDULE. Nine transfer failures across
-three runs (31460767854, 31464177083, 31483094508), every one of them
-`stream error: PROTOCOL_ERROR; received from peer`, and every one landing on second `:00` of
-a five-minute clock mark — 05:20:00, 05:30:00, 05:40:00, 06:30:00, 06:40:00, 06:55:00,
-10:45:00, 10:55:00, 11:10:00. Nine for nine on the same second is a periodic job near the
-runner, not oras, not GHCR, not the path: the same entry pulled clean off-runner in 1156 s
-over the same apartment network, one blob fetched alone verified digest-exact in 206 s, and
-`--concurrency 1` changed nothing. NOT YET FOUND — worth a look at `crontab -l`,
-`systemctl list-timers` and anything reloading firewall rules on the runner VM and its host.
-Until then every large pull pays for it.
+LONG TRANSFERS ARE INTERRUPTED PERIODICALLY IN CI. Nine transfer failures across three runs
+(31460767854, 31464177083, 31483094508), every one of them
+`stream error: PROTOCOL_ERROR; received from peer`, arriving on a regular period. The cause
+is local to the CI environment, not oras, not GHCR, not the path: the same entry pulled clean
+elsewhere in 1156 s, one blob fetched alone verified digest-exact in 206 s, and
+`--concurrency 1` changed nothing. Not yet identified; until it is, every large pull pays
+for it.
 
 `dcache_pull` now survives it (PR #36): blob-by-blob fetch, skipping any layer whose size AND
 sha256 already match, so an interruption costs one blob instead of the whole transfer. Run
@@ -164,8 +161,8 @@ DESIGN NOTES (worked out, not built):
 4. Two tiers: tier 1 = HEAD compare (seconds, scheduled, never in the build path); tier 2 =
    full download + sha256, the only authoritative check, hours, triggered only when tier 1
    changes.
-5. MUST run on the SELF-HOSTED runner: the lab mirror URL (sandbox-1.lab.jshkol.com:8098) is
-   not reachable from GitHub-hosted runners.
+5. MUST run on the SELF-HOSTED runner: the lab mirror is not reachable from GitHub-hosted
+   runners.
 6. Suggested CLI shape: `bin/build probe-upstream [target] [--update]`, `--update` rewrites the
    baseline as a deliberate committed act; exit nonzero on drift.
 
