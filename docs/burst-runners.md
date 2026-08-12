@@ -89,8 +89,9 @@ fit: the model under-predicted that build by 40%, so the margin is covering the 
 still not understood. 400 GiB — the figure this document carried before anything was measured — would
 have failed on three of the eleven images.
 
-If burst can size per-job, the cheap version is **250 GiB for everything except `map-nominatim`,
-`wikipedia` and `classifieds`**, which take the 750.
+`volume_gb` is one number for the whole fleet, so 750 is what every job gets. If burst ever sizes
+per-job, the cheap version is **250 GiB for everything except `map-nominatim`, `wikipedia` and
+`classifieds`**, which take the 750.
 
 ### The two ways wikipedia gets worse
 
@@ -126,7 +127,16 @@ or above ~16 GiB of RAM is safe for the fleet as it stands.
 
 ## Before the first live run
 
-Owned by the burst operator, not by this repo: docker in the AMI (+ rebake), a PAT covering this
-repo, and the fork-approval repo setting verified. Until then, jobs labeled `burst` simply sit
+Owned by this repo and done: `burst.toml` carries the sizing above as `volume_gb = 750` with
+`volume_iops` / `volume_throughput_mbps` raised off gp3's baseline (125 MB/s would be over an hour
+of pure write time for a 500 GiB job), a pinned `base_ami`, and a `provision` script installing
+docker plus the buildx and compose plugins that `bin/build` needs. burst's own
+[runner contract](https://github.com/shkolnik/burst-actions/blob/main/docs/runner-contract.md)
+documents what a job may rely on: one gp3 root volume holding both the workspace and
+`/var/lib/docker`, and a pre-job `df /` check that powers the VM off rather than starting a build
+that cannot fit.
+
+Owned by the burst operator: a PAT with Administration read/write on this repo, the fork-approval
+repo setting verified, and the first `burst bake`. Until then, jobs labeled `burst` simply sit
 queued — which is also why this branch should not land on `main`: merging it would leave every push
 to `main` queued behind a runner that does not exist yet.

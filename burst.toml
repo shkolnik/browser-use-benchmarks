@@ -5,11 +5,32 @@
 # run `max-parallel: 1` because every image shared one runner's disk. On a
 # per-job VM that constraint is gone, so the fleet's wall-clock becomes the
 # SLOWEST image rather than the SUM of all of them.
-#
-# Sizing the VM volume is the one thing the burst side cannot infer from this
-# file. See docs/burst-runners.md for the measured per-image peak-disk figures
-# and the recommended volume size. Short version: 750 GiB per job. The binding
-# case is webarena/map-nominatim, measured at a 520.7 GiB peak, and every image
-# here needs far more than a default GitHub-hosted runner has.
 [burst]
 repo = "shkolnik/browser-use-benchmarks"
+
+# Disk is the binding constraint here, not CPU. See docs/burst-runners.md for
+# the measured per-image peak-disk figures; the short version is that the
+# workspace, the buildkit cache and /var/lib/docker hold about five copies of
+# the same bytes at once, so a 116 GiB input archive peaks past 500 GiB.
+#
+# 750 GiB clears the measured worst case (webarena/map-nominatim, 520.7 GiB)
+# with deliberate headroom: our own model under-predicted that build by 40%,
+# and webarena/wikipedia on a derived-cache miss models above 600 GiB.
+volume_gb = 750
+
+# gp3's 125 MB/s baseline is over an hour of pure write time for a ~500 GiB
+# job — against a 300-minute job timeout that is not affordable, and it would
+# present as "the build is slow" rather than as a throttled volume. 1000 MB/s
+# is gp3's ceiling and requires volume_iops >= 4000.
+volume_iops = 6000
+volume_throughput_mbps = 1000
+
+# Pinned so a new Debian release upstream cannot silently change what we bake
+# from. burst refuses to guess this; it printed this exact line, and prints a
+# new one when the current Debian 13 x86_64 image in us-east-2 moves on.
+base_ami = "ami-0703709356caf3a36"
+
+# Baked into the AMI, not run per job: docker plus the buildx and compose-v2
+# CLI plugins that `bin/build`'s build and smoke steps require. See the script
+# for why plain docker.io is not sufficient. Editing it forces a rebake.
+provision = ".burst/provision.sh"
