@@ -66,8 +66,10 @@ that duplicated algorithm into a shared `partition-tree.py`.
 - **In-build, structural**: PG-major match (above), the `planet-import-complete` marker present,
   cluster ownership `postgres:postgres`, and a 10G floor on `/data/database` so a truncated import
   fails the build instead of serving blank tiles.
+- **In-container, behavioural**: the `HEALTHCHECK` fetches `/tile/0/0/0.png` — upstream's own
+  readiness check — so the container reports healthy only once it has really rendered a tile.
 - **Pre-push, behavioural**: `smoke` boots the image and polls `[service].healthcheck` — a real
-  rendered tile — before the push step.
+  rendered tile — before the push step, this time from the host through the published port.
 
 ⚠️ The healthcheck renders zoom 0 (the whole world) from a cold 40G cluster on first request. If smoke
 proves flaky, raise `poll_health`'s timeout rather than substituting a cheaper URL, which would stop

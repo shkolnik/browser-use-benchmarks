@@ -37,3 +37,15 @@ COPY --from=restore /staging/bucket-07/ /data/
 # still override it.
 CMD ["run"]
 EXPOSE 80 5432
+# Required, not optional: the base declares no HEALTHCHECK, and `bin/build
+# smoke` refuses to boot an image without one — `docker compose up --wait` on
+# such an image degrades to waiting for RUNNING, which a container that never
+# serves a byte also reaches.
+#
+# Upstream's own readiness check, and a real rendered tile rather than a
+# liveness stub. Zoom 0 is the whole world rendered from a cold 40G cluster on
+# first request, which is what the long start period and the generous per-probe
+# timeout are for. If this proves flaky, raise them — do not substitute a
+# cheaper URL, which would stop proving the thing worth proving.
+HEALTHCHECK --start-period=900s --interval=30s --timeout=120s --retries=5 \
+  CMD curl -fsS --max-time 115 http://localhost/tile/0/0/0.png -o /dev/null || exit 1
