@@ -51,8 +51,10 @@ comment about them is misleading:
   `docker` appearing twice)
 
 Upstream applies `--strip-components=5` to both and justifies it with the `ogma3` prefix alone. That
-number is right for nominatim and over-strips the tile tar, collapsing `osm-data` and `osm-tiles` onto
-one path. Don't copy the number to the sibling images; count the components per tar.
+number reconstructs the volume layout for nominatim and over-strips the tile tar, eating the volume
+name and leaving its contents at a bare `_data/`. Neither sibling image ends up using 5 anyway, since
+both extract to the path the service reads rather than to a volumes root — tile uses 6, nominatim 7.
+Don't copy the number to the sibling images; count the components per tar.
 
 ## Validation
 

@@ -3,7 +3,10 @@
 Rebuilds the tile-serving third of the WebArena map backend as a self-contained image. Upstream ships
 this as an AWS AMI whose cloud-init downloads `osm_tile_server.tar` at boot, unpacks it into
 `/var/lib/docker/volumes`, and bind-mounts the `osm-data` and `osm-tiles` volumes into a container.
-This image bakes both volumes in, so a pulled image serves tiles with no external fetch and no import.
+This image bakes the database in, so a pulled image serves tiles with no external fetch and no import.
+
+`osm-tiles` is *not* in the archive and is not baked: see the decision below. It is the rendered-tile
+cache, and docker creates it empty at run time.
 
 Behavioural reference: `webarena-map-backend-boot-init.yaml` (upstream cloud-init user-data), verified
 byte-identical to the copy published at the root of `web-arena-x/webarena`.
@@ -45,10 +48,21 @@ silently refuses to start.
 
 ## Decisions
 
-**`--strip-components=4`, not upstream's 5.** Upstream applies 5 to this tar and justifies it with the
-`projects/ogma3/docker/volumes/` prefix — but that prefix is only **4** components. Stripping 5 also
-eats the volume *name*, collapsing `osm-data` and `osm-tiles` onto one path. (5 *is* correct for the
-nominatim tar, whose prefix differs and genuinely is 5 deep.) Count per tar; never copy the number.
+**The archive holds one volume, not two — measured, after assuming otherwise.** A full listing is
+**1,624 entries and every one of them is under `osm-data`**. Upstream's cloud-init mounts
+`--volume=osm-tiles:/data/tiles/` as well, and the first version of this image read those two mounts
+as evidence the tar carried two volumes; the build failed on the missing `osm-tiles/_data` rather than
+shipping a wrong tree. Docker creates that volume empty at run time, which is right: `/data/tiles` is
+the **rendered-tile cache**, generated on demand from the database. An empty directory is the honest
+initial state, and the healthcheck's first zoom-0 request is what starts filling it.
+
+**`--strip-components=6`, which is neither upstream's 5 nor this image's own earlier 4.** The contents
+go straight to `/data/database`, where upstream bind-mounts the volume, so the whole
+`projects/ogma3/docker/volumes/osm-data/_data/` prefix comes off — 6 components. Upstream strips 5
+because it is rebuilding docker's volume layout under `/var/lib/docker/volumes`, but it justifies the
+number with the `projects/ogma3/docker/volumes/` prefix, which is only **4** — so upstream's own tile
+extraction eats the volume *name*. All three tars in this backend differ. Count per tar; never copy
+the number from a sibling.
 
 **`--numeric-owner` on extraction.** The archive carries uid/gid **101:103** for the Postgres cluster
 and **1000:1000** for the volume root, which are exactly `postgres:postgres` and `renderer:renderer`
@@ -56,6 +70,16 @@ inside this image — verified with `id` against the base. Resolving by *name* a
 `/etc/passwd` would remap both (on one host those uids render as `uuidd` and an unrelated user).
 `restore-stage.sh` asserts the resulting ownership rather than issuing a blanket `chown`, which would
 erase the postgres/renderer split the image depends on.
+
+**The base image's own cluster is deleted first — in both stages.**
+`overv/openstreetmap-tile-server` ships an `initdb`'d cluster at `/data/database/postgres` from its
+own build. Restoring on top of it would *merge* two unrelated clusters: only the colliding names get
+replaced, and every base-only file survives — WAL segments stamped with a different system identifier
+among them. That a merged directory happens to start proves nothing about what it contains. Both the
+restore stage and the final stage `rm -rf /data/database /data/tiles` and recreate them
+`renderer:renderer`, which is the base image's own ownership for `/data/*`; the cluster inside is
+`postgres`-owned and carries that from the archive. The same hazard, and the same fix, applies to
+`map-nominatim`.
 
 **Bucketed layers.** At ~41G the data cannot ship as one layer, so the restore stage partitions `/data`
 into 8 buckets of ≤8G by the same greedy first-fit used by `webarena/gitlab`. Task #53 tracks lifting

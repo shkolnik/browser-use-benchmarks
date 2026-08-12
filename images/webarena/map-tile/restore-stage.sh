@@ -9,35 +9,47 @@ TAR=/tmp/osm_tile_server.tar
 BUCKET_LIMIT_KB=$((8 * 1024 * 1024))  # 8G target keeps layers under GHCR's ~10G comfort zone
 BUCKET_COUNT=8  # must match the COPY --from lines in the Dockerfile's final stage
 
-echo "=== extract upstream volumes ==="
-# ONE pass over a 41G archive. --strip-components=4 removes
-# projects/ogma3/docker/volumes/ and leaves osm-data/_data and osm-tiles/_data.
+echo "=== extract the upstream tile database ==="
+# The base image ships its OWN initdb'd cluster at /data/database/postgres,
+# created when the image was built. Extracting on top of it would MERGE two
+# unrelated clusters: the files whose names collide get overwritten and every
+# base-only file survives, including WAL segments stamped with a different
+# system identifier. That is a corrupt data directory, not a restored one — and
+# that a merged one happens to START proves nothing about what it holds. Wipe
+# first, and recreate renderer-owned, which is the base image's ownership for
+# /data/*; the cluster inside is postgres-owned and carries that from the tar.
+rm -rf /data/database /data/tiles
+install -d -o renderer -g renderer /data/database /data/tiles
+
+# --strip-components=6 removes projects/ogma3/docker/volumes/osm-data/_data/,
+# landing the volume's contents directly where upstream bind-mounts them
+# (`--volume=osm-data:/data/database/`). Extracting to the destination beats
+# unpacking to a staging path and moving: same result, one pass, no second
+# traversal of 1,624 entries.
 #
-# 4, NOT the 5 upstream's cloud-init uses. Upstream justifies 5 with the
-# 'projects/ogma3/docker/volumes/' prefix, but that prefix is only 4 components;
-# 5 also eats the volume NAME, collapsing osm-data and osm-tiles onto the same
-# path. (5 IS correct for the nominatim tar, whose prefix differs — count per
-# tar, never copy the number.)
+# Neither upstream's 5 nor an earlier version of this file's 4. Upstream strips
+# 5 because it extracts into /var/lib/docker/volumes and wants docker's volume
+# layout rebuilt there — but it justifies the number with the
+# 'projects/ogma3/docker/volumes/' prefix, which is only 4 components, so
+# upstream's own tile extraction eats the volume NAME. The three tars in this
+# backend all differ: count per tar, never copy the number from a sibling.
 #
 # --numeric-owner is load-bearing. The archive carries uid/gid 101:103 for the
 # postgres cluster and 1000:1000 for the volume root, which are exactly
 # postgres:postgres and renderer:renderer in this image (verified with `id`).
 # Resolving by NAME against the build host's /etc/passwd would remap both.
-mkdir -p /tmp/vol
-tar --numeric-owner -C /tmp/vol --strip-components=4 -xf "$TAR"
+tar --numeric-owner -C /data/database --strip-components=6 -xf "$TAR"
 rm -f "$TAR"
 
-for v in osm-data osm-tiles; do
-  [ -d "/tmp/vol/$v/_data" ] || { echo "restore: /tmp/vol/$v/_data missing — tar layout changed" >&2; exit 1; }
-done
-
-# Upstream bind-mounts osm-data at /data/database and osm-tiles at /data/tiles
-# (webarena-map-backend-boot-init.yaml `docker run --volume=` lines). Same
-# filesystem, so these are renames, not copies.
-mkdir -p /data/database /data/tiles
-mv /tmp/vol/osm-data/_data/. /data/database/
-mv /tmp/vol/osm-tiles/_data/. /data/tiles/
-rmdir /tmp/vol/osm-data/_data /tmp/vol/osm-data /tmp/vol/osm-tiles/_data /tmp/vol/osm-tiles /tmp/vol
+# There is NO osm-tiles volume in this archive — a full listing is 1,624 entries
+# and all of them are under osm-data. Upstream's cloud-init mounts
+# `--volume=osm-tiles:/data/tiles/`, and an earlier version of this script read
+# that as evidence the tar carried two volumes; it does not, and the build
+# failed here rather than shipping a wrong tree. Docker creates that volume
+# empty at run time, which is correct: /data/tiles is the RENDERED TILE CACHE,
+# built on demand from the database. An empty directory is the honest initial
+# state, and the healthcheck's first zoom-0 request is what fills it.
+[ -d /data/database/postgres ] || { echo "restore: /data/database/postgres missing — tar layout changed" >&2; exit 1; }
 
 echo "=== validate ==="
 # A Postgres cluster only starts under its OWN major version. The baked cluster

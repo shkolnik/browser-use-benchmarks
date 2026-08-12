@@ -19,6 +19,13 @@ COPY restore-stage.sh /restore-stage.sh
 RUN /bin/bash /restore-stage.sh
 
 FROM overv/openstreetmap-tile-server@sha256:b6a79da39b6d0758368f7c62d22e49dd3ec59e78b194a5ef9dee2723b1f3fa79
+# Same wipe as the restore stage, for the same reason and in the final image
+# this time: the base ships an initdb'd cluster at /data/database/postgres, and
+# COPYing the restored one on top of it would leave every base-only file in
+# place — WAL segments from a different system identifier included. Only the
+# colliding names get replaced, so the result would be a merge of two clusters.
+RUN rm -rf /data/database /data/tiles \
+    && install -d -o renderer -g renderer /data/database /data/tiles
 # One layer per staging bucket keeps every pushed layer under ~10G (GHCR's
 # comfortable ceiling). Bucket count must match BUCKET_COUNT in
 # restore-stage.sh. COPY --from=<stage> preserves uid/gid, which this image
