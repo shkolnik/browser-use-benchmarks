@@ -37,7 +37,12 @@ echo "=== extract the upstream Postgres cluster ==="
 # Resolving by NAME against the build host's /etc/passwd would remap it, and a
 # cluster postgres cannot read is a cluster postgres will not start.
 rm -rf "$PGDATA"
-mkdir -p "$PGDATA"
+# install, not mkdir: --strip-components drops the archive's own entry for the
+# directory it strips, so nothing in the extract sets the ownership or mode of
+# $PGDATA itself. A root-owned 0755 data directory is one Postgres refuses to
+# start on, and the ownership assertion further down is what would have caught
+# it — ten minutes into a build, after a two-hour download.
+install -d -o postgres -g postgres -m 700 "$PGDATA"
 tar --numeric-owner -C "$PGDATA" --strip-components=7 -xf "$TAR" \
     projects/metis2/docker/docker/volumes/nominatim-data
 rm -f "$TAR"
