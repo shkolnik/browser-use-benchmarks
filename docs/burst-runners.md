@@ -25,42 +25,78 @@ the one configuration that can turn a 300-minute timeout into a real risk.
 
 ## Disk: the number burst needs
 
-Everything below lands on one volume unless the VM puts `/var/lib/docker` on a second one. The peak
-is the sum of three things that coexist:
+Everything below lands on one volume unless the VM puts `/var/lib/docker` on a second one.
 
-1. **`$HOME/benchmark-datasets`** — the derived parts pulled from GHCR (and, on a cache miss, the
-   upstream archive as well).
-2. **`/var/lib/docker`** — build-stage layers plus the final image. For images with a restore stage
-   this is close to two copies of the restored tree, because the final stage `COPY --from=restore`s
-   it. (The partitioner itself does not double anything: `partition-tree.py` renames within one
-   filesystem, and only copies on EXDEV.)
-3. **The smoke container's writable layer** — `bin/build smoke` boots the image *before* it is
-   pushed, so this is part of peak, not a runtime-only concern.
+**The first version of this document modelled the peak as roughly two copies of the data and was
+wrong by a factor of three.** It has since been measured, by sampling free space every 20s across a
+full `download` → `build` → `smoke` of two images on an otherwise idle host:
 
-| image | dataset / derived input | final image | peak disk (est.) | source of the sizes |
+| image | input tar | restored tree | measured peak |
+|---|---:|---:|---:|
+| webarena/map-osrm | 19.82 GiB | 19.8 GiB | **129.4 GiB** |
+| webarena/map-tile | 38.45 GiB | 38 GiB | **280.4 GiB** |
+| webarena/map-nominatim | 116.21 GiB | 34.8 GiB | **520.7 GiB** |
+
+Each run started from a pruned builder. (The map-tile figure carries the cached context of one failed
+build attempt that preceded the good one; a clean run is nearer 240 GiB.)
+
+Two copies of the archive plus about four of the restored tree fits all three within ~10%:
+`2 × 19.8 + 4 × 19.8 = 119` (measured 129), `2 × 38.5 + 4 × 38 = 229` (measured 240 clean),
+`2 × 116.2 + 4 × 34.8 = 372` (measured 521 — the outlier, and the one to size against; a 116 GiB
+context is where buildkit's own accounting stops being a rounding error).
+
+Where it goes — five copies of the same bytes coexist, not two:
+
+1. **`--datasets-dir`** — the verified archive itself.
+2. **The buildkit context copy** — `COPY --from=datasets <tar>` writes a second copy into the build
+   cache before the restore stage can touch it.
+3. **The restore stage's extracted tree.**
+4. **The final stage's layers**, because it `COPY --from=restore`s that tree. (The partitioner adds
+   nothing: `partition-tree.py` renames within one filesystem, and only copies on EXDEV.)
+5. **The unpacked image**, written again by the exporter — and on this fleet's images `docker system
+   df` shows the image store and the build cache holding it simultaneously.
+
+Plus **the smoke container's writable layer**: `bin/build smoke` boots the image *before* it is
+pushed, so that is part of peak, not a runtime-only concern.
+
+Nothing is reclaimed until the job ends. `docker builder prune -af` between images is what brings a
+shared runner back down, and it is exactly what a per-job VM does not need to care about — but it is
+also why the peak below is a **per-job** number, not a fleet number.
+
+| image | dataset / derived input | final image | peak disk | source |
 |---|---|---|---|---|
-| **webarena/wikipedia** | 88.7 GiB of parts | ~89 GiB | **~270 GiB** | `images/webarena/wikipedia/README.md`, `split-zim.sh` |
-| vwa/classifieds | ~73 GB of item photos | 77.8 GB | ~160 GiB | `images/vwa/classifieds/README.md` |
-| webarena/shopping | ~50 GB media tar | ~48 GB | ~150 GiB | `images/webarena/shopping/derive-backup.sh` |
-| webarena/gitlab | ~40 GB backup tar | ~45 GB | ~140 GiB | `images/webarena/gitlab/image.toml`, `derive-backup.sh` |
-| webarena/reddit | 41.3 GB media tar | ~39 GB | ~130 GiB | `images/webarena/reddit/derive-backup.sh` |
-| webarena/shopping-admin | ~3 GB | ~45 GB | ~100 GiB | `images/webarena/shopping-admin/Dockerfile` |
-| webshop/server | ~19 GB | 15.8 GB | ~60 GiB | `images/webshop/server/README.md` |
-| miniwob/server | <1 GB | small | ~20 GiB | — |
+| **webarena/map-nominatim** | 116.2 GiB tar (34.8 GiB restored) | ~36 GB | **520.7 GiB, measured** | sampled every 20s |
+| webarena/map-tile | 38.45 GiB tar | ~40 GB | **280.4 GiB, measured** | sampled every 20s |
+| webarena/map-osrm | 19.82 GiB tar | ~21 GB | **129.4 GiB, measured** | sampled every 20s |
+| webarena/wikipedia | 88.7 GiB of parts | ~89 GiB | ~530 GiB, modelled | `images/webarena/wikipedia/README.md`, `split-zim.sh` |
+| vwa/classifieds | ~73 GB of item photos | 77.8 GB | ~410 GiB, modelled | `images/vwa/classifieds/README.md` |
+| webarena/shopping | ~50 GB media tar | ~48 GB | ~280 GiB, modelled | `images/webarena/shopping/derive-backup.sh` |
+| webarena/reddit | 41.3 GB media tar | ~39 GB | ~230 GiB, modelled | `images/webarena/reddit/derive-backup.sh` |
+| webarena/gitlab | ~40 GB backup tar | ~45 GB | ~225 GiB, modelled | `images/webarena/gitlab/image.toml`, `derive-backup.sh` |
+| webarena/shopping-admin | ~3 GB | ~45 GB | ~140 GiB, modelled | `images/webarena/shopping-admin/Dockerfile` |
+| webshop/server | ~19 GB | 15.8 GB | ~110 GiB, modelled | `images/webshop/server/README.md` |
+| miniwob/server | <1 GB | small | ~20 GiB, modelled | — |
 
-**Only the first column is measured.** The dataset and final-image sizes are recorded in the tree
-from real builds; the peak-disk column is those numbers added up under the model above, not a
-figure anyone has watched on a gauge. Treat it as a floor to size against, not a guarantee.
+**Three rows are measured; the rest are the same model applied to their inputs** (`2 × archive +
+4 × restored tree`, rounded up). Every image in the fleet has the same shape — `COPY --from=datasets`
+a large archive, restore it in a build stage, `COPY --from=restore` it into the final one — which is
+why the model transfers, but a modelled row is still a floor to size against, not a guarantee.
+`shopping-admin` is the one whose peak is driven by its final image rather than its input.
 
-**Recommendation: a 400 GiB volume**, uniform across jobs unless burst can size per-job. That
-clears wikipedia's ~270 GiB with room for the base images and the ~90 GiB the smoke container
-writes, and every other image fits several times over.
+**Recommendation: a 750 GiB volume**, uniform across jobs unless burst can size per-job. That clears
+the measured worst case (nominatim, 521 GiB) with real headroom, and it is deliberately not a snug
+fit: the model under-predicted that build by 40%, so the margin is covering the part of this that is
+still not understood. 400 GiB — the figure this document carried before anything was measured — would
+have failed on three of the eleven images.
+
+If burst can size per-job, the cheap version is **250 GiB for everything except `map-nominatim`,
+`wikipedia` and `classifieds`**, which take the 750.
 
 ### The two ways wikipedia gets worse
 
 - **On a derived-cache miss** it needs the whole 88.7 GiB archive *beside* the 88.7 GiB of parts —
-  `split-zim.sh` refuses to start a split it cannot finish and logs the shortfall. That pushes peak
-  to roughly **360 GiB**, which 400 GiB still covers, but only just.
+  `split-zim.sh` refuses to start a split it cannot finish and logs the shortfall. Under the measured
+  model that pushes its peak past **600 GiB**, which the 750 still covers and the old 400 did not.
 - **The fetch itself.** A cold fetch from the public mirrors was measured at ~1.05 MB/s to the home
   runner — run 31256297478 moved its disk 264G → 268G in 65 minutes, i.e. about **24 hours** for the
   file. `timeout-minutes: 300` would kill it first. From AWS the mirrors may well be faster; nobody

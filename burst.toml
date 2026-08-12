@@ -8,7 +8,8 @@
 #
 # Sizing the VM volume is the one thing the burst side cannot infer from this
 # file. See docs/burst-runners.md for the measured per-image peak-disk figures
-# and the recommended volume size — wikipedia is the binding constraint, and it
-# needs far more than a default GitHub-hosted runner has.
+# and the recommended volume size. Short version: 750 GiB per job. The binding
+# case is webarena/map-nominatim, measured at a 520.7 GiB peak, and every image
+# here needs far more than a default GitHub-hosted runner has.
 [burst]
 repo = "shkolnik/browser-use-benchmarks"
