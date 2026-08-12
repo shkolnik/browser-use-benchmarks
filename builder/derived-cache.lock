@@ -45,11 +45,14 @@
 # others did: its ~95 GB of parts were fetched blob-by-blob from the legacy
 # manifest, verified against the ZIM pin in image.toml, and republished through
 # `dcache_push` (PR #34). Its previous legacy manifest,
-# sha256:1de4846366e0ac1940e486e5f48463ae27cbe7f9937fac1db42ec8915fe1d2c6, is
-# still addressable by digest until GHCR collects it — the recovery handle if
-# the republished entry ever proves wrong. It guards the most expensive miss in
-# the fleet: a ~24-hour, ~95 GB upstream fetch, now that the lab mirror is gone
-# from its manifest.
+# sha256:1de4846366e0ac1940e486e5f48463ae27cbe7f9937fac1db42ec8915fe1d2c6, was
+# the recovery handle for that republish and is GONE as of 2026-08-12 — deleted
+# with the rest of the pre-ORAS versions, and confirmed 404. There is no second
+# copy of this dataset anywhere: the entry pinned below is now the only thing
+# standing between the fleet and the most expensive miss it has, a ~24-hour,
+# ~95 GB upstream fetch, since the lab mirror is gone from its manifest too.
+# Treat this line as load-bearing — do not delete, re-tag or re-push this entry
+# without first putting the bytes somewhere else.
 
 ghcr.io/shkolnik/vwa-classifieds-derived:a2a794da92f6-r1 sha256:57347cf87227ddd766d987afbeb1ccc7f6059e3177474ae758d72763118321e8
 ghcr.io/shkolnik/webarena-gitlab-derived:6269a90527a6-r1 sha256:603ad315204a51f4f50525b539ec4edc68b363a44dee4fc881f59884252bdd57

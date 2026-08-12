@@ -32,8 +32,9 @@ the manifest; concatenated sha256 == the ZIM pin `f1216351…eea021`; both Xapia
 whole inside one part), then re-pushed through `dcache_push`. The tag now resolves to
 `sha256:7184991800ee212a1626a2fc021e3125411a53939f5d15000d5e4c6550f0ddd2`, artifactType
 `application/vnd.unknown.artifact.v1`, 13 layers, sizes identical to the verified bytes. The
-old legacy manifest `sha256:1de48463…d2c6` stays reachable by digest until GHCR GCs it —
-that's the recovery handle if anything is wrong.
+old legacy manifest `sha256:1de48463…d2c6` was the recovery handle for that republish; it was
+deleted on 2026-08-12 with the rest of the pre-ORAS versions and is confirmed 404. There is no
+second copy of this dataset anywhere now.
 
 THE FIRST REAL ORAS READ HAPPENED, run 31483094508 (2026-08-11, branch
 `wikipedia-pull-concurrency`): `split-zim: cache hit (oras format)`, 95 GB extracted and
@@ -75,11 +76,22 @@ is a reviewed edit to the lock, which is the whole reason it is checked in
 digest the registry itself reports, which is the way this check would otherwise be subtly
 wrong.
 
-REMAINING before this closes:
-1. Delete the pre-ORAS cache image repositories on GHCR. Nothing reads them: the legacy reader
-   is gone (PR #35) and all seven entries are artifacts. Keep in mind the legacy wikipedia
-   manifest `sha256:1de48463…d2c6` is the documented recovery handle for the republished
-   entry, so it goes last, if at all. Inventory first, confirm the list, then delete.
+THE PRE-ORAS VERSIONS ARE GONE (2026-08-12, run by James — user-scoped packages can only be
+deleted by their owner, so the bot account could inventory but never delete). There were no
+separate legacy *repositories*: the legacy entries were older VERSIONS inside the same seven
+`*-derived` packages — 31 versions, of which 24 were legacy (288.2 GB) and 7 pinned. Nothing
+could reach them; every derive script builds its ref as `<hash>-$RECIPE`, so the four
+un-suffixed tags (`6269a90527a6`, `6ff70f73bc80`, `2052430ee930`, `ad607557a79f`) were
+unreachable by construction and the other 20 were untagged. Indexes were deleted before the
+manifests they pointed at, so nothing was left dangling. Verified after: each package holds
+exactly one version, all seven pinned digests still re-resolve live, and both wikipedia legacy
+manifests return 404.
+
+THIS SECTION IS CLOSED. What it leaves behind, and what to be careful of: there is now exactly
+one copy of every derived dataset, pinned in `builder/derived-cache.lock` and enforced on both
+the miss and the hit path. Wikipedia's is the one to respect — no second copy exists anywhere,
+and re-deriving it is a ~24-hour, ~95 GB upstream fetch. Do not delete, re-tag or re-push any
+pinned entry without putting the bytes somewhere else first.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 
