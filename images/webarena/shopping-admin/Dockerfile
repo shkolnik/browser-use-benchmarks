@@ -11,7 +11,7 @@
 # Dockerfile (MIT, vendored notes in vendor-markshust/) — same digest as
 # ../shopping, for version parity.
 
-FROM markoshust/magento-php@sha256:4b10bfa3cd2586d4e20defbb6789dfa75d30346cd1b93da22a6c9f18c35d4185 AS runtime
+FROM markoshust/magento-php@sha256:0f89dad43bde07034fe007eb02f0f24fcff98f98dacf7b1d900ac98425941a01 AS runtime
 USER root
 
 # All services beside php-fpm (which the base provides): nginx + redis (7.0) +
