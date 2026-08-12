@@ -20,10 +20,29 @@ volume_gb = 750
 
 # gp3's 125 MB/s baseline is over an hour of pure write time for a ~500 GiB
 # job — against a 300-minute job timeout that is not affordable, and it would
-# present as "the build is slow" rather than as a throttled volume. 1000 MB/s
-# is gp3's ceiling and requires volume_iops >= 4000.
+# present as "the build is slow" rather than as a throttled volume.
+#
+# But the volume is not the ceiling the instance is. burst's default
+# c7i.2xlarge sustains 2500 Mbps (312 MB/s) of EBS bandwidth and bursts to
+# 10000 Mbps for ~30 min per 24 h; a fresh VM per job means every job starts
+# with that burst allowance unspent, so short jobs really can exceed baseline —
+# and webarena/map-nominatim, the one job long enough to matter, cannot, since
+# it exhausts the allowance in its first half hour. Buying gp3's 1000 MB/s
+# ceiling therefore bought a number this instance can only briefly honour.
+#
+# 500 MB/s is 1.6x the sustained baseline: still well clear of a throttled
+# volume during the bursty phases, without the config claiming throughput the
+# VM cannot deliver. Measured: webarena/map-osrm's build phase averaged about
+# 164 MiB/s, roughly half the baseline, so this is headroom over a real
+# workload rather than a guess. Raise it with the instance type, not alone.
+volume_throughput_mbps = 500
+
+# Left at 6000 deliberately, unlike the throughput above: it is inside the
+# instance's 12000 baseline IOPS, so unlike the 1000 MB/s it was never a number
+# the VM could not honour. gp3 also requires >= 4 IOPS per MB/s of throughput,
+# and map-nominatim's Postgres import is the random-write phase that most wants
+# the depth.
 volume_iops = 6000
-volume_throughput_mbps = 1000
 
 # Pinned so a new Debian release upstream cannot silently change what we bake
 # from. burst refuses to guess this; it printed this exact line, and prints a
