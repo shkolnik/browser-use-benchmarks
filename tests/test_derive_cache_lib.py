@@ -297,8 +297,9 @@ def test_a_blob_fetch_is_bounded_so_a_dead_socket_cannot_hang_the_pull(tmp_path)
     """Byte-range resume is unreachable while curl is still blocked in recv().
 
     curl applies no transfer timeout by default. A connection that is
-    blackholed rather than reset — a WAN failover on a flow that already
-    exists — leaves it waiting on a socket the kernel still believes is open
+    blackholed rather than reset — a link failing over mid-flow, on a
+    connection that already exists — leaves it waiting on a socket the kernel
+    still believes is open
     until tcp_retries2 expires, ~15 minutes and unbounded if the peer keeps
     the window alive. Nothing has failed, so no pass retries and no byte is
     resumed: the job is not slow, it is stopped, and it looks identical to
@@ -385,8 +386,9 @@ def test_a_layer_title_that_escapes_the_destination_is_refused(tmp_path):
 def test_a_blob_cut_off_mid_transfer_resumes_on_the_next_pass(tmp_path):
     """The failure this exists for, end to end.
 
-    The first request delivers part of the blob and dies the way the runner's
-    teardowns do; the second must ask for the REMAINDER. Before byte ranges
+    The first request delivers part of the blob and dies the way a connection
+    cut mid-transfer does; the second must ask for the REMAINDER. Before byte
+    ranges
     this was the deadlock: the partial file was discarded, so every pass
     re-fetched the same bytes and none ever finished.
     """
