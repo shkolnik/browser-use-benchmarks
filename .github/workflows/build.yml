@@ -273,14 +273,17 @@ jobs:
         if: always()
         run: |
           docker image prune -f
-          # --reserved-space needs buildx >= 0.17. The home runner has it; the
-          # burst AMI does not, because Debian 13 ships buildx 0.13.1 and there
-          # `docker builder prune` aliases to `docker buildx prune`, which
-          # rejects the flag outright (exit 125). Run 31638758507 failed that
-          # way with the build, smoke, push and attestation all already green.
-          # Reserving space is an optimization for a runner whose disk persists,
-          # so fall back to a plain prune rather than letting the janitor fail a
-          # finished job — same rule as the `docker system df` note above.
+          # --reserved-space needs buildx >= 0.17, and both runners now have it:
+          # the home runner tracks upstream, and .burst/provision.sh installs
+          # docker-buildx-plugin from Docker's apt repo rather than Debian's.
+          # The fallback stays because the failure it covers is cheap to hit and
+          # expensive to suffer: with the plugin installed `docker builder
+          # prune` aliases to `docker buildx prune`, so a runner that lands an
+          # older buildx (trixie ships 0.13.1) rejects the flag outright with
+          # exit 125 — run 31638758507 died that way with the build, smoke, push
+          # and attestation all already green. Reserving space is an
+          # optimization for a runner whose disk persists, never a reason to
+          # fail a finished job — same rule as the `docker system df` note.
           docker builder prune -f --reserved-space 20GB \
             || docker builder prune -f \
             || echo "builder prune failed; disk left as-is"
