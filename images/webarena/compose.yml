@@ -71,6 +71,13 @@ services:
       - "5000:5000"
       - "5001:5001"
       - "5002:5002"
+  map-nominatim:
+    image: ghcr.io/shkolnik/webarena-map-nominatim:latest
+    # Upstream's mapping: the container listens on 8080, published on 8085.
+    # Postgres 5432 is deliberately NOT published — nothing outside the
+    # container reads it.
+    ports:
+      - "8085:8080"
   gitlab:
     image: ghcr.io/shkolnik/webarena-gitlab:latest
     # No `command:` here on purpose. Upstream's documented run line is
