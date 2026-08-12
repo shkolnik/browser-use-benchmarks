@@ -76,10 +76,20 @@ digest the registry itself reports, which is the way this check would otherwise 
 wrong.
 
 REMAINING before this closes:
-1. Delete the pre-ORAS cache image repositories on GHCR. Nothing reads them: the legacy reader
-   is gone (PR #35) and all seven entries are artifacts. Keep in mind the legacy wikipedia
-   manifest `sha256:1de48463…d2c6` is the documented recovery handle for the republished
-   entry, so it goes last, if at all. Inventory first, confirm the list, then delete.
+1. Delete the pre-ORAS cache versions on GHCR. There are no separate legacy *repositories* —
+   inventoried 2026-08-12, the legacy entries are older VERSIONS inside the same seven
+   `*-derived` packages: 31 versions total, 7 pinned (267.8 GB, keep) and 24 legacy
+   (288.2 GB). Nothing can reach them: every derive script builds its ref as
+   `<hash>-$RECIPE`, so the four un-suffixed legacy tags (`6269a90527a6`, `6ff70f73bc80`,
+   `2052430ee930`, `ad607557a79f`) are unreachable by construction, and the rest are
+   untagged. Two things to know: the wikipedia recovery handle `sha256:1de48463…d2c6` is a
+   zero-layer INDEX whose 81.8 GB lives in the child `sha256:dc1e46468a4c`, so the two must
+   go together or not at all; and reddit carries two full legacy generations, not one.
+   DECIDED (James, 2026-08-12): delete all 24.
+   BLOCKED ON OWNERSHIP, not on scopes: these are user-scoped packages under `shkolnik`, and
+   GitHub only lets the package owner delete a version — the bot account gets 403 no matter
+   what it holds. Script prepared (indexes first, refuses anything the lock pins, re-verifies
+   all seven pinned refs afterwards); it has to be run by James.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 
