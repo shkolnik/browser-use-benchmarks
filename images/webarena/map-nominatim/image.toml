@@ -1,0 +1,40 @@
+# WebArena map backend — Nominatim geocoding, served from a baked Postgres cluster.
+# Provenance, the flatnode decision, and the upstream-yaml divergences: README.md.
+
+[[datasets]]
+filename = "nominatim_volumes.tar"
+sha256 = "888ad53f754948f660796b6fcb440294a3dec647e141d606b1c7cb2616695baa"
+urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/nominatim_volumes.tar"]
+# 124,774,901,760 bytes — the largest object in this fleet's inputs. No upstream
+# checksum exists, so the hash was COMPUTED AT IMPORT in this repo (2026-08-07) by
+# streaming it and hashing and counting bytes in one pass, recording the pin only
+# because the count matched Content-Length exactly. Same posture as the sibling map
+# images and webarena/shopping's tar.
+#
+# It holds TWO docker volumes, measured by walking the tar's header chain with ranged
+# GETs (no full download): nominatim-data at 34.76 GiB — the Postgres cluster, which
+# this image ships — and nominatim-flatnode at 81.44 GiB, a single flatnode.file that
+# it deliberately does not. See README.md.
+#
+# Region is us-east-1. The upstream cloud-init's own aws config says us-east-2, which
+# is wrong; this URL is the region that actually serves the object.
+
+[[datasets]]
+filename = "osm_dump.tar"
+sha256 = "e6d58ad43e1da7530b7384522a4d0d30f59a44fdcadb8ad7c2e6695a43c585b1"
+urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/osm_dump.tar"]
+# 1,878,691,840 bytes: us-northeast-latest.osm.pbf (1,485,107,682) and
+# wikimedia-importance.sql.gz (393,574,858), under a single osm_dump/ prefix.
+# The import that produced the baked cluster consumed these; nothing at run time
+# does. Shipped anyway so the PBF_PATH/IMPORT_WIKIPEDIA settings name real files
+# and the image can be re-imported from itself. Hash computed at import, as above.
+
+[service]
+# A real geocoding query, not a liveness stub. `smoke` polls this from the HOST,
+# through the published port mapping, after the image's own HEALTHCHECK has already
+# proved the same query works from the inside.
+healthcheck = "http://localhost:8085/search?q=carnegie+mellon+university&format=json&limit=1"
+# The default 30s is a reachability budget, and this container earns its readiness
+# from `docker compose up --wait` before the poll starts. Left at the default
+# deliberately: if it ever needs raising, the thing that is slow is Nominatim's
+# first-request path, and that belongs in the Dockerfile HEALTHCHECK's start period.

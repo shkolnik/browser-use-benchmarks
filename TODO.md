@@ -95,18 +95,47 @@ pinned entry without putting the bytes somewhere else first.
 
 ### Build webarena-map image(s) (OSM tile + nominatim + osrm) — build only
 
-IN PROGRESS on branch `map-image` (worktree `.worktrees/map-image`, pushed to origin and in
-sync, 3 commits): `images/webarena/map-osrm` and `images/webarena/map-tile` are authored and
-committed (95b86ad, 07c94a4, fa4f0d1 — osrm serves all three routing profiles from one image;
-tile server baked; both registered for smoke). Reference material at
-`~/beep-scratch/browser-use-benchmarks/map/` (FINDINGS.md — verified tar layouts and the
-`--strip-components` trap — plus SPEC.md and upstream's `webarena-map-backend-boot-init.yaml`).
-All 4 sha256 pins are computed and recorded in `map/pins.txt` (hash job DONE; osm_dump.tar =
-`e6d58ad43e1da7530b7384522a4d0d30f59a44fdcadb8ad7c2e6695a43c585b1`).
+IN PROGRESS on branch `map-image` (worktree `.worktrees/map-image`, rebased onto main and
+pushed). All three images are authored, BUILT AND SMOKED LOCALLY — the first evidence any map image works
+rather than assembles:
 
-REMAINING: author `images/webarena/map-nominatim`; rebase the branch onto current main (it
-forked before recent main commits); trigger the CI build via workflow dispatch at
-`--ref map-image` (no CI runs against the branch yet); then open a PR.
+- **map-osrm** — green. `webarena-map-osrm: healthy and reachable at .../route/v1/driving/...`
+- **map-tile** — green. Restore reports `cluster PG_VERSION=15, image ships postgresql-15`,
+  `database 38G, tiles 4.0K`; smoke serves `/tile/0/0/0.png`; a hand-fetched z14 tile over
+  Brackenridge PA is a real labelled 31 KB render, so the gazetteer is genuinely there.
+- **map-nominatim** — green. The restore stage starts the baked cluster in-build and reports
+  `cluster PG_VERSION=14, image ships postgresql-14`, `cluster 34G`, `placex holds at least
+  1000001 rows`, then partitions it into 5 buckets; smoke serves `/search?q=carnegie+mellon...`,
+  and a hand-run query returns `Carnegie Mellon University, Schenley Drive Extension, North
+  Oakland, Pittsburgh, Allegheny County, 15213` at 40.4442,-79.9427 with importance 0.86 — so the
+  wikimedia-importance data made it in too.
+
+Three things the local builds found that no amount of reading would have:
+
+1. Neither map image declared a `HEALTHCHECK`, and none of the three upstream bases declares one
+   either, so `bin/build smoke` refused to boot them. Fixed, plus a unit test that now says so in
+   70s instead of after a 13-minute build.
+2. `osm_tile_server.tar` holds ONE volume, not two. `/data/tiles` is the rendered-tile cache and
+   docker creates it empty at run time; the two `--volume=` flags in upstream's cloud-init are not
+   evidence of two volumes in the archive.
+3. Both tile and nominatim bases ship their own `initdb`'d cluster at the restore path, so
+   restoring on top of one MERGES two unrelated clusters. Both now wipe first.
+
+Reference material at `~/beep-scratch/browser-use-benchmarks/map/` (FINDINGS.md — verified tar
+layouts and the `--strip-components` trap — plus SPEC.md and upstream's
+`webarena-map-backend-boot-init.yaml`). All 4 sha256 pins are computed and recorded in
+`map/pins.txt`.
+
+The nominatim tar's contents were measured by walking its header chain with ranged GETs, no bulk
+download: `nominatim-data` 34.76 GiB (the Postgres cluster, baked in) and `nominatim-flatnode`
+81.44 GiB (one `flatnode.file` — osm2pgsql's node cache, deliberately not shipped; nothing on the
+query path reads it).
+
+REMAINING: open a PR. The CI dispatch is deliberately NOT done — these images are proven locally
+instead, and the measured per-image peak disk is why: **129.4 GiB** for map-osrm (19.8 GiB tar),
+**280.4 GiB** for map-tile (38.4 GiB), **520.7 GiB** for map-nominatim (116.2 GiB). Those figures
+feed the burst volume sizing in `docs/burst-runners.md` on branch `burst-runners`, whose earlier
+modelled numbers they correct by roughly 3x.
 
 ## Pending
 

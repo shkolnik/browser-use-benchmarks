@@ -55,6 +55,29 @@ services:
       HTTP_PORT: "9888"
     ports:
       - "9888:80"
+  map-tile:
+    image: ghcr.io/shkolnik/webarena-map-tile:latest
+    # Upstream publishes tiles on host 8080; the tile server listens on 80
+    # in-container (its own EXPOSE). Postgres 5432 is deliberately NOT published —
+    # nothing outside the container reads it.
+    ports:
+      - "8080:80"
+  map-osrm:
+    image: ghcr.io/shkolnik/webarena-map-osrm:latest
+    # One container serving all three routing profiles on the ports upstream's
+    # clients expect. Upstream runs three containers off one image differing
+    # only in mounted /data and port; see the image's README for that decision.
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+      - "5002:5002"
+  map-nominatim:
+    image: ghcr.io/shkolnik/webarena-map-nominatim:latest
+    # Upstream's mapping: the container listens on 8080, published on 8085.
+    # Postgres 5432 is deliberately NOT published — nothing outside the
+    # container reads it.
+    ports:
+      - "8085:8080"
   gitlab:
     image: ghcr.io/shkolnik/webarena-gitlab:latest
     # No `command:` here on purpose. Upstream's documented run line is
