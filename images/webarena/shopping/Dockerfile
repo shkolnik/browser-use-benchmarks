@@ -129,6 +129,8 @@ COPY --from=restore /var/lib/mysql/ /var/lib/mysql/
 COPY --from=restore /var/lib/elasticsearch/ /var/lib/elasticsearch/
 # One layer per staging bucket keeps every pushed layer under ~10G (GHCR's
 # comfortable ceiling). Bucket count must match BUCKET_COUNT in restore-stage.sh.
+# The last few are expected to be empty — BUCKET_COUNT is a ceiling with
+# headroom, and a COPY of an empty bucket is a no-op.
 COPY --from=restore /staging/bucket-00/ /opt/magento/
 COPY --from=restore /staging/bucket-01/ /opt/magento/
 COPY --from=restore /staging/bucket-02/ /opt/magento/
@@ -136,5 +138,8 @@ COPY --from=restore /staging/bucket-03/ /opt/magento/
 COPY --from=restore /staging/bucket-04/ /opt/magento/
 COPY --from=restore /staging/bucket-05/ /opt/magento/
 COPY --from=restore /staging/bucket-06/ /opt/magento/
+COPY --from=restore /staging/bucket-07/ /opt/magento/
+COPY --from=restore /staging/bucket-08/ /opt/magento/
+COPY --from=restore /staging/bucket-09/ /opt/magento/
 
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"

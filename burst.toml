@@ -37,12 +37,30 @@ volume_gb = 750
 # workload rather than a guess. Raise it with the instance type, not alone.
 volume_throughput_mbps = 500
 
-# Left at 6000 deliberately, unlike the throughput above: it is inside the
-# instance's 12000 baseline IOPS, so unlike the 1000 MB/s it was never a number
-# the VM could not honour. gp3 also requires >= 4 IOPS per MB/s of throughput,
-# and map-nominatim's Postgres import is the random-write phase that most wants
-# the depth.
-volume_iops = 6000
+# Raised 6000 -> 12000 after measuring it as the binding constraint. 6000 was
+# picked as safely *inside* the instance's baseline, never as a number measured
+# to be sufficient — and it turned out not to be.
+#
+# The evidence is a step-for-step A/B of webarena/shopping, same Dockerfile and
+# dataset, home runner (job 93325745256) against a c7i.2xlarge (94315130494):
+# buildkit took 50m25s at home and 3h00m02s here. Two steps in that build are
+# accidental controls. `composer install` — thousands of small files, CPU and
+# network bound — ran 14% *faster* on the c7i, and `push` ran 5x faster. So it
+# is neither CPU nor network. Everything that walks, hashes or copies the 50.4G
+# magento tree is 2-6.6x slower: the restore stage's snapshot commit 6.6x, the
+# bucket COPYs 4.7x, `docker system prune` (no CPU, no network, pure metadata)
+# 4.0x. That is an IOPS signature, and small-file metadata work is exactly what
+# 6000 IOPS — about 24 MB/s of 4K random I/O — starves.
+#
+# 12000 and not gp3's 16000 ceiling, for the same reason the throughput above
+# is 500 and not 1000: it is what the instance *sustains*. c7i.2xlarge reports
+# BaselineIops 12000 and MaximumIops 40000, and the 40000 is burst. shopping
+# runs for hours, so it spends almost all of its time at baseline; provisioning
+# 16000 would buy 4000 IOPS reachable only in the first half hour.
+#
+# Still clears gp3's >= 4 IOPS per MB/s rule against the 500 MB/s above (which
+# needs 2000), and map-nominatim's Postgres import gets the depth it wanted.
+volume_iops = 12000
 
 # Pinned so a new Debian release upstream cannot silently change what we bake
 # from. burst refuses to guess this; it printed this exact line, and prints a

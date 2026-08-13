@@ -8,8 +8,18 @@
 set -euo pipefail
 
 MAGE=/opt/magento
-BUCKET_LIMIT_KB=$((8 * 1024 * 1024))  # 8G target keeps layers under GHCR's ~10G comfort zone
-BUCKET_COUNT=7  # must match the COPY --from lines in the Dockerfile's final stage
+# 7G, not the 8G its siblings use: buildkit's per-COPY working set scales with
+# the bucket, and run 31669103000 was OOM-killed during `COPY --from=restore
+# /staging/bucket-04/` with dockerd holding ~10.9G on a 16 GiB box. The tree is
+# 50.4G, so this lands ~8 buckets instead of 7.
+BUCKET_LIMIT_KB=$((7 * 1024 * 1024))
+# A ceiling, NOT a target: plan() first-fits under BUCKET_LIMIT_KB and only
+# fails if it runs past this, so raising it alone changes nothing — the limit
+# above is what sets the bucket count. Deliberately 2 above the ~8 expected, so
+# a growing dataset or a worse first-fit packing does not fail the build at the
+# partition step. Empty buckets are already shipped by ../../vwa/classifieds
+# (12 declared, 10 filled) and their COPY is a no-op.
+BUCKET_COUNT=10  # must match the COPY --from lines in the Dockerfile's final stage
 
 echo "=== boot the shipped stack ==="
 . /run-services.sh

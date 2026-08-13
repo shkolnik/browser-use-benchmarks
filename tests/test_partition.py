@@ -1,4 +1,5 @@
 import errno
+import re
 import importlib.util
 import os
 import stat
@@ -267,3 +268,32 @@ def test_exdev_move_still_moves_the_content(tmp_path, monkeypatch):
     assert moved.is_file() and moved.stat().st_size == 100 * 1024
     assert stat.S_IMODE((staging / "bucket-00" / "prometheus" / "data").stat().st_mode) == 0o2750
     assert not (root / "prometheus").exists()
+
+
+@pytest.mark.parametrize(
+    "script", _partitioning_scripts(),
+    ids=lambda p: f"{p.parent.parent.name}-{p.parent.name}")
+def test_bucket_count_matches_the_dockerfile_copy_lines(script):
+    # Every bucketed image restates "must match the COPY --from lines in the
+    # Dockerfile's final stage" in a comment, and nothing enforced it. The two
+    # halves live in different files and are edited by hand, which is precisely
+    # the shape of invariant that rots.
+    #
+    # Both directions are real failures, and they fail very differently:
+    #
+    #   too few COPY lines  — restore-stage.sh mkdirs bucket-00..N-1 and the
+    #     partitioner first-fits across all of them, so a filled bucket with no
+    #     COPY is simply left behind. The build SUCCEEDS and ships an image
+    #     missing an arbitrary slice of the dataset. Silent.
+    #   too many COPY lines — the extra COPY names a directory that was never
+    #     created and buildkit fails the build. Loud, but a wasted multi-hour
+    #     job on the fleet.
+    count = int(re.search(r"^BUCKET_COUNT=(\d+)", script.read_text(),
+                          re.M).group(1))
+    dockerfile = script.parent / "Dockerfile"
+    copied = [int(m) for m in re.findall(r"/staging/bucket-(\d+)/",
+                                         dockerfile.read_text())]
+    assert copied == list(range(count)), (
+        f"{dockerfile.relative_to(REPO_ROOT)} COPYs buckets {copied}, but "
+        f"{script.name} sets BUCKET_COUNT={count}. The final stage needs "
+        f"exactly one contiguous COPY --from line per bucket, 00..{count - 1}.")
