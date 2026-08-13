@@ -33,8 +33,14 @@
 #   DCACHE_SKIP_ORAS_INSTALL set to skip dcache_ensure_oras entirely — tests
 #                             put a fake `oras` on PATH and must never reach
 #                             for the network
-#   DCACHE_RETRY_SLEEP       seconds between push retries (default 30) —
+#   DCACHE_RETRY_SLEEP       base seconds between retries (default 30) — the
+#                             first wait, doubled per fruitless pull pass —
 #                             overridable so a test does not sleep 90s
+#   DCACHE_RETRY_MAX_SLEEP   ceiling for that doubling, and for a Retry-After
+#                             the registry asks for (default 300)
+#   DCACHE_PULL_TRIES        pull passes before a miss is fatal (default 10)
+#   DCACHE_RETRY_JITTER      percent of random spread applied to each wait
+#                             (default 25; 0 makes waits exact, for tests)
 #   DCACHE_MIN_BPS           bytes/sec below which a transfer counts as stalled
 #                             (default 102400 = 100 KB/s)
 #   DCACHE_STALL_SECS        how long it must stay below that before curl gives
@@ -203,6 +209,68 @@ print(d.get("token") or d.get("access_token") or "")
 # the wrong content. So nothing is trusted until sha256 over the assembled
 # file matches, and a file that fails is deleted rather than resumed again —
 # otherwise a bad prefix is immortal, re-appended every pass forever.
+# dcache__retry_after HEADER_FILE — prints the Retry-After delay in seconds,
+# or nothing if the registry did not send a usable one.
+#
+# RFC 9110 allows either a delay in seconds or an HTTP-date. Only the numeric
+# form is honoured: parsing a date correctly means handling its three legal
+# formats and the clock skew between us and the registry, and getting that
+# wrong yields a wait that is either useless or enormous. A date-valued header
+# prints nothing, which is not a failure — the caller's own backoff is the
+# floor under every wait, so the unparsed case degrades to exactly the
+# behaviour we would have had without reading the header at all.
+dcache__retry_after() {
+  local f=$1 v
+  [ -f "$f" ] || return 0
+  # tail -1: with -L the file holds every response in the redirect chain, and
+  # the one that failed is the last. \r because these are wire headers.
+  v=$(grep -i '^retry-after:' "$f" | tail -1 | cut -d: -f2- | tr -d ' \r')
+  case "$v" in
+    ''|*[!0-9]*) return 0 ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+# dcache__bytes DEST LAYERS — total bytes of the layer set currently on disk.
+#
+# The pass loop's definition of progress. Deliberately counts BYTES rather than
+# completed layers: a pass that carried an 8.59 GB layer from 20% to 90% and
+# then hit a 429 has made real progress and must not be backed off as though
+# it were stuck, which is exactly the case that byte-granular resume was built
+# to serve (see dcache__fetch_blobs' header).
+dcache__bytes() {
+  local dest=$1 layers=$2 total=0 digest size title
+  while IFS=$'\t' read -r digest size title; do
+    [ -n "${title:-}" ] || continue
+    [ -f "$dest/$title" ] || continue
+    total=$(( total + $(stat -c %s "$dest/$title") ))
+  done <<< "$layers"
+  printf '%s' "$total"
+}
+
+# dcache__backoff_wait BACKOFF RETRY_AFTER — prints the seconds to wait.
+#
+# The registry's Retry-After is a FLOOR, not a replacement: honouring a 5s
+# Retry-After from a limiter we have already annoyed five times in a row would
+# put us straight back into it. The cap applies to both, so a registry cannot
+# park a job for an hour by asking it to.
+#
+# Jitter is not decoration. Every VM in a fleet run boots within seconds of the
+# others and hits the same limiter at the same moment, so a fixed schedule has
+# them retrying in lockstep forever — each wave re-tripping the limit for the
+# whole fleet. Spreading each wait by +/-25% breaks up the convoy.
+dcache__backoff_wait() {
+  local wait=$1 ra=${2:-} cap=${DCACHE_RETRY_MAX_SLEEP:-300}
+  local jitter=${DCACHE_RETRY_JITTER:-25}
+  [ -z "$ra" ] || [ "$ra" -le "$wait" ] || wait=$ra
+  [ "$wait" -le "$cap" ] || wait=$cap
+  if [ "$wait" -gt 0 ] && [ "$jitter" -gt 0 ]; then
+    wait=$(( wait * (100 - jitter + RANDOM % (2 * jitter + 1)) / 100 ))
+    [ "$wait" -gt 0 ] || wait=1
+  fi
+  printf '%s' "$wait"
+}
+
 dcache__fetch_blob() {
   local repo=$1 digest=$2 size=$3 out=$4
   local registry=${repo%%/*} repo_path=${repo#*/}
@@ -245,13 +313,34 @@ dcache__fetch_blob() {
                   --speed-limit "${DCACHE_MIN_BPS:-102400}"
                   --speed-time "${DCACHE_STALL_SECS:-60}")
   : >>"$out"
-  if code=$(curl -fsS -L -C - "${limit[@]}" "${auth[@]}" -w '%{http_code}' -o "$out" "$url"); then
+  # -D captures the response headers so a 429 can be answered with the delay
+  # the registry actually asked for rather than one we invented. It is written
+  # beside the blob and removed on the way out of every branch: a stale header
+  # file would make the NEXT failure quote the previous one's Retry-After.
+  local hdr="$out.headers"
+  if code=$(curl -fsS -L -C - "${limit[@]}" "${auth[@]}" \
+                 -D "$hdr" -w '%{http_code}' -o "$out" "$url"); then
     rc=0
   else
     rc=$?
   fi
 
   if [ "$rc" != 0 ]; then
+    # A 429 is not a broken transfer and must not be treated as one: nothing
+    # is wrong with the link, the socket or the bytes already on disk, and the
+    # registry has told us so. Run 31654975042 is why this branch exists — the
+    # first eleven-image fleet run put eight VMs on GHCR at once under one
+    # token, and webarena/gitlab and vwa/classifieds each burned every pass on
+    # 429s while the one fetch that did land ran at 68 MB/s. Reported in a
+    # `retry-after=` form the pass loop can parse back out, because
+    # dcache__transfer runs this function in a command substitution: a
+    # variable set here would not survive, but its output is captured into
+    # _DCACHE_LAST_OUT, which the caller can read.
+    if [ "$code" = 429 ]; then
+      local ra; ra=$(dcache__retry_after "$hdr")
+      echo "derive-cache: $(basename "$out") was rate-limited by the registry" \
+           "(HTTP 429), retry-after=${ra:-none}" >&2
+    fi
     # 416 means the server would not honour the range, and 33 is curl's own
     # "cannot resume". Both leave a file that can never complete, so drop it
     # and let the next pass start from zero rather than loop on it.
@@ -262,8 +351,10 @@ dcache__fetch_blob() {
              "restarting $(basename "$out") from zero next pass" >&2
         ;;
     esac
+    rm -f "$hdr"
     return "$rc"
   fi
+  rm -f "$hdr"
 
   got=$(stat -c %s "$out")
   if [ "$got" != "$size" ]; then
@@ -370,14 +461,17 @@ dcache__fetch_blobs() {
   # addressed by digest against the repository, not the tag. Safe for
   # `localhost:5000/x:t` because the port's colon is not the last one.
   local repo=${ref%:*}
-  local passes=${DCACHE_PULL_TRIES:-8}
+  local passes=${DCACHE_PULL_TRIES:-10}
+  local base=${DCACHE_RETRY_SLEEP:-30}
   local layers pass digest size title f want failed have watcher rc
+  local mark seen fruitless=0 wait ra
 
   layers=$(printf '%s' "$mf" | dcache__layers) || return 1
   [ -n "$layers" ] || dcache__die "$ref carries no file layers — nothing to pull." \
     "An artifact with no titled layer would extract to an empty directory and" \
     "report a hit, which is the false-hit bug in a different costume."
 
+  mark=$(dcache__bytes "$dest" "$layers")
   for (( pass=1; pass<=passes; pass++ )); do
     # A here-string runs the loop in THIS shell, not a subshell, so `failed`
     # survives it. With a pipe it would not, and every pass would look clean.
@@ -440,9 +534,26 @@ dcache__fetch_blobs() {
     [ "$failed" = 0 ] && return 0
 
     if [ "$pass" != "$passes" ]; then
-      echo "derive-cache: pass $pass/$passes of $ref was interrupted — retrying;" \
+      # Backoff doubles only across passes that moved NO bytes. A pass that
+      # made progress and then failed resets it to the base wait, because the
+      # thing backoff is for — standing off a resource that is refusing us —
+      # is not what is happening when bytes are still landing. Without the
+      # reset, a large entry pulled in fragments over many passes would be
+      # punished for exactly the incremental progress this loop exists to make.
+      seen=$(dcache__bytes "$dest" "$layers")
+      if [ "$seen" -gt "$mark" ]; then fruitless=1; else fruitless=$(( fruitless + 1 )); fi
+      mark=$seen
+      # Capped at 16 doublings before the shift itself would overflow; the
+      # wait is capped far below that anyway, so this only keeps the
+      # arithmetic honest on a pathologically long run.
+      [ "$fruitless" -le 16 ] || fruitless=16
+      ra=$(printf '%s\n' "$_DCACHE_LAST_OUT" \
+           | sed -n 's/.*retry-after=\([0-9][0-9]*\)$/\1/p' | tail -1)
+      wait=$(dcache__backoff_wait "$(( base * (1 << (fruitless - 1)) ))" "$ra")
+      echo "derive-cache: pass $pass/$passes of $ref was interrupted — retrying" \
+           "in ${wait}s${ra:+ (registry asked for ${ra}s)};" \
            "completed layers are skipped and a partial one resumes where it stopped" >&2
-      sleep "${DCACHE_RETRY_SLEEP:-30}"
+      sleep "$wait"
     fi
   done
   return 1

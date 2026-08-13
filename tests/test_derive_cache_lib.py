@@ -100,10 +100,14 @@ def fake_curl(files=DEFAULT_FILES, body=None):
         '  exit 0\n'
     )
     return (
-        'out=""; url=""\n'
+        'out=""; url=""; hdr=/dev/null\n'
         'while [ $# -gt 0 ]; do\n'
         '  case "$1" in\n'
         '    -o) out=$2; shift 2 ;;\n'
+        # -D is where the library asks for the response headers, and the only
+        # way a Retry-After can reach it. Named for the same reason the timeout
+        # flags below are: swept up by `-*` its value would be read as the URL.
+        '    -D) hdr=$2; shift 2 ;;\n'
         '    -C|-H|-u|-w) shift 2 ;;\n'
         # Named rather than swept up by the -* arm below, so their values are
         # consumed as values. Left to `-*) shift`, each one would fall through
@@ -140,12 +144,53 @@ ORAS_NOT_AN_ARTIFACT = _fake_oras(
     '{"mediaType":"application/vnd.oci.image.index.v1+json"}')
 
 
+def rate_limited(retry_after="45", tries=None):
+    """A fake curl that answers a blob request with a 429, as GHCR did.
+
+    Writes the header block the library reads with -D, so Retry-After travels
+    the same path it does from a real registry rather than being injected into
+    the parser directly. `tries` limits the refusals: after that many the blob
+    is served, which is how a test can assert the pull SURVIVES a rate limit
+    rather than merely backs off from one.
+    """
+    ra = f'  printf "retry-after: {retry_after}\\r\\n" >> "$hdr"\n' if retry_after else ""
+    count = ''
+    if tries is not None:
+        count = (f'  n=$(cat $TMP/429s 2>/dev/null || echo 0); n=$((n+1)); echo $n > $TMP/429s\n'
+                 f'  if [ "$n" -gt {tries} ]; then\n'
+                 '    echo "$have" >> "$OFFSETS"\n'
+                 '    printf %s "${full:$have}" >> "$out"\n'
+                 '    echo 206; exit 0\n'
+                 '  fi\n')
+    return (
+        count
+        + '  printf "HTTP/2 429\\r\\n" > "$hdr"\n'
+        + ra
+        + '  echo "curl: (22) The requested URL returned error: 429" >&2\n'
+        '  echo 429\n'
+        '  exit 22\n'
+    )
+
+
+# A `sleep` that records what it was asked to wait and returns at once. Opt-in
+# per test: the progress watcher sleeps in a loop too, so a test that installs
+# this must also set DCACHE_PROGRESS_SECS=0 or the watcher spins.
+FAKE_SLEEP = "exit 0"
+
+
+def waits(calls):
+    """Seconds passed to every `sleep` the library ran, in order."""
+    return [float(c.split()[1]) for c in calls if c.startswith("sleep ")]
+
+
 def run(body, tmp_path, fake_oras=ORAS_ARTIFACT, fake_docker="exit 1",
-        fake_curl_=None, env=None):
+        fake_curl_=None, env=None, fake_sleep=None):
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
-    fakes = (("oras", fake_oras), ("docker", fake_docker),
-             ("curl", fake_curl() if fake_curl_ is None else fake_curl_))
+    fakes = [("oras", fake_oras), ("docker", fake_docker),
+             ("curl", fake_curl() if fake_curl_ is None else fake_curl_)]
+    if fake_sleep is not None:
+        fakes.append(("sleep", fake_sleep))
     for name, script in fakes:
         p = bin_ / name
         p.write_text(f"#!/bin/bash\necho \"{name} $*\" >> {tmp_path}/calls\n{script}\n")
@@ -162,7 +207,11 @@ def run(body, tmp_path, fake_oras=ORAS_ARTIFACT, fake_docker="exit 1",
          # machine happens to be logged in to ghcr must not change a result.
          "DOCKER_CONFIG": str(tmp_path / "no-docker-config"),
          "OFFSETS": str(tmp_path / "curl.offsets"),
+         "TMP": str(tmp_path),
          **(env or {})}
+    # A None means "leave it unset", which is the only way to exercise a
+    # default that the harness itself pins for everyone else.
+    e = {k: v for k, v in e.items() if v is not None}
     r = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=e, cwd=tmp_path)
     calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
     return r, calls
@@ -699,3 +748,159 @@ def test_a_comment_after_an_entry_is_not_read_as_its_digest(tmp_path):
                tmp_path,
                env=lock(tmp_path, f"reg/x:t {MANIFEST_DIGEST}  # rebuilt 2026-08-11"))
     assert "FORMAT=oras" in r.stdout, r.stderr
+
+
+# A 429 is a different animal from every other failure this library handles.
+# Run 31654975042 — the first fleet run to build all eleven images at once —
+# put eight ephemeral runners on GHCR under a single GITHUB_TOKEN, and
+# webarena/gitlab and vwa/classifieds both died in prepare having spent every
+# pass on `curl: (22) The requested URL returned error: 429`. Nothing was wrong
+# with the link: the one fetch that landed in the middle of it ran at 68 MB/s.
+# The retry budget was the whole problem — eight passes, one attempt each,
+# spaced a flat 30s, is about four minutes of patience against a limiter that
+# stayed hot for six, and eight runners waiting the same flat 30s re-trip it
+# together on every wave.
+
+
+def test_a_rate_limited_blob_reports_the_delay_the_registry_asked_for(tmp_path):
+    """Retry-After has to reach the log, or an operator cannot tell a
+    rate-limited pull from a dead link — they are the same `curl (22)` line."""
+    r, _ = run('dcache_pull reg/x:t out || echo GAVEUP', tmp_path,
+               fake_curl_=fake_curl(body=rate_limited(retry_after="45")),
+               env={"DCACHE_PULL_TRIES": "2", "DCACHE_RETRY_JITTER": "0",
+                    "DCACHE_PROGRESS_SECS": "0"},
+               fake_sleep=FAKE_SLEEP)
+    assert "was rate-limited by the registry (HTTP 429), retry-after=45" in r.stderr, r.stderr
+    assert "registry asked for 45s" in r.stderr, r.stderr
+
+
+def test_the_wait_doubles_across_passes_that_move_no_bytes(tmp_path):
+    """The decay. A limiter that is still hot must be met with a longer wait
+    each time, not the same 30s that just failed."""
+    r, calls = run('dcache_pull reg/x:t out || echo GAVEUP', tmp_path,
+                   fake_curl_=fake_curl(body=rate_limited(retry_after=None)),
+                   env={"DCACHE_PULL_TRIES": "5", "DCACHE_RETRY_SLEEP": "10",
+                        "DCACHE_RETRY_JITTER": "0", "DCACHE_PROGRESS_SECS": "0"},
+                   fake_sleep=FAKE_SLEEP)
+    assert r.returncode != 0, r.stdout
+    assert waits(calls) == [10, 20, 40, 80], waits(calls)
+
+
+def test_the_doubling_is_capped(tmp_path):
+    """Unbounded doubling would park a job for hours on its own arithmetic."""
+    _, calls = run('dcache_pull reg/x:t out || true', tmp_path,
+                   fake_curl_=fake_curl(body=rate_limited(retry_after=None)),
+                   env={"DCACHE_PULL_TRIES": "6", "DCACHE_RETRY_SLEEP": "10",
+                        "DCACHE_RETRY_MAX_SLEEP": "30", "DCACHE_RETRY_JITTER": "0",
+                        "DCACHE_PROGRESS_SECS": "0"},
+                   fake_sleep=FAKE_SLEEP)
+    assert waits(calls) == [10, 20, 30, 30, 30], waits(calls)
+
+
+def test_a_pass_that_moved_bytes_resets_the_wait(tmp_path):
+    """Backoff is for a resource refusing us, which is not what is happening
+    while bytes are still landing. A big entry pulled in fragments over many
+    passes must not be punished for the incremental progress this loop exists
+    to make — that is how gitlab's part-00 got in, at full speed, on pass 5."""
+    body = (
+        '  echo "$have" >> "$OFFSETS"\n'
+        '  printf %s "${full:$have:1}" >> "$out"\n'
+        '  if [ "$(stat -c %s "$out")" -lt "${#full}" ]; then\n'
+        '    echo "cut off" >&2; echo 206; exit 18\n'
+        '  fi\n'
+        '  echo 206; exit 0\n'
+    )
+    r, calls = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
+                   fake_curl_=fake_curl(body=body),
+                   env={"DCACHE_RETRY_SLEEP": "10", "DCACHE_RETRY_JITTER": "0",
+                        "DCACHE_PROGRESS_SECS": "0"},
+                   fake_sleep=FAKE_SLEEP)
+    assert "HIT" in r.stdout, r.stderr
+    # One byte per pass of a 7-byte payload: every pass advanced, so every wait
+    # is the base one. A doubling here would mean progress was being penalised.
+    assert waits(calls) == [10, 10, 10, 10, 10, 10], waits(calls)
+
+
+def test_retry_after_is_a_floor_under_the_backoff_not_a_replacement(tmp_path):
+    """Honouring a 5s Retry-After from a limiter we have annoyed five times
+    running would put us straight back into it."""
+    _, calls = run('dcache_pull reg/x:t out || true', tmp_path,
+                   fake_curl_=fake_curl(body=rate_limited(retry_after="1")),
+                   env={"DCACHE_PULL_TRIES": "4", "DCACHE_RETRY_SLEEP": "10",
+                        "DCACHE_RETRY_JITTER": "0", "DCACHE_PROGRESS_SECS": "0"},
+                   fake_sleep=FAKE_SLEEP)
+    assert waits(calls) == [10, 20, 40], waits(calls)
+
+
+def test_a_retry_after_longer_than_the_backoff_is_honoured_but_capped(tmp_path):
+    """The registry knows something we do not, so a longer ask wins — up to the
+    cap, so a misconfigured one cannot park the job."""
+    _, calls = run('dcache_pull reg/x:t out || true', tmp_path,
+                   fake_curl_=fake_curl(body=rate_limited(retry_after="90")),
+                   env={"DCACHE_PULL_TRIES": "3", "DCACHE_RETRY_SLEEP": "10",
+                        "DCACHE_RETRY_MAX_SLEEP": "60", "DCACHE_RETRY_JITTER": "0",
+                        "DCACHE_PROGRESS_SECS": "0"},
+                   fake_sleep=FAKE_SLEEP)
+    assert waits(calls) == [60, 60], waits(calls)
+
+
+def test_a_date_valued_retry_after_falls_back_to_the_backoff(tmp_path):
+    """RFC 9110 allows an HTTP-date. Parsing one means three legal formats and
+    the clock skew between us and the registry; getting it wrong yields a wait
+    that is useless or enormous, so it is ignored and the backoff stands."""
+    r, calls = run('dcache_pull reg/x:t out || true', tmp_path,
+                   fake_curl_=fake_curl(
+                       body=rate_limited(retry_after="Wed, 13 Aug 2026 01:00:00 GMT")),
+                   env={"DCACHE_PULL_TRIES": "3", "DCACHE_RETRY_SLEEP": "10",
+                        "DCACHE_RETRY_JITTER": "0", "DCACHE_PROGRESS_SECS": "0"},
+                   fake_sleep=FAKE_SLEEP)
+    assert waits(calls) == [10, 20], waits(calls)
+    assert "retry-after=none" in r.stderr, r.stderr
+    assert "registry asked for" not in r.stderr, r.stderr
+
+
+def test_jitter_spreads_the_wait_without_leaving_the_bounds(tmp_path):
+    """Every VM in a fleet run boots within seconds of the others and hits the
+    limiter together; a fixed schedule has them retrying in lockstep forever,
+    each wave re-tripping the limit for the whole fleet."""
+    seen = set()
+    for _ in range(6):
+        d = tmp_path / f"j{len(seen)}{time.time()}"
+        d.mkdir()
+        _, calls = run('dcache_pull reg/x:t out || true', d,
+                       fake_curl_=fake_curl(body=rate_limited(retry_after=None)),
+                       env={"DCACHE_PULL_TRIES": "2", "DCACHE_RETRY_SLEEP": "100",
+                            "DCACHE_RETRY_JITTER": "25", "DCACHE_PROGRESS_SECS": "0"},
+                       fake_sleep=FAKE_SLEEP)
+        seen.update(waits(calls))
+    assert all(75 <= w <= 125 for w in seen), seen
+    assert len(seen) > 1, f"every wait was identical, so nothing is jittered: {seen}"
+
+
+def test_a_pull_survives_a_rate_limit_that_lets_up(tmp_path):
+    """The point of all of it. Four refusals then a green light must end in a
+    HIT — under the old flat budget this shape is what failed the fleet run."""
+    r, _ = run('dcache_pull reg/x:t out && echo HIT', tmp_path,
+               fake_curl_=fake_curl(body=rate_limited(retry_after="1", tries=4)),
+               env={"DCACHE_RETRY_SLEEP": "1", "DCACHE_RETRY_JITTER": "0",
+                    "DCACHE_PROGRESS_SECS": "0"},
+               fake_sleep=FAKE_SLEEP)
+    assert "HIT" in r.stdout, r.stderr
+    assert (tmp_path / "out" / "a.dat").read_text() == "payload"
+
+
+def test_the_default_pass_budget_outlasts_the_limiter_that_broke_the_fleet(tmp_path):
+    """A guard on the numbers themselves, not on the mechanism.
+
+    gitlab and classifieds were refused for a solid six minutes. The defaults
+    have to buy more patience than that, or the next fleet run reproduces the
+    failure with prettier logs. 10 passes from a 30s base, doubling to a 300s
+    cap, is about half an hour.
+    """
+    _, calls = run('dcache_pull reg/x:t out || true', tmp_path,
+                   fake_curl_=fake_curl(body=rate_limited(retry_after=None)),
+                   env={"DCACHE_RETRY_JITTER": "0", "DCACHE_PROGRESS_SECS": "0",
+                        "DCACHE_RETRY_SLEEP": None},
+                   fake_sleep=FAKE_SLEEP)
+    assert waits(calls) == [30, 60, 120, 240, 300, 300, 300, 300, 300], waits(calls)
+    assert sum(waits(calls)) > 6 * 60, "less patience than the outage that caused this"
