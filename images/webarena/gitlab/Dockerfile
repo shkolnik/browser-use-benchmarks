@@ -7,7 +7,7 @@
 # builder passes; the final stage copies only the restored state, so the 19G
 # backup tar never enters a shipped layer.
 
-FROM gitlab/gitlab-ce:15.7.5-ce.0 AS restore
+FROM gitlab/gitlab-ce:19.2.1-ce.0 AS restore
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
 # Bind-mounted rather than COPYed: the 19G backup tar is read once, by `tar -xf`
@@ -24,7 +24,7 @@ RUN --mount=type=bind,from=datasets,source=etc-gitlab.tar.gz,target=/tmp/etc-git
     tar xzf /tmp/etc-gitlab.tar.gz -C / \
     && /bin/bash /restore-stage.sh
 
-FROM gitlab/gitlab-ce:15.7.5-ce.0
+FROM gitlab/gitlab-ce:19.2.1-ce.0
 COPY --from=restore /etc/gitlab /etc/gitlab
 # /opt/gitlab too, and not for the software — for the runit service tree.
 # `gitlab-ctl reconfigure` is what ENABLES services, by writing /opt/gitlab/sv/<svc>
