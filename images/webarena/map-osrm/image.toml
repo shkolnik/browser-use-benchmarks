@@ -14,6 +14,61 @@ urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/osrm_routin
 # Region is us-east-1. The upstream cloud-init's own aws config says us-east-2, which is
 # wrong; this URL is the region that actually serves the object.
 
+# The routing data is inert: 19.8 GiB that would enter and leave the build
+# byte-identical, since nothing between the extract and the final image writes a
+# byte of it. This section routes it around the build entirely — bucketed into
+# tars on the CI host and ADDed straight into the final image — instead of
+# extracting it into a restore stage and COPYing it back out, which wrote the
+# whole dataset twice for bytes nothing transforms.
+#
+# The whole tree moves, so nothing is left for a restore stage to do and there
+# is none. Unlike the derived-artifact images, `archive` names an upstream
+# dataset directly: the routing graphs are usable as shipped, so there is
+# nothing to derive from them.
+[media]
+archive = "osrm_routing.tar"
+# Nothing to strip. Read from the tar's own headers by walking its header chain
+# with ranged GETs: 81 entries, top level already `car/ bike/ foot/`, each
+# holding 26 `us-northeast-latest.osrm*` files. dest is what those three are
+# relative to, and it is the path the entrypoint reads —
+# /data/<profile>/us-northeast-latest.osrm. The sibling map tars are NOT like
+# this; see README.md before copying a strip from one image to another.
+strip = ""
+dest = "/data"
+# The archive's own ownership is not preserved, on purpose. Its 78 files are
+# already uid/gid 0/0, but the three profile directories carry 1018/1018
+# (`fangzhex`) — the account on the machine that captured the tar, which resolves
+# to no name in this image. Nothing writes into /data at runtime: osrm-routed
+# opens the graphs read-only and the base image declares no USER, so it reads
+# them as root either way. One owner for a read-only dataset, and no stray uid
+# from a stranger's machine in the shipped tree.
+chown = "root:root"
+# 7 GiB, the ceiling ../shopping established: dockerd's own heap scales with the
+# entry count of a single bucket while it is ADDed, and 8G was enough to OOM a
+# 16 GiB runner there. The measured file sizes land 3 buckets of ~6.8 GiB.
+limit_kb = 7340032
+# A ceiling with headroom, not a target. The spare bucket still gets a tar,
+# carrying the three profile directories as padding — an empty one would not be
+# recognised as an archive and would be ADDed verbatim as a file.
+#
+# The buckets no longer line up with the profiles (bucket-01 holds the tail of
+# foot and the head of bike). That costs nothing: the layers are a storage
+# split, the extracted tree is the same either way, and every file still lands
+# in exactly one of them.
+max_buckets = 4
+# A floor on the archive, asserted on the host before any of it becomes a layer.
+# Measured at 81 entries — 3 directories and 26 files per profile — but the floor
+# is what the image actually requires: the 13 files osrm-routed names as
+# mandatory, plus a directory, for each of the three profiles. It is a tripwire
+# for an empty or truncated archive, not the real check; the real one is the
+# file-set and .mldgr-size assert in the final stage, which is possible here
+# because the tree is a known, named handful of files rather than millions of
+# photos.
+min_entries = 42
+# There is no restore stage to read it: the media IS the whole dataset, and the
+# only thing that opens a routing file is osrm-routed at run time.
+restore_needs_media = false
+
 [service]
 # A real route request, not a liveness stub: Pittsburgh CMU -> a point east, on the car
 # profile. This is what the `smoke` step polls BEFORE the push step, so an image that

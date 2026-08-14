@@ -39,12 +39,30 @@ the service here is "the routing backend", not "a routing profile". The entrypoi
 any single profile dies, so a partially-working backend fails loudly instead of silently scoring
 tasks wrong.
 
-**One `COPY` per profile.** Each profile is ~7G, comfortably under GHCR's ~10G layer ceiling, so this
-image needs none of the bucket-partitioning that `gitlab` and `shopping` require.
+**The routing data never enters a build stage.** It is inert — nothing between the extract and the
+final image rewrites a byte of it — so it takes the repo's media path (`[media]` in `image.toml`):
+`osrm_routing.tar` is demuxed into one tar per layer on the CI host and `ADD`ed straight into the
+final stage. The build therefore writes the dataset once, into the layers that ship, instead of
+extracting 19.8 GiB into a restore stage so that a `COPY` could lift the same bytes back out.
+Nothing else was in that stage, so there is no restore stage at all.
 
-**No `--strip-components`.** Verified from the tar's own headers: its top level is already
-`car/ bike/ foot/`. This is worth stating because the sibling tars are *not* like this, and upstream's
-comment about them is misleading:
+Two consequences worth stating:
+
+- **The layers no longer follow the profiles.** They are a 7 GiB size split (three buckets of ~6.8G,
+  plus a fourth that exists only because `max_buckets` is a ceiling with headroom and an unused
+  bucket still needs a non-empty tar). `bucket-01` holds the tail of `foot` and the head of `bike`.
+  The extracted tree is identical either way.
+- **`chown = "root:root"`, not the archive's own ownership.** The tar's 78 files are already `0/0`,
+  but its three profile directories carry uid/gid **1018** (`fangzhex`) from the machine the data was
+  captured on — a name that resolves to nothing in this image. `osrm-routed` only reads the graphs
+  and the base declares no `USER`, so it reads them as root regardless; one owner, and no stray uid
+  in the shipped tree. Note the mode the archive carries on `.fileIndex` is **0700** — it is readable
+  only because the process is root, so introducing a `USER` here would need a mode change too.
+
+**No strip.** Verified from the tar's own headers, walked over the network with ranged GETs (81
+entries, no bulk download): its top level is already `car/ bike/ foot/`, so `[media].strip` is empty
+and `dest` is `/data`, the directory those three are relative to. This is worth stating because the
+sibling tars are *not* like this, and upstream's comment about them is misleading:
 
 - `osm_tile_server.tar` → `projects/ogma3/docker/volumes/…` (4 components before the volume name)
 - `nominatim_volumes.tar` → `projects/metis2/docker/docker/volumes/…` (5 — a different prefix, with
@@ -58,16 +76,24 @@ Don't copy the number to the sibling images; count the components per tar.
 
 ## Validation
 
-Two layers, deliberately separated:
+Four layers, deliberately separated:
 
-- **In-build, structural** (its own `RUN`, after the extraction layer so a failure doesn't re-run the
-  21G extract): every profile has the **full file set `osrm-routed` requires** — `.mldgr`, `.ramIndex`,
+- **On the host, a floor**: `[media].min_entries = 42` — the last point at which a truncated or empty
+  archive is visible at all, since past the demux the data is layers. Measured contents are 81
+  entries; the floor is the 13 mandatory files plus a directory, per profile.
+- **In-build, structural** (its own `RUN` in the **final** stage, after the `ADD`s, so it validates
+  what ships rather than what was staged): every profile has the **full file set `osrm-routed`
+  requires** — `.mldgr`, `.ramIndex`,
   `.fileIndex`, `.edges`, `.geometry`, `.names`, `.properties`, `.timestamp`, `.datasource_names`,
   `.icd`, `.maneuver_overrides`, `.turn_weight_penalties`, `.turn_duration_penalties` — plus a size
   floor of 100MB on `.mldgr`. That list is not a guess: it is what the binary itself prints as
   *"Required files are missing, cannot continue"*, observed by running the base image against a
   directory holding only `.mldgr`. An earlier version checked `.mldgr` alone, which would have passed
   a tar missing every sibling and deferred the failure to the smoke step.
+
+  The same `RUN` asserts nothing under `/data` is owned by anyone but `root`. That is the only check
+  on the `--chown` on the `ADD`s: an `ADD` that lost the flag would ship the profile directories as
+  uid 1018 and still build clean.
 - **In-container, behavioural**: the `HEALTHCHECK` routes on **all three** profiles before the
   container reports healthy. The base image ships no HTTP client at all — no curl, no wget, no nc —
   so `healthcheck.sh` speaks HTTP over bash's `/dev/tcp`, and it matches `"code":"Ok"` in the body

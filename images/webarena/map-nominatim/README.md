@@ -77,13 +77,34 @@ where no postmaster exists.
 **`osm_dump.tar` is folded into this image rather than becoming a fourth service** (1.75 GiB against
 a 35 GiB image). It is an *input* to the geocoder, not a service.
 
-**Extracted with `--strip-components=1`, which fixes a path upstream gets wrong.** The archive has its
-own `osm_dump/` prefix; upstream extracts it with no strip into `/opt/osm_dump` and mounts that at
-`/nominatim/data`, so the files land at `/nominatim/data/osm_dump/…` while `PBF_PATH` says
-`/nominatim/data/us-northeast-latest.osm.pbf`. That path does not exist on upstream's own instance.
-It never bites, because the only consumer is `/app/init.sh` and the import never re-runs — but it is
-why upstream's setting cannot be copied verbatim and called verified. Stripping the prefix makes both
-documented paths resolve.
+**Its `osm_dump/` prefix is stripped, which fixes a path upstream gets wrong.** Upstream extracts the
+archive with no strip into `/opt/osm_dump` and mounts that at `/nominatim/data`, so the files land at
+`/nominatim/data/osm_dump/…` while `PBF_PATH` says `/nominatim/data/us-northeast-latest.osm.pbf`.
+That path does not exist on upstream's own instance. It never bites, because the only consumer is
+`/app/init.sh` and the import never re-runs — but it is why upstream's setting cannot be copied
+verbatim and called verified. Stripping the prefix makes both documented paths resolve. It is
+`[media].strip = "osm_dump"` now, a prefix rather than a count.
+
+**It takes the media path; the cluster does not.** The project data is inert — the same 1.75 GiB
+enters and leaves the build, and no stage reads a byte of it — so `[media]` in `image.toml` has the
+CI host demux `osm_dump.tar` straight into one bucket tar, which the final stage `ADD`s. That leaves
+one copy of it in the build instead of three (the tar in `/tmp`, the extracted tree, the layer
+COPYed out of it). `nominatim_volumes.tar` is the opposite case and keeps the partition-and-COPY
+machinery: the restore stage *starts* the cluster it extracted, replays the snapshot's WAL and shuts
+it down cleanly, so what ships is deliberately not what was extracted.
+
+Two consequences of the tree never entering a build stage:
+
+- The archive fits one bucket (`max_buckets = 1`, `limit_kb` 2 GiB against 1.749 GiB of tar members),
+  so there is no unused bucket. That matters here: `demux-media.py` pads an unused bucket from the
+  archive's top-level *directories*, and stripping `osm_dump/` leaves two files and no directory —
+  the padding would have been empty, and an empty tar is not recognised by `ADD`, which would drop a
+  literal `bucket-NN.tar` into `/nominatim/data`.
+- `chown = "root:root"`, not `""`. There is no split ownership to preserve — two data files in one
+  directory, nothing writes there at run time — and the uid/gid in an upstream AMI capture's headers
+  is an accident of that machine. `root:root` is what the image ships today and naming it pins that.
+  It is also the one `--chown` value with no silent-failure mode: `ADD --chown` lands `0:0` when it
+  cannot resolve a name, and `0:0` is the intended answer.
 
 **`PBF_PATH` is set even though nothing reads it.** `/app/config.sh` exits 1 unless exactly one of
 `PBF_PATH`/`PBF_URL` is set — on *every* boot, including the one that skips the import. It is
@@ -94,10 +115,18 @@ load-bearing for startup, not for data.
 Three layers, deliberately separated:
 
 - **In-build, structural**: PG-major match (above), the `import-finished` marker present, cluster
-  ownership `postgres:postgres`, a 20 GiB floor on the cluster, and both `osm_dump` files present.
-  The marker is the one that would otherwise be discovered the hard way: without it `/app/start.sh`
-  runs the *full* import on every boot, and the only symptom is a container that never becomes
-  healthy.
+  ownership `postgres:postgres`, and a 20 GiB floor on the cluster. The marker is the one that would
+  otherwise be discovered the hard way: without it `/app/start.sh` runs the *full* import on every
+  boot, and the only symptom is a container that never becomes healthy.
+- **On the host, before the ADD**: `[media].min_entries = 2`, the last point at which a short archive
+  is visible at all. It is a weak floor by construction — the archive holds exactly two members — and
+  it is not what guards the data: `osm_dump.tar` is a *pinned dataset*, so `download` verifies its
+  sha256 end to end before the demux opens it.
+- **In-build, after the ADD**: the final stage asserts that `PBF_PATH` and `IMPORT_WIKIPEDIA` resolve
+  to files above a size floor. This is the naming half of the check the restore stage used to make;
+  `min_entries` replaces only the counting half, and two entries is two entries whatever they are
+  called. Asserting the env vars rather than a second copy of the filenames is what proves the
+  settings themselves resolve, which is the entire reason the tree ships.
 - **In-build, behavioural**: the restore stage **starts Postgres**, asserts a `nominatim` database
   exists, and requires `placex` to hold more than a million rows — structure alone cannot tell a real
   gazetteer from an empty cluster with the right file names. Starting it also does this snapshot's

@@ -7,8 +7,10 @@
 # buckets small enough to COPY as <=10G layers.
 set -euo pipefail
 
+# osm_dump.tar is absent from this stage on purpose: the project data is inert,
+# so it takes the media path and is ADDed straight into the final image. Only
+# the cluster is restored here, because only the cluster is transformed.
 TAR=/tmp/nominatim_volumes.tar
-DUMP_TAR=/tmp/osm_dump.tar
 PGDATA=/var/lib/postgresql/14/main
 BUCKET_LIMIT_KB=$((8 * 1024 * 1024))  # 8G target keeps layers under GHCR's ~10G comfort zone
 BUCKET_COUNT=6  # must match the COPY --from lines in the Dockerfile's final stage
@@ -55,24 +57,6 @@ rm -f "$TAR"
 # it is the documented recovery for a copied data directory, and it is safe here
 # precisely because nothing is running: this is a build stage with no postmaster.
 rm -f "$PGDATA/postmaster.pid"
-
-echo "=== unpack the Nominatim project data (osm_dump) ==="
-# --strip-components=1 removes the archive's own osm_dump/ prefix, so the two
-# files land at the paths upstream's env vars name: /nominatim/data/…
-#
-# Upstream extracts this tar with NO strip into /opt/osm_dump and then mounts
-# that at /nominatim/data, which puts the files at /nominatim/data/osm_dump/…
-# while PBF_PATH says /nominatim/data/us-northeast-latest.osm.pbf. That path
-# does not exist upstream. It never bites, because the only consumer is
-# init.sh, which never runs once the cluster is imported — but it means the
-# upstream setting cannot be copied verbatim and called verified. Stripping the
-# prefix makes the documented paths resolve. See README.md.
-mkdir -p /nominatim/data
-tar -C /nominatim/data --strip-components=1 -xf "$DUMP_TAR"
-rm -f "$DUMP_TAR"
-for f in us-northeast-latest.osm.pbf wikimedia-importance.sql.gz; do
-  [ -f "/nominatim/data/$f" ] || { echo "restore: /nominatim/data/$f missing — osm_dump layout changed" >&2; exit 1; }
-done
 
 echo "=== validate: structure ==="
 # A Postgres cluster only starts under its own major version, and this base
