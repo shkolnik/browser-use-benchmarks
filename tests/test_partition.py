@@ -3,6 +3,7 @@ import re
 import importlib.util
 import os
 import stat
+import subprocess
 from pathlib import Path
 import pytest
 
@@ -41,30 +42,51 @@ def test_descends_into_oversized_directory(tmp_path):
     assignments, sizes = pt.plan(str(tmp_path), 250, 10)
     names = sorted(Path(p).name for p, _ in assignments)
     assert names == ["app.php"] + [f"img{i}.jpg" for i in range(6)]
-    assert all(kb <= 250 for kb in sizes)
+    assert all(n <= 250 * 1024 for n in sizes)
     assert len(sizes) >= 3
 
 
-def test_du_batching_chunks_past_the_command_line_limit(tmp_path):
-    # 84,148 paths on one `du` command line is E2BIG, and one `du` per path is
-    # 84,148 subprocesses. Sizes must come back for every path either way, so
-    # this crosses the 2000-path chunk boundary rather than testing under it.
-    paths = []
-    for i in range(2500):
-        p = tmp_path / f"f{i}.bin"
-        p.write_bytes(b"\0" * 1024)
-        paths.append(str(p))
-    sizes = pt.du_kb_many(paths)
-    assert set(sizes) == set(paths)
-    assert all(kb > 0 for kb in sizes.values())
+def test_a_bucket_is_measured_as_the_tar_it_becomes(tmp_path):
+    # The bound that matters is what the COPY layer writes, and a layer is a
+    # tar. Three regimes where `du -sk` gets it wrong in different directions:
+    # many tiny files (du over by 4K each), block-aligned files (du under by
+    # the 512-byte header each), and a sparse file (du under by all of it).
+    tree = tmp_path / "tree"
+    (tree / "many").mkdir(parents=True)
+    for i in range(200):
+        (tree / "many" / f"tiny-{i}").write_bytes(b"x" * 100)
+    for i in range(20):
+        (tree / "many" / f"aligned-{i}").write_bytes(b"x" * 4096)
+    with open(tree / "sparse.bin", "wb") as f:
+        f.truncate(8 * 1024 * 1024)
+
+    measured = pt.measure(str(tree))[str(tree)]
+    tarball = tmp_path / "t.tar"
+    subprocess.check_call(["tar", "cf", str(tarball), "-C", str(tmp_path), "tree"])
+    # tar pads the archive out with zero blocks at the end; the members are what
+    # this measures, so compare below the real size and within one padding run.
+    actual = tarball.stat().st_size
+    assert measured <= actual, "measuring under the layer is what loses a build"
+    assert actual - measured <= 10240
 
 
-def test_paths_with_spaces_survive_batching(tmp_path):
-    # du's output is split on the FIRST tab, so a name containing spaces (or
-    # anything but a tab) must round-trip intact.
+def test_a_name_too_long_for_a_tar_header_is_charged_for(tmp_path):
+    # Over 100 bytes, tar emits a ././@LongLink header plus the padded name
+    # ahead of the entry. classifieds' per-item paths run past that.
+    short, long = tmp_path / "s", tmp_path / "l"
+    short.mkdir(), long.mkdir()
+    (short / "f").write_bytes(b"x" * 512)
+    (long / ("d" * 150)).write_bytes(b"x" * 512)
+    assert pt.measure(str(long))[str(long)] > pt.measure(str(short))[str(short)]
+
+
+def test_a_name_with_spaces_is_measured(tmp_path):
+    # Sizes used to come back through `du`'s tab-separated output, so a name
+    # carrying spaces had to round-trip a parse. It is an lstat now, but the
+    # tree that motivated it (84,148 item directories) is still out there.
     p = tmp_path / "an item 84143.jpg"
     p.write_bytes(b"\0" * 1024)
-    assert list(pt.du_kb_many([str(p)])) == [str(p)]
+    assert pt.measure(str(tmp_path))[str(p)] == pt.entry_blocks(1024)
 
 
 def test_refuses_when_buckets_run_out(tmp_path):
@@ -83,7 +105,7 @@ def test_refuses_a_single_file_over_the_limit(tmp_path):
     try:
         pt.plan(str(tmp_path), 100, 10)
     except SystemExit as e:
-        assert "over the layer limit" in str(e)
+        assert "over the 100K layer limit" in str(e)
     else:
         raise AssertionError("expected SystemExit for a file larger than one layer")
 

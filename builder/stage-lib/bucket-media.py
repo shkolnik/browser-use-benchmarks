@@ -224,7 +224,7 @@ def main(argv):
         all_members.extend(members)
         used = sizes[idx] if idx < len(sizes) else 0
         print(f'  bucket-{idx:02d}.tar: {len(members)} entries, '
-              f'{used / 2**20:.1f}G', flush=True)
+              f'{used / 2**30:.1f}G', flush=True)
         plans.append((idx, members))
 
     # Written concurrently because each of these is a million-odd small reads

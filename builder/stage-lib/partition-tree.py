@@ -25,55 +25,85 @@ import errno
 import os
 import shutil
 import stat
-import subprocess
 import sys
 
-
-def du_kb(path):
-    return int(subprocess.check_output(['du', '-sk', '--', path]).split()[0])
+BLOCK = 512
 
 
-def du_kb_many(paths):
-    """Sizes for many paths, batched — one `du` per chunk, not one per path.
+def entry_blocks(size):
+    """What one member costs a tar: its header, plus the payload padded out.
 
-    Measured on classifieds: oc-content/uploads holds 84,148 per-item
-    directories, so a subprocess each is ~84k spawns. Chunked well under
-    ARG_MAX, since 84k paths on one command line is E2BIG.
+    The same accounting as demux-media.py, and for the same reason: a bucket
+    becomes a COPY layer, a layer is a tar, and the bound that matters is what
+    the tar writes. `du -sk` answers a different question — allocated blocks —
+    and is wrong in both directions. Measured on three trees of 2,000 entries:
+
+        2,000 x 100B   du 8,000K   tar 2,010K   (du over by 4x: 4K per file)
+        2,000 x 4096B  du 8,000K   tar 9,010K   (du under: 512B header each)
+        one 64M sparse du     0K   tar 65,540K  (du under by the whole file)
+
+    Apparent size is not the answer either — it misses the header and padding,
+    and reports the first tree as 196K against a real 2,010K.
+    """
+    return BLOCK + (size + BLOCK - 1) // BLOCK * BLOCK
+
+
+def measure(root):
+    """{path: bytes tar would write for it and everything under it}.
+
+    One walk for the whole tree, so a directory descended into is not measured
+    again at each level. Sparse files count their apparent size, which is what
+    tar writes: it has no --sparse here, so a hole becomes zeroes in the layer.
+
+    Hard links are charged in full rather than as the link entry tar would
+    actually emit, and a name over 100 bytes is charged its GNU long-name
+    header. Both err high. A bucket that measures larger than it lands is a
+    build that packs slightly loose; one that measures smaller is a layer the
+    registry refuses after the whole tree has already been built.
     """
     sizes = {}
-    for i in range(0, len(paths), 2000):
-        chunk = paths[i:i + 2000]
-        out = subprocess.check_output(['du', '-sk', '--'] + chunk, text=True)
-        for line in out.splitlines():
-            kb, path = line.split('\t', 1)
-            sizes[path] = int(kb)
-    missing = [p for p in paths if p not in sizes]
-    if missing:
-        raise SystemExit(f'du reported no size for {missing[0]} ({len(missing)} paths)')
+
+    def walk(path, name):
+        st = os.lstat(path)
+        # ././@LongLink: a header plus the padded name, ahead of the real entry.
+        extra = 0 if len(name.encode()) <= 100 else entry_blocks(len(name.encode()) + 1)
+        if stat.S_ISDIR(st.st_mode):
+            total = BLOCK + extra
+            for e in sorted(os.scandir(path), key=lambda e: e.path):
+                total += walk(e.path, os.path.join(name, e.name))
+        elif stat.S_ISLNK(st.st_mode):
+            total = BLOCK + extra
+        else:
+            total = entry_blocks(st.st_size) + extra
+        sizes[path] = total
+        return total
+
+    walk(root, os.path.basename(root.rstrip(os.sep)))
     return sizes
 
 
-def children(path, kb, limit_kb):
-    """Yield (path, kb) pieces each <= limit_kb, descending into oversized dirs."""
+def children(path, limit, sizes):
+    """Yield (path, bytes) pieces each <= limit, descending into oversized dirs."""
     entries = sorted(os.path.join(path, e) for e in os.listdir(path))
     if not entries:
-        raise SystemExit(f'{path} is {kb}K with no children to descend into')
-    sizes = du_kb_many(entries)
+        raise SystemExit(f'{path} is {sizes[path]}B with no children to descend into')
     for entry in entries:
-        # Sized in one batch above, so a directory that already fits is yielded
-        # whole without re-measuring it — the common case by far, and the reason
+        # Measured once, up front, so a directory that already fits is yielded
+        # whole without re-walking it — the common case by far, and the reason
         # 84k item directories partition in seconds rather than minutes.
-        if sizes[entry] <= limit_kb:
+        if sizes[entry] <= limit:
             yield entry, sizes[entry]
         elif os.path.isdir(entry) and not os.path.islink(entry):
-            yield from children(entry, sizes[entry], limit_kb)
+            yield from children(entry, limit, sizes)
         else:
             yield entry, sizes[entry]
 
 
 def plan(root, limit_kb, max_buckets):
     """Return (assignments, bucket_sizes) — first-fit over the tree's pieces."""
-    buckets = []  # [used_kb, index]
+    limit = limit_kb * 1024
+    sizes = measure(root)
+    buckets = []  # [used_bytes, index]
     assignments = []
     # children(), never partition(): ROOT must not be yielded as a piece of
     # itself. relpath(ROOT, ROOT) is '.', so the move lands at bucket-NN/. and
@@ -81,19 +111,20 @@ def plan(root, limit_kb, max_buckets):
     # /app/app/... and the web root points at nothing. It only bites when the
     # tree fits in ONE bucket, so a shrinking dataset is all it takes; caught by
     # booting a build made with an empty media tar.
-    for piece, kb in children(root, du_kb(root), limit_kb):
-        if kb > limit_kb:
-            raise SystemExit(f'single file {piece} is {kb}K, over the layer limit')
+    for piece, nbytes in children(root, limit, sizes):
+        if nbytes > limit:
+            raise SystemExit(f'single file {piece} is {nbytes // 1024}K as a tar '
+                             f'member, over the {limit_kb}K layer limit')
         for b in buckets:
-            if b[0] + kb <= limit_kb:
-                b[0] += kb
+            if b[0] + nbytes <= limit:
+                b[0] += nbytes
                 assignments.append((piece, b[1]))
                 break
         else:
             if len(buckets) == max_buckets:
                 raise SystemExit(f'tree outgrew {max_buckets} buckets; raise the '
                                  'count here and add COPY lines in the Dockerfile')
-            buckets.append([kb, len(buckets)])
+            buckets.append([nbytes, len(buckets)])
             assignments.append((piece, len(buckets) - 1))
     return assignments, [used for used, _ in buckets]
 
@@ -199,9 +230,9 @@ def main(argv):
         # Not shutil.move: its cross-filesystem fallback drops ownership, and
         # cross-layer directory renames DO hit EXDEV here. See move_preserving.
         move_preserving(piece, os.path.join(bucket, rel))
-    print(f'{len(sizes)} buckets:')
+    print(f'{len(sizes)} buckets, sized as the tar each one becomes:')
     for idx, used in enumerate(sizes):
-        print(f'  bucket-{idx:02d}: {used / 2**20:.1f}G')
+        print(f'  bucket-{idx:02d}: {used / 2**30:.1f}G')
 
 
 if __name__ == '__main__':

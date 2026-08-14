@@ -274,7 +274,10 @@ def test_bucket_tars_are_written_concurrently(tmp_path, monkeypatch):
     for i in range(6):
         write(tmp_path / "root", f"d{i}/f{i}", kb=32)
     state = _overlap_probe(monkeypatch)
-    tars = run(tmp_path, limit_kb=32, max_buckets=6)
+    # 33K, not 32K: a piece is sized as the tar it becomes, so d{i} costs its
+    # own header plus the file's plus 32K of payload — 33,792 bytes, which is
+    # exactly this limit and twice which is not. One piece per bucket.
+    tars = run(tmp_path, limit_kb=33, max_buckets=6)
     assert state["peak"] > 1
     assert len(tars) == 6
 
@@ -287,7 +290,7 @@ def test_bucket_concurrency_is_bounded_by_the_bucket_count(tmp_path, monkeypatch
         write(tmp_path / "root", f"d{i}/f{i}", kb=32)
     monkeypatch.setattr(bm.os, "cpu_count", lambda: 1)
     state = _overlap_probe(monkeypatch)
-    run(tmp_path, limit_kb=32, max_buckets=4)
+    run(tmp_path, limit_kb=33, max_buckets=4)
     assert state["peak"] == 4
 
 
