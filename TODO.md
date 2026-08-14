@@ -54,7 +54,7 @@ reachable objects and SHAs, different packfiles, no unreachable objects, no refl
   0.002s via `-f` against 3.4s through a pipe, on an 8G archive with a huge tail member. No
   streaming reader is needed; the only thing that would undo it is piping the archive.
 
-**Decisions waiting on James.**
+**Settled — reviewed and accepted, no action pending.**
 
 - map-nominatim ships **1.75 GiB of pure import input** in the final image:
   `us-northeast-latest.osm.pbf` (1,485,107,682 bytes) and `wikimedia-importance.sql.gz`
@@ -63,13 +63,13 @@ reachable objects and SHAs, different packfiles, no unreachable objects, no refl
   that a re-import is possible from the image alone. The first does not survive reading
   `/app/config.sh`, which checks the VARIABLE is set, not the file. The second is undercut by
   the 81.44 GiB flatnode file being deliberately absent — the pbf makes a re-import cheaper,
-  not self-contained. Converting it to the media path (in flight) keeps exactly what ships
-  today; deleting it is a separate call.
-- `bucket-media.py` (267 lines + 280 of tests) now has **no caller** — every `[media]` image
-  sets `restore_needs_media = false`. Kept as the documented fallback for a future image that
-  needs the tree in-build. Revisit once the fleet is green.
-- shopping-admin has a media tar but it is 85M and its restore stage reads it. Converting costs
-  complexity and saves nothing.
+  not self-contained. It stays: the media conversion keeps exactly what ships today, and
+  deleting it is a separate change nobody has asked for.
+- `bucket-media.py` (267 lines + 280 of tests) has **no caller** — every `[media]` image sets
+  `restore_needs_media = false`. Kept as the documented fallback for a future image that needs
+  the tree in-build.
+- shopping-admin has a media tar but it is 85M and its restore stage reads it. Not converted:
+  it costs complexity and saves nothing.
 
 **Known and deliberate, not a candidate.** wikipedia joins 88.7 GiB of parts into one file at
 first boot (~632 s, roughly doubling runtime disk). libzim serves every article from split
