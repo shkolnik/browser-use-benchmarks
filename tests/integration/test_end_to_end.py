@@ -7,6 +7,7 @@ from builder.discover import ImageRef
 from builder.manifest import Dataset, Manifest
 from builder import docker as bdocker
 from builder.download import ensure_dataset
+from builder.registry import published_revision
 
 pytestmark = pytest.mark.skipif(
     shutil.which("docker") is None or subprocess.run(
@@ -32,14 +33,22 @@ def test_download_build_push_roundtrip(tmp_path):
                           "registry:2"], capture_output=True, text=True, check=True).stdout.strip()
     try:
         version = "itest.1"
+        rev = "b" * 40
         bdocker.run(bdocker.build_cmd(ref, Manifest(), "127.0.0.1:5000", dsdir, version,
-                                      Path(__file__).resolve().parents[2]))
+                                      Path(__file__).resolve().parents[2], rev))
         for cmd in bdocker.push_cmds(ref, "127.0.0.1:5000", version):
             bdocker.run(cmd)
         out = subprocess.run(
             ["docker", "run", "--rm", f"127.0.0.1:5000/itest-svc:{version}"],
             capture_output=True, text=True, check=True).stdout
         assert out == payload.decode()
+        # The whole point of the label, round-tripped through a real registry:
+        # what the build stamps is what CI reads back to decide whether this
+        # image needs building again. Unit tests pin each half against a
+        # hand-written manifest; only this asserts the two halves agree about
+        # what docker actually pushes.
+        assert published_revision("127.0.0.1:5000/itest-svc:latest") == rev
+        assert published_revision("127.0.0.1:5000/itest-svc:never-pushed") is None
     finally:
         subprocess.run(["docker", "rm", "-f", reg], capture_output=True)
         subprocess.run(["docker", "rmi", "-f",

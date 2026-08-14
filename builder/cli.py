@@ -8,7 +8,8 @@ def repo_root() -> Path:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="build", description="benchmark image builder")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("list", "download", "build", "push", "smoke", "clean"):
+    for name in ("list", "download", "build", "push", "smoke", "clean",
+                 "published-revision"):
         sp = sub.add_parser(name)
         sp.add_argument("target", help="all, <benchmark>, or <benchmark>/<service>")
         sp.add_argument("--registry", default="ghcr.io/shkolnik")
@@ -24,6 +25,26 @@ def main(argv=None) -> int:
     if args.cmd == "list":
         for r in refs:
             print(f"{r.benchmark}/{r.service}\t{r.name}")
+        return 0
+
+    if args.cmd == "published-revision":
+        # One line per image, always — a blank second field says "nothing
+        # published, or published without a revision", which the caller must
+        # treat exactly like an unknown anchor. Reporting per image rather
+        # than per invocation is what keeps the eleven answers independent.
+        from builder.registry import Unavailable, published_revision
+        import sys
+        for r in refs:
+            try:
+                rev = published_revision(f"{args.registry}/{r.name}:latest") or ""
+            except Unavailable as e:
+                # Not fatal: an unreachable registry means every image looks
+                # unbuilt and the run rebuilds everything, which is correct
+                # but expensive, so it is said out loud rather than inferred
+                # from an unexplained full rebuild.
+                print(f"warning: cannot read {r.name}: {e}", file=sys.stderr)
+                rev = ""
+            print(f"{r.benchmark}/{r.service}\t{rev}")
         return 0
 
     from builder.download import default_datasets_dir, run_download
