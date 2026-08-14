@@ -2,6 +2,7 @@ import importlib.util
 import os
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -211,3 +212,69 @@ def test_media_add_lines_match_max_buckets():
             f"{toml.parent.name}: {len(adds)} ADD lines vs "
             f"max_buckets={m.media.max_buckets}")
         assert all(m.media.dest in l for l in adds), "an ADD targets another path"
+
+
+# --- concurrency -------------------------------------------------------------
+
+def _overlap_probe(monkeypatch, delay=0.05):
+    """Wrap write_bucket to record how many ran at once, and the peak."""
+    import threading
+    state = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    real = bm.write_bucket
+
+    def probed(root, members, out_tar, listfile):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        try:
+            time.sleep(delay)  # long enough that serial execution cannot overlap
+            return real(root, members, out_tar, listfile)
+        finally:
+            with lock:
+                state["now"] -= 1
+
+    monkeypatch.setattr(bm, "write_bucket", probed)
+    return state
+
+
+def test_bucket_tars_are_written_concurrently(tmp_path, monkeypatch):
+    # The phase is device-latency bound at one outstanding read per tar, so
+    # writing them one after another leaves the volume's concurrency unused.
+    # Serial execution would peak at 1 here.
+    for i in range(6):
+        write(tmp_path / "root", f"d{i}/f{i}", kb=32)
+    state = _overlap_probe(monkeypatch)
+    tars = run(tmp_path, limit_kb=32, max_buckets=6)
+    assert state["peak"] > 1
+    assert len(tars) == 6
+
+
+def test_bucket_concurrency_is_bounded_by_the_bucket_count(tmp_path, monkeypatch):
+    # Not by the CPU count: a tar blocked on a read and the thread waiting on it
+    # both burn no CPU, so the contended resource is the volume's queue. What
+    # keeps this bounded is max_buckets, which the Dockerfile's ADD lines pin.
+    for i in range(4):
+        write(tmp_path / "root", f"d{i}/f{i}", kb=32)
+    monkeypatch.setattr(bm.os, "cpu_count", lambda: 1)
+    state = _overlap_probe(monkeypatch)
+    run(tmp_path, limit_kb=32, max_buckets=4)
+    assert state["peak"] == 4
+
+
+def test_every_bucket_is_still_written_when_run_concurrently(tmp_path):
+    # Coverage is the property the whole module exists for; it must not depend
+    # on the order the tars happen to finish in.
+    for i in range(12):
+        write(tmp_path / "root", f"d{i % 4}/f{i}", kb=16)
+    tars = run(tmp_path, limit_kb=64, max_buckets=6)
+    seen = set()
+    for t in tars:
+        seen.update(members_of(t))
+    on_disk = set()
+    root = tmp_path / "root"
+    for dp, dns, fns in os.walk(root):
+        base = os.path.relpath(dp, root)
+        for n in dns + fns:
+            on_disk.add(os.path.normpath(os.path.join(base, n)))
+    assert on_disk <= seen

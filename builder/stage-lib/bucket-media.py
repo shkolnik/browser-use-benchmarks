@@ -20,11 +20,13 @@ The first-fit planner is imported from partition-tree.py rather than copied; see
 that module's docstring for why a shared copy matters here.
 """
 
+import concurrent.futures
 import importlib.util
 import os
 import stat
 import subprocess
 import sys
+import time
 
 _spec = importlib.util.spec_from_file_location(
     'partition_tree', os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -112,6 +114,21 @@ def write_bucket(root, members, out_tar, listfile):
         check=True)
 
 
+def write_one(root, members, outdir, idx):
+    """One bucket, start to finish, for a worker thread.
+
+    Returns (idx, bytes, seconds) rather than printing: interleaved progress
+    from concurrent tars would be unreadable, and the caller prints on
+    completion. The list file is per-index, so nothing here is shared.
+    """
+    out_tar = os.path.join(outdir, f'bucket-{idx:02d}.tar')
+    listfile = os.path.join(outdir, f'.list-{idx:02d}')
+    started = time.monotonic()
+    write_bucket(root, members, out_tar, listfile)
+    os.remove(listfile)
+    return idx, os.path.getsize(out_tar), time.monotonic() - started
+
+
 def audit(root, all_members):
     """Host-side checks: full coverage, no docker, cheap because it is local.
 
@@ -187,34 +204,63 @@ def main(argv):
 
     # Every phase below walks a 45G tree of small files and is minutes long.
     # flush on all of them: stdout is a pipe here, so Python block-buffers it
-    # and the whole run would surface at once, after the fact.
+    # and the whole run would surface at once, after the fact. The elapsed
+    # times are what say which phase to work on next.
+    started = time.monotonic()
     print(f'planning media buckets under {root}', flush=True)
     assignments, sizes = partition_tree.plan(root, limit_kb, max_buckets)
     by_bucket = {}
     for piece, idx in assignments:
         by_bucket.setdefault(idx, []).append(os.path.relpath(piece, root))
+    print(f'planned in {time.monotonic() - started:.0f}s', flush=True)
 
-    all_members = []
-    print(f'{len(sizes)} of {max_buckets} media buckets used:', flush=True)
     # Every index up to the ceiling gets a tar. The Dockerfile's ADD lines are
     # static, so each must match a file that exists; max_buckets is a ceiling
     # with headroom, not a target.
+    all_members, plans = [], []
+    print(f'{len(sizes)} of {max_buckets} media buckets used:', flush=True)
     for idx in range(max_buckets):
         members = members_for(root, by_bucket.get(idx, []))
         all_members.extend(members)
         used = sizes[idx] if idx < len(sizes) else 0
-        print(f'  bucket-{idx:02d}.tar: writing {len(members)} entries, '
+        print(f'  bucket-{idx:02d}.tar: {len(members)} entries, '
               f'{used / 2**20:.1f}G', flush=True)
-        out_tar = os.path.join(outdir, f'bucket-{idx:02d}.tar')
-        write_bucket(root, members, out_tar, os.path.join(outdir, f'.list-{idx:02d}'))
-        os.remove(os.path.join(outdir, f'.list-{idx:02d}'))
-        print(f'  bucket-{idx:02d}.tar: {os.path.getsize(out_tar)} bytes', flush=True)
+        plans.append((idx, members))
+
+    # Written concurrently because each of these is a million-odd small reads
+    # issued one at a time, and the tree is far larger than page cache — so
+    # almost every read is a round trip to the volume and the phase runs at
+    # device latency, not device throughput. Measured at ~1000 entries/s per
+    # tar, ~1ms each, against a volume provisioned for thousands of concurrent
+    # IOPS. Concurrency is what spends that headroom; buffer sizes cannot,
+    # since a file smaller than the record is already one read.
+    #
+    # All of them at once, and deliberately not capped at the CPU count: a tar
+    # blocked on a read and the thread waiting on it both burn no CPU, so the
+    # contended resource is the volume's queue, not the scheduler. max_buckets
+    # is already a small static ceiling — it has to match the Dockerfile's ADD
+    # lines — so this cannot run away.
+    workers = len(plans)
+    print(f'writing {len(plans)} bucket tars, {workers} at a time', flush=True)
+    write_started = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        # Submitted in order, so the first `workers` buckets start together and
+        # each completion frees a slot — no barrier between them.
+        futures = {pool.submit(write_one, root, members, outdir, idx): idx
+                   for idx, members in plans}
+        for future in concurrent.futures.as_completed(futures):
+            idx, size, secs = future.result()
+            print(f'  bucket-{idx:02d}.tar: {size} bytes in {secs:.0f}s', flush=True)
+    print(f'wrote {len(plans)} bucket tars in '
+          f'{time.monotonic() - write_started:.0f}s', flush=True)
 
     # After writing, so the audit sees exactly the member set that shipped.
     print(f'auditing {len(all_members)} members', flush=True)
+    audit_started = time.monotonic()
     audit(root, all_members)
-    print(f'media audit passed: {len(all_members)} entries across {len(sizes)} buckets',
-          flush=True)
+    print(f'media audit passed: {len(all_members)} entries across {len(sizes)} '
+          f'buckets in {time.monotonic() - audit_started:.0f}s '
+          f'({time.monotonic() - started:.0f}s total)', flush=True)
 
 
 if __name__ == '__main__':
