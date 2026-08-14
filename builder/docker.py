@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -187,6 +188,76 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     print(f"{ref.name}: stamped {stamp}")
 
 
+def media_dir(ref: ImageRef) -> Path:
+    """Where the bucket tars live: inside the build context, on purpose.
+
+    build_cmd passes str(ref.path) as the positional context, so this is the one
+    place the final stage can ADD from — ADD auto-extracts only from the default
+    context and has no --from (a Dockerfile parse error, verified). Gitignored.
+    """
+    return ref.path / ".media"
+
+def media_work_dir(datasets_dir: Path, ref: ImageRef) -> Path:
+    """Where the archive is extracted: OUTSIDE the build context, on purpose.
+
+    Putting the loose tree in the image dir would hand buildkit tens of millions
+    of small files to sync into its content store as build context — the exact
+    per-entry cost this whole change exists to avoid.
+    """
+    return datasets_dir / ".media-work" / ref.name.replace("/", "-")
+
+def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
+                   repo_root: Path) -> None:
+    """Extract the media archive and bucket it into tars, on the host.
+
+    Runs between prepare and build. Everything here used to happen inside the
+    restore stage — tar x into the snapshot, partition into staging directories,
+    then one COPY --from per bucket — which is what made the bucket COPYs the
+    single most expensive phase of the shopping build (2841s on run 31735955132).
+    """
+    media, out = m.media, media_dir(ref)
+    work = media_work_dir(datasets_dir, ref)
+    archive = datasets_dir / media.archive
+    if not archive.is_file():
+        raise SystemExit(f"error: {archive} not found — prepare should have left it")
+
+    shutil.rmtree(out, ignore_errors=True)
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+
+    extract = ["tar", "xf", str(archive), "-C", str(work)]
+    if media.strip:
+        # --strip-components counts path segments, so derive it from the prefix
+        # rather than making each image state a number that has to stay in sync
+        # with a path it already declares.
+        extract += [f"--strip-components={len(media.strip.split('/'))}", media.strip]
+    run(extract)
+
+    run(["python3", str(repo_root / "builder" / "stage-lib" / "bucket-media.py"),
+         str(media.limit_kb), str(media.max_buckets), str(work), str(out)])
+
+    if not media.restore_needs_media:
+        # The extracted tree is the largest transient on disk. Dropping it here
+        # rather than after the build is what keeps peak disk at the archive
+        # plus the tars rather than both plus the loose tree.
+        shutil.rmtree(work, ignore_errors=True)
+
+def clean_media(refs, datasets_dir: Path) -> None:
+    """Remove bucket tars and any extracted tree.
+
+    Deliberately NOT called from run_build: build, smoke and push are three
+    separate CLI invocations, so the tars have to survive from one to the next.
+    Called after a successful push, and from CI's always() step — the path that
+    matters is the pull-request build, which runs smoke and never pushes, and
+    would otherwise strand tens of gigabytes per image on a dev host.
+    """
+    for ref in refs:
+        for path in (media_dir(ref), media_work_dir(datasets_dir, ref)):
+            if path.exists():
+                print(f"+ rm -rf {path}")
+                shutil.rmtree(path, ignore_errors=True)
+
 def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
     version = version_tag(repo_root)
     for ref in refs:
@@ -197,6 +268,8 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
         else:
             if m.prepare:
                 run_prepare(ref, m, registry, datasets_dir)
+            if m.media:
+                run_media_prep(ref, m, datasets_dir, repo_root)
             run(build_cmd(ref, m, registry, datasets_dir, version, repo_root))
 
 def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:
@@ -228,11 +301,16 @@ def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
         sleep(min(60, 10 * attempt))
     raise SystemExit(f"error: command failed after {attempts} attempts: {' '.join(cmd)}")
 
-def run_push(refs, registry: str, repo_root: Path) -> None:
+def run_push(refs, registry: str, repo_root: Path,
+             datasets_dir: Path | None = None) -> None:
     version = version_tag(repo_root)
     for ref in refs:
         for cmd in push_cmds(ref, registry, version):
             run_with_retry(cmd)
+    # After the push, not before: the bucket tars are build context, and a push
+    # that has to retry must not find them gone.
+    if datasets_dir is not None:
+        clean_media(refs, datasets_dir)
 
 class Health(NamedTuple):
     """Outcome of polling a healthcheck URL.
