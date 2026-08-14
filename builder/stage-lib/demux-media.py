@@ -73,38 +73,63 @@ def strip_prefix(name, strip):
     return '/'.join(parts[depth:])
 
 
+def record(problems, category, detail):
+    """Count every occurrence of a problem; keep the first few as evidence.
+
+    The scan runs to the end of the archive rather than stopping at the first
+    failure. Reaching this point in CI costs twelve minutes of dataset
+    download, so a run that is going to fail should report everything wrong
+    with the tree, not the first ten entries' worth. The example cap is what
+    keeps a tree that trips one check on every entry from accumulating
+    millions of strings on the way there.
+    """
+    p = problems.setdefault(category, {'n': 0, 'examples': []})
+    p['n'] += 1
+    if len(p['examples']) < 3:
+        p['examples'].append(detail)
+
+
 def check(m, name, problems):
     """The per-entry checks, run on the header rather than on a file on disk.
 
     Same predicates bucket-media.py's audit applies to a tree, against the only
     description of the entry a stream has.
+
+    Reading the archive sees modes an extraction would have altered: `tar x`
+    applies the caller's umask, and the kernel drops setgid when the caller is
+    not in the entry's group. The tree walk therefore audited laundered modes,
+    and which ones depended on the runner's umask. These are the archive's own,
+    so what ships is now the same on any host — and an unsafe mode is refused
+    rather than quietly masked off on the way past.
     """
     if name.startswith('/') or os.pardir in name.split('/'):
-        problems.append(f'{name}: absolute or traversing path')
+        record(problems, 'absolute or traversing path', name)
     if m.islnk():
         # A hard link's target has to be in the same tar, and the target may
         # already have gone into an earlier bucket — where this one cannot
         # follow it, because the bytes are behind us in a stream that does not
         # rewind. Refuse rather than emit a bucket that fails to extract.
-        problems.append(f'{name}: hard link to {m.linkname}; the media tree is '
-                        f'assumed to hold none, so a bucket boundary could '
-                        f'separate the pair')
+        record(problems, 'hard link', f'{name} -> {m.linkname}')
         return
     if m.issym():
         target = os.path.normpath(os.path.join(os.path.dirname(name), m.linkname))
         if os.path.isabs(m.linkname) or target.startswith(os.pardir):
-            problems.append(f'{name}: symlink escapes the tree -> {m.linkname}')
+            record(problems, 'symlink escapes the tree', f'{name} -> {m.linkname}')
         # No mode checks past here: a symlink's own mode is conventionally 0777
         # and means nothing — the target's mode governs — so testing it would
         # report every symlink in the tree as world-writable.
         return
     if not (m.isfile() or m.isdir()):
-        problems.append(f'{name}: not a regular file, directory or symlink')
+        record(problems, 'not a regular file, directory or symlink', name)
         return
-    if m.mode & (0o4000 | 0o2000):
-        problems.append(f'{name}: setuid/setgid ({m.mode:04o})')
+    if m.isfile() and m.mode & (0o4000 | 0o2000):
+        # Files only. On a directory the setgid bit means "new entries inherit
+        # this group", which is what Magento's own filesystem-permissions
+        # procedure sets across pub/media — a convention, not a privilege. It
+        # is a privilege on an executable, and there should be none here.
+        record(problems, 'setuid/setgid', f'{name} ({m.mode:04o})')
     if m.mode & 0o002:
-        problems.append(f'{name}: world-writable ({m.mode:04o})')
+        record(problems, 'world-writable', f'{name} ({m.mode:04o})')
 
 
 def demux(paths, outdir, strip, limit, max_buckets):
@@ -118,7 +143,7 @@ def demux(paths, outdir, strip, limit, max_buckets):
                for i in range(max_buckets)]
 
     idx, used, entries = 0, 0, [0] * max_buckets
-    stack, opened, top_dirs, problems = [], set(), [], []
+    stack, opened, top_dirs, problems = [], set(), [], {}
     n, nbytes, started, last = 0, 0, time.monotonic(), time.monotonic()
 
     with tarfile.open(fileobj=stream, mode='r|') as src:
@@ -127,11 +152,6 @@ def demux(paths, outdir, strip, limit, max_buckets):
             if not name:
                 continue
             check(m, name, problems)
-            if len(problems) >= 10:
-                # Enough to characterise the failure. A tree where every entry
-                # trips the same check would otherwise accumulate millions of
-                # strings before anything got printed.
-                break
             depth = name.count('/')
             # Renamed before the ancestor stack takes it: the stack holds these
             # very objects, so a strip deferred to flush time would strip an
@@ -193,10 +213,12 @@ def demux(paths, outdir, strip, limit, max_buckets):
     stream.close()
 
     if problems:
-        for p in problems[:10]:
-            print(f'  media audit: {p}', file=sys.stderr)
-        raise SystemExit(f'media demux failed {len(problems)} check(s); '
-                         f'first: {problems[0]}')
+        for cat, p in problems.items():
+            print(f"  media audit: {p['n']} x {cat}, e.g. "
+                  + '; '.join(p['examples']), file=sys.stderr)
+        raise SystemExit('media demux refused the tree: '
+                         + ', '.join(f"{cat} x{p['n']}"
+                                     for cat, p in problems.items()))
     if not n:
         raise SystemExit('error: the media archive held no entries')
     return n, nbytes, entries, len(opened), time.monotonic() - started

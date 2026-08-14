@@ -212,6 +212,75 @@ def test_a_symlink_out_of_the_tree_is_refused(tmp_path):
         dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
 
 
+def test_a_setgid_directory_ships_with_its_mode_intact(tmp_path):
+    # Magento's own permissions procedure sets 2775 across pub/media, so the
+    # archive is full of these. On a directory the bit means group inheritance,
+    # not privilege. The extracted-tree path never saw it — `tar x` chmods, and
+    # the kernel drops setgid when the caller is not in the entry's group — so
+    # this is the first time the real mode reaches a bucket.
+    src = tmp_path / "media.tar"
+    with tarfile.open(src, "w") as tf:
+        for name, mode in (("media", 0o2775), ("media/catalog", 0o2775)):
+            d = tarfile.TarInfo(name)
+            d.type, d.mode, d.gid = tarfile.DIRTYPE, mode, 33
+            tf.addfile(d)
+        ti = tarfile.TarInfo("media/catalog/img.jpg")
+        ti.size, ti.mode = 8, 0o644
+        tf.addfile(ti, io.BytesIO(b"x" * 8))
+
+    out = tmp_path / "out"
+    out.mkdir()
+    dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
+    members = read_buckets(out, 3)[0]
+    assert members["catalog"].mode == 0o2775
+    assert members["catalog/img.jpg"].mode == 0o644
+
+
+def test_a_setuid_file_is_refused(tmp_path):
+    # The bit this check exists for: a privilege on an executable, which has no
+    # business in an inert media tree.
+    src = tmp_path / "media.tar"
+    with tarfile.open(src, "w") as tf:
+        d = tarfile.TarInfo("media")
+        d.type, d.mode = tarfile.DIRTYPE, 0o755
+        tf.addfile(d)
+        ti = tarfile.TarInfo("media/sneaky")
+        ti.size, ti.mode = 8, 0o4755
+        tf.addfile(ti, io.BytesIO(b"x" * 8))
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(SystemExit, match="setuid/setgid"):
+        dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
+
+
+def test_the_whole_archive_is_scanned_before_it_is_refused(tmp_path, capsys):
+    # Reaching this point in CI costs twelve minutes of dataset download, so a
+    # failing run reports everything wrong with the tree rather than the first
+    # entries' worth — counted in full, with a few examples each.
+    src = tmp_path / "media.tar"
+    with tarfile.open(src, "w") as tf:
+        d = tarfile.TarInfo("media")
+        d.type, d.mode = tarfile.DIRTYPE, 0o755
+        tf.addfile(d)
+        for i in range(20):
+            ti = tarfile.TarInfo(f"media/loose-{i:02d}")
+            ti.size, ti.mode = 8, 0o666
+            tf.addfile(ti, io.BytesIO(b"x" * 8))
+        ln = tarfile.TarInfo("media/escape")
+        ln.type, ln.linkname, ln.mode = tarfile.SYMTYPE, "/etc/passwd", 0o777
+        tf.addfile(ln)
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
+    # Both kinds, and the count covers entries past the tenth.
+    assert "world-writable x20" in str(exc.value)
+    assert "symlink escapes the tree x1" in str(exc.value)
+    assert len(capsys.readouterr().err.strip().splitlines()) == 2
+
+
 def test_a_world_writable_file_is_refused(tmp_path):
     src = tmp_path / "media.tar"
     with tarfile.open(src, "w") as tf:
