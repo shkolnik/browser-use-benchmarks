@@ -83,13 +83,29 @@ def members_for(root, pieces):
         members.update(expand(root, rel))
     members.discard('.')
     members.discard('')
+    if not members:
+        # An UNUSED bucket still needs a valid tar, and it must not be empty:
+        # docker does not recognise a zero-member tar as an archive and ADDs it
+        # verbatim, dropping a literal bucket-NN.tar file into the media tree.
+        # Caught end-to-end, not reasoned about — five stray tarballs appeared
+        # inside pub/media the first time max_buckets exceeded what was used.
+        #
+        # Padding with the tree's top-level directories is idempotent: they are
+        # already members of other buckets (directories may legitimately repeat,
+        # unlike files), they carry their real mode, and re-extracting them
+        # changes nothing.
+        return sorted(e for e in os.listdir(root)
+                      if os.path.isdir(os.path.join(root, e))
+                      and not os.path.islink(os.path.join(root, e)))
     return sorted(members)
 
 
 def write_bucket(root, members, out_tar, listfile):
     """tar the exact member list, in the exact order given, without recursion."""
     with open(listfile, 'w') as fh:
-        fh.write('\n'.join(members) + '\n')
+        # No trailing newline on an empty list: a lone '\n' is an empty filename,
+        # which tar rejects. Unused buckets are normal — max_buckets is a ceiling.
+        fh.write('\n'.join(members) + ('\n' if members else ''))
     # --no-recursion: the member list is already complete and exact; letting tar
     #   recurse would pull in siblings belonging to other buckets.
     # --verbatim-files-from: a media filename may legitimately begin with '-'.
@@ -191,15 +207,19 @@ def main(argv):
         by_bucket.setdefault(idx, []).append(os.path.relpath(piece, root))
 
     all_members = []
-    print(f'{len(sizes)} media buckets:')
-    for idx in range(len(sizes)):
+    print(f'{len(sizes)} of {max_buckets} media buckets used:')
+    # Every index up to the ceiling gets a tar, including empty ones. The
+    # Dockerfile's ADD lines are static and must match a file that exists, and
+    # max_buckets is deliberately a ceiling with headroom rather than a target
+    # — the same reason the existing COPY-based path tolerates empty buckets.
+    for idx in range(max_buckets):
         members = members_for(root, by_bucket.get(idx, []))
         all_members.extend(members)
         out_tar = os.path.join(outdir, f'bucket-{idx:02d}.tar')
         write_bucket(root, members, out_tar, os.path.join(outdir, f'.list-{idx:02d}'))
         os.remove(os.path.join(outdir, f'.list-{idx:02d}'))
-        print(f'  bucket-{idx:02d}.tar: {sizes[idx] / 2**20:.1f}G, '
-              f'{len(members)} entries')
+        used = sizes[idx] if idx < len(sizes) else 0
+        print(f'  bucket-{idx:02d}.tar: {used / 2**20:.1f}G, {len(members)} entries')
 
     # After writing, not before: the audit is what licenses the build to trust
     # these tars, and it must see exactly what was written.

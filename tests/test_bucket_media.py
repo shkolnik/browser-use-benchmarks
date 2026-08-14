@@ -174,3 +174,23 @@ def test_add_chown_covers_directories_end_to_end(tmp_path):
         "RUN find /dest ! -user app -print | tee /tmp/bad; [ ! -s /tmp/bad ]\n")
     subprocess.run(["docker", "build", "--no-cache", "-q", "."],
                    cwd=ctx, check=True)
+
+
+def test_unused_buckets_are_valid_nonempty_tars(tmp_path):
+    """An empty tar is not recognised as an archive — ADD copies it verbatim.
+
+    Found end-to-end: with max_buckets above what the tree needed, five literal
+    bucket-NN.tar files appeared inside the media destination. max_buckets is a
+    ceiling with headroom by design, and the Dockerfile's ADD lines are static,
+    so unused buckets must still extract to nothing rather than to a file.
+    """
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    tars = run(tmp_path, limit_kb=1024, max_buckets=4)
+    assert len(tars) == 4, "every index up to the ceiling needs a tar"
+    for t in tars:
+        members = members_of(t)
+        assert members, f"{t.name} is empty — docker would ADD it as a file"
+    # the padded ones carry only directories, so nothing is duplicated
+    files = [m for t in tars for m in members_of(t) if m.endswith(".jpg")]
+    assert files == ["a/img.jpg"]
