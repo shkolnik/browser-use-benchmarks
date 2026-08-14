@@ -9,9 +9,17 @@ FROM nginx:alpine
 # Bind-mounted rather than COPYed: the archive is read twice and kept never, and
 # a COPY would commit it to a layer that the following `rm` could only whiteout,
 # not reclaim. Nothing deletes it here because nothing wrote it.
+#
+# `sed -n 1p` rather than the obvious `head -1`: head closes the pipe after one
+# line, busybox tar takes SIGPIPE, and a LATER busybox tar that is the shell's
+# last command then exits 1 — having extracted everything correctly, with an
+# empty stderr. Both conditions are needed: draining the listing here, or any
+# command after the extract, and it exits 0. Measured 20/20 either way on
+# busybox; GNU tar does not do it. Reading the whole listing costs nothing on a
+# 6.9 MB archive.
 RUN --mount=type=bind,from=datasets,source=miniwob-plusplus.tar.gz,target=/tmp/miniwob-plusplus.tar.gz \
     mkdir -p /usr/share/nginx/miniwob \
- && top="$(tar -tzf /tmp/miniwob-plusplus.tar.gz | head -1)" \
+ && top="$(tar -tzf /tmp/miniwob-plusplus.tar.gz | sed -n 1p)" \
  && tar -xzf /tmp/miniwob-plusplus.tar.gz --strip-components=3 \
       -C /usr/share/nginx/miniwob "${top}miniwob/html"
 COPY nginx.conf /etc/nginx/conf.d/default.conf
