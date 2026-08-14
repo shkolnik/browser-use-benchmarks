@@ -185,28 +185,36 @@ def main(argv):
     root = os.path.abspath(root)
     os.makedirs(outdir, exist_ok=True)
 
+    # Every phase below walks a 45G tree of small files and is minutes long.
+    # flush on all of them: stdout is a pipe here, so Python block-buffers it
+    # and the whole run would surface at once, after the fact.
+    print(f'planning media buckets under {root}', flush=True)
     assignments, sizes = partition_tree.plan(root, limit_kb, max_buckets)
     by_bucket = {}
     for piece, idx in assignments:
         by_bucket.setdefault(idx, []).append(os.path.relpath(piece, root))
 
     all_members = []
-    print(f'{len(sizes)} of {max_buckets} media buckets used:')
+    print(f'{len(sizes)} of {max_buckets} media buckets used:', flush=True)
     # Every index up to the ceiling gets a tar. The Dockerfile's ADD lines are
     # static, so each must match a file that exists; max_buckets is a ceiling
     # with headroom, not a target.
     for idx in range(max_buckets):
         members = members_for(root, by_bucket.get(idx, []))
         all_members.extend(members)
+        used = sizes[idx] if idx < len(sizes) else 0
+        print(f'  bucket-{idx:02d}.tar: writing {len(members)} entries, '
+              f'{used / 2**20:.1f}G', flush=True)
         out_tar = os.path.join(outdir, f'bucket-{idx:02d}.tar')
         write_bucket(root, members, out_tar, os.path.join(outdir, f'.list-{idx:02d}'))
         os.remove(os.path.join(outdir, f'.list-{idx:02d}'))
-        used = sizes[idx] if idx < len(sizes) else 0
-        print(f'  bucket-{idx:02d}.tar: {used / 2**20:.1f}G, {len(members)} entries')
+        print(f'  bucket-{idx:02d}.tar: {os.path.getsize(out_tar)} bytes', flush=True)
 
     # After writing, so the audit sees exactly the member set that shipped.
+    print(f'auditing {len(all_members)} members', flush=True)
     audit(root, all_members)
-    print(f'media audit passed: {len(all_members)} entries across {len(sizes)} buckets')
+    print(f'media audit passed: {len(all_members)} entries across {len(sizes)} buckets',
+          flush=True)
 
 
 if __name__ == '__main__':

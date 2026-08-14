@@ -16,6 +16,41 @@ def run(cmd: list[str]) -> None:
     if subprocess.run(cmd).returncode != 0:
         raise SystemExit(f"error: command failed: {' '.join(cmd)}")
 
+def log_resources(phase: str, path: Path, log=print) -> None:
+    """One JSONL reading of memory, swap and free disk at a phase boundary.
+
+    A build that goes quiet is indistinguishable from one that is swapping or
+    out of disk until someone can read these three numbers, and by then the
+    ephemeral runner that held them is gone. Emitted in-stream because the log
+    already timestamps every line.
+
+    Best-effort: a missing /proc or an unreadable path degrades to nulls rather
+    than failing a build over its own instrumentation.
+    """
+    mem = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, value = line.partition(":")
+            mem[key] = int(value.split()[0])  # kB
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        disk = shutil.disk_usage(path)
+    except OSError:
+        disk = None
+    swap_total, swap_free = mem.get("SwapTotal"), mem.get("SwapFree")
+    log(json.dumps({
+        "metric": "resources",
+        "phase": phase,
+        "mem_available_mb": mem["MemAvailable"] // 1024 if "MemAvailable" in mem else None,
+        "mem_total_mb": mem["MemTotal"] // 1024 if "MemTotal" in mem else None,
+        "swap_used_mb": (swap_total - swap_free) // 1024
+                        if swap_total is not None and swap_free is not None else None,
+        "disk_free_gb": disk.free // 2**30 if disk else None,
+        "disk_total_gb": disk.total // 2**30 if disk else None,
+    }))
+
+
 def version_tag(repo_root: Path) -> str:
     # Pure function of HEAD — never wall clock. CI computes the tag
     # independently in the build, push, and clean steps, and a build slow
@@ -225,7 +260,12 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
     work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
 
-    extract = ["tar", "xf", str(archive), "-C", str(work)]
+    # A 45 GiB extract of small files is mute for its whole run without this,
+    # which reads exactly like a hang. A tar record is 10240 bytes, so 100000
+    # records is a line per ~1 GiB, carrying bytes moved and the rate.
+    extract = ["tar", "xf", str(archive), "-C", str(work),
+               "--checkpoint=100000",
+               "--checkpoint-action=echo=  media extract: %T after %ds"]
     if media.strip:
         # --strip-components counts path segments, so derive it from the prefix
         # rather than making each image state a number that has to stay in sync
@@ -262,11 +302,15 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
             for cmd in load_cmds(ref, m, registry, datasets_dir, version):
                 run(cmd)
         else:
+            log_resources(f"{ref.name}:start", datasets_dir)
             if m.prepare:
                 run_prepare(ref, m, registry, datasets_dir)
+                log_resources(f"{ref.name}:after-prepare", datasets_dir)
             if m.media:
                 run_media_prep(ref, m, datasets_dir, repo_root)
+                log_resources(f"{ref.name}:after-media-prep", datasets_dir)
             run(build_cmd(ref, m, registry, datasets_dir, version, repo_root))
+            log_resources(f"{ref.name}:after-build", datasets_dir)
 
 def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:
     tags = [f"{registry}/{ref.name}:{version}", f"{registry}/{ref.name}:latest"]

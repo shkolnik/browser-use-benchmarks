@@ -60,8 +60,20 @@ assert_dump_complete() {
   echo "derive: $1 completion trailer present"
 }
 
+# Concatenating ~45G of parts takes minutes and a single `cat part-* > out`
+# says nothing while it runs. Appending part by part costs nothing and puts a
+# line in the log per 8G, which is the difference between a slow phase and an
+# apparently hung job.
 reassemble_outputs() {
-  cat "$DATASETS_DIR"/shopping_media.tar.part-* > "$DATASETS_DIR/shopping_media.tar"
+  local out="$DATASETS_DIR/shopping_media.tar" n=0
+  local parts=("$DATASETS_DIR"/shopping_media.tar.part-*)
+  : > "$out"
+  for part in "${parts[@]}"; do
+    n=$((n + 1))
+    echo "derive: reassembling $(basename "$part") ($n/${#parts[@]}) into shopping_media.tar"
+    cat "$part" >> "$out"
+  done
+  echo "derive: reassembled shopping_media.tar ($(stat -c%s "$out") bytes)"
   rm -f "$DATASETS_DIR"/shopping_media.tar.part-*
 }
 

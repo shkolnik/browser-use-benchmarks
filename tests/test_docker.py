@@ -739,3 +739,30 @@ def test_smoke_still_checks_the_PUBLISHED_path_after_wait(tmp_path, monkeypatch)
                         or docker_mod.Health(True, 1.0, "HTTP 200"))
     docker_mod.run_smoke([ref], repo)
     assert polled == [("http://localhost:9999/forums", 30)]
+
+
+from builder.docker import log_resources
+
+
+def test_log_resources_emits_one_jsonl_reading(tmp_path):
+    lines = []
+    log_resources("shopping:after-media-prep", tmp_path, log=lines.append)
+    assert len(lines) == 1
+    r = json.loads(lines[0])
+    assert r["metric"] == "resources"
+    assert r["phase"] == "shopping:after-media-prep"
+    # Whatever runs the suite has memory and a disk, so these must be real:
+    # a reading that silently degrades to null is the failure this guards.
+    assert r["mem_total_mb"] > 0 and r["mem_available_mb"] > 0
+    assert r["disk_total_gb"] >= r["disk_free_gb"] >= 0
+    assert r["swap_used_mb"] >= 0
+
+
+def test_log_resources_survives_an_unreadable_path(tmp_path):
+    # Instrumentation must never be what fails a build: a path that has gone
+    # away between phases still yields a line, with the disk fields nulled.
+    lines = []
+    log_resources("gone", tmp_path / "does-not-exist", log=lines.append)
+    r = json.loads(lines[0])
+    assert r["disk_free_gb"] is None and r["disk_total_gb"] is None
+    assert r["mem_total_mb"] > 0
