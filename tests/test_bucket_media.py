@@ -36,15 +36,12 @@ def run(tmp_path, limit_kb=64, max_buckets=8):
 # --- the finding this module exists to prevent -------------------------------
 
 def test_every_ancestor_directory_is_an_explicit_member(tmp_path):
-    """THE regression, and it is not hypothetical.
+    """`ADD --chown` applies to tar MEMBERS.
 
-    `ADD --chown` applies to tar MEMBERS. A directory that exists only
-    implicitly in a member's path is created by the extractor and is not
-    chowned, so a naive `tar cf b.tar a/b/leaf` ships leaf as app:app and both
-    'a' and 'a/b' as root:root 0755. Verified against docker 29.6.1.
-
-    That is invisible to any assertion that samples files, which is exactly what
-    the plan originally proposed as the replacement for the ownership audit.
+    A directory existing only implicitly in a member's path is created by the
+    extractor and never chowned, so `tar cf b.tar a/b/leaf` ships the leaf
+    app-owned and both 'a' and 'a/b' as root:root 0755 — invisible to any
+    assertion that samples files.
     """
     write(tmp_path / "root", "catalog/product/cache/deep/img.jpg", 8)
     tars = run(tmp_path)
@@ -109,7 +106,7 @@ def test_mtimes_are_preserved_not_pinned(tmp_path):
 # --- the audit must actually fail ---------------------------------------------
 
 def test_audit_rejects_a_missing_entry(tmp_path):
-    """A check that has never failed has not been tested."""
+    """Completeness: an entry under root that no bucket carries."""
     root = tmp_path / "root"
     write(root, "a/img.jpg", 8)
     with pytest.raises(SystemExit, match="in no bucket"):
@@ -177,12 +174,11 @@ def test_add_chown_covers_directories_end_to_end(tmp_path):
 
 
 def test_unused_buckets_are_valid_nonempty_tars(tmp_path):
-    """An empty tar is not recognised as an archive — ADD copies it verbatim.
+    """An empty tar is not recognised as an archive — ADD copies it verbatim,
+    dropping a literal bucket-NN.tar into the media tree.
 
-    Found end-to-end: with max_buckets above what the tree needed, five literal
-    bucket-NN.tar files appeared inside the media destination. max_buckets is a
-    ceiling with headroom by design, and the Dockerfile's ADD lines are static,
-    so unused buckets must still extract to nothing rather than to a file.
+    max_buckets is a ceiling with headroom and the Dockerfile's ADD lines are
+    static, so unused buckets must exist and must extract to nothing.
     """
     root = tmp_path / "root"
     write(root, "a/img.jpg", 8)
@@ -194,3 +190,24 @@ def test_unused_buckets_are_valid_nonempty_tars(tmp_path):
     # the padded ones carry only directories, so nothing is duplicated
     files = [m for t in tars for m in members_of(t) if m.endswith(".jpg")]
     assert files == ["a/img.jpg"]
+
+
+def test_media_add_lines_match_max_buckets():
+    """The Dockerfile's ADD lines are static; max_buckets decides how many tars
+    exist. A mismatch either fails the build on a missing file or ships a
+    truncated media tree, so the two are checked against each other here rather
+    than kept in sync by comment.
+    """
+    from builder.manifest import load_manifest
+    root = Path(__file__).resolve().parents[1]
+    for toml in sorted((root / "images").glob("*/*/image.toml")):
+        m = load_manifest(toml.parent)
+        if not m.media:
+            continue
+        df = (toml.parent / "Dockerfile").read_text()
+        adds = [l for l in df.splitlines()
+                if l.startswith("ADD") and ".media/bucket-" in l]
+        assert len(adds) == m.media.max_buckets, (
+            f"{toml.parent.name}: {len(adds)} ADD lines vs "
+            f"max_buckets={m.media.max_buckets}")
+        assert all(m.media.dest in l for l in adds), "an ADD targets another path"

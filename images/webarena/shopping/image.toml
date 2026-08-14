@@ -18,6 +18,34 @@ prepare_input = true
 script = "derive-backup.sh"
 outputs = ["shopping_db.sql.gz", "shopping_media.tar", "shopping_env.php"]
 
+# pub/media is inert: 45G of product images that enter and leave the build
+# byte-identical. This section routes them around the build entirely — bucketed
+# into tars on the CI host, ADDed straight into the final image — rather than
+# extracted into the restore snapshot and COPYed back out entry by entry, which
+# is the most expensive phase of this build and scales with entry count rather
+# than bytes.
+#
+# Only the media subtree moves. The rest of /opt/magento — composer's vendor
+# tree, generated/, the config.php written during restore — is produced by the
+# build and keeps the partition-and-COPY machinery.
+[media]
+archive = "shopping_media.tar"
+# derive-backup.sh writes it as `tar cf ... -C /var/www/magento2/pub media`, so
+# every path inside is media/..., and dest already ends in /media.
+strip = "media"
+dest = "/opt/magento/pub/media"
+chown = "app:app"
+# Same 7G as the code tree's buckets: dockerd's own heap scales with the entry
+# count of a single bucket, and 8G was enough to OOM a 16 GiB runner. Lands ~7.
+limit_kb = 7340032
+# A ceiling with headroom, not a target. Unused buckets still get a tar — an
+# empty one would not be recognised as an archive and would be ADDed verbatim.
+max_buckets = 10
+# The reindex is DB/ES only and the in-build storefront assertions grep HTML,
+# so restore never reads a media file. Stated explicitly because a smoke
+# failure is what would expose this assumption being wrong.
+restore_needs_media = false
+
 [service]
 # The PUBLISHED address the smoke gate reaches this service at. Readiness is the
 # Dockerfile HEALTHCHECK's job (900s start period, for Magento's first-request

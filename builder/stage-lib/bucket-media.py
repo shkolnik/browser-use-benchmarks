@@ -1,25 +1,23 @@
 """Split an inert media tree into one tar per image layer, on the CI host.
 
-The sibling partition-tree.py does this inside a restore stage, moving files
-into bucket-NN/ directories that the final stage then COPYs. That is correct for
-trees the build PRODUCES (gitlab, map-nominatim). It is wasteful for trees the
-build only THREADS THROUGH: shopping's 45G of pub/media enters and leaves
-byte-identical, yet gets walked entry-by-entry into the restore snapshot and
-again out of it. Measured on run 31735955132, the bucket COPYs cost 2841s.
+The sibling partition-tree.py does the same partition inside a restore stage,
+moving files into bucket-NN/ directories that the final stage COPYs out. That is
+the right shape for a tree the build PRODUCES (gitlab, map-nominatim), where the
+files do not exist until the stage runs.
 
-This script produces the same partition as tars on the host, with no docker
-involved, so the final stage can `ADD` them directly:
+An inert tree does not need to be in a build stage at all. Partitioning it here
+— on the host, no docker — lets the final stage ADD the tars directly, so its
+entries are walked once by tar instead of once into the restore snapshot and
+again out of it. Entry count, not bytes, is what a bucket COPY costs.
 
     python3 bucket-media.py <limit_kb> <max_buckets> <root> <outdir>
 
 Leaves <outdir>/bucket-NN.tar and <root> UNTOUCHED — unlike partition-tree.py,
-which moves. That difference is why the assertions at the bottom exist: moving
-is self-evidencing (a leftover file is still in the root), copying is not.
+which moves. Copying is not self-evidencing the way moving is (nothing is left
+behind to show a file was missed), which is what audit() below is for.
 
-The first-fit planner is imported from partition-tree.py rather than copied. Its
-own docstring records that the same bug was fixed in two separate copies of it
-on one afternoon, and that the copy which was not shared went on to ship a
-fourth bug of its own.
+The first-fit planner is imported from partition-tree.py rather than copied; see
+that module's docstring for why a shared copy matters here.
 """
 
 import importlib.util
@@ -44,9 +42,9 @@ def ancestors(rel):
 def expand(root, rel):
     """Every path at or under <root>/<rel>, as paths relative to root.
 
-    Explicit rather than letting tar recurse, because a bucket holds only SOME
-    children of a shared parent — telling tar to recurse into that parent would
-    sweep in the pieces that belong to other buckets.
+    Explicit rather than letting tar recurse: a bucket holds only SOME children
+    of a shared parent, so recursing into that parent would sweep in pieces
+    belonging to other buckets.
     """
     out = [rel]
     full = os.path.join(root, rel)
@@ -61,21 +59,15 @@ def expand(root, rel):
 def members_for(root, pieces):
     """Full, sorted, de-duplicated member list for one bucket.
 
-    Every ancestor directory is included EXPLICITLY. This is the whole reason
-    the function exists. `ADD --chown` applies to tar members; directories that
-    exist only implicitly in a member's path are created by the extractor and
-    are NOT chowned, so a tar of 'sub/deep/leaf' lands leaf as app:app and both
-    'sub' and 'sub/deep' as root:root 0755.
+    Every ancestor directory is included EXPLICITLY, which is the whole reason
+    this function exists. `ADD --chown` applies to tar members; a directory that
+    exists only implicitly in a member's path is created by the extractor and is
+    NOT chowned. So a tar of 'sub/deep/leaf' lands the leaf app-owned and both
+    'sub' and 'sub/deep' root:root 0755.
 
-    That failure is invisible to any check that samples files — every file it
-    can find is correct — and for Magento it is a live bug rather than a
-    cosmetic one: php-fpm runs as app and writes resized-image caches under
-    pub/media/catalog/product/cache/ at request time. The in-build validation
-    greps HTML and would not see it.
-
-    It is also newly load-bearing. Today restore-stage.sh follows the partition
-    with a blanket `chown -R app:app /staging`, which papers over exactly this;
-    moving to tars removes that sweep.
+    Nothing downstream can sample its way to that fact — every file is correct —
+    and a root-owned directory under pub/media is a runtime failure, because
+    php-fpm runs as app and writes resized-image caches beneath it.
     """
     members = set()
     for rel in pieces:
@@ -84,16 +76,13 @@ def members_for(root, pieces):
     members.discard('.')
     members.discard('')
     if not members:
-        # An UNUSED bucket still needs a valid tar, and it must not be empty:
-        # docker does not recognise a zero-member tar as an archive and ADDs it
-        # verbatim, dropping a literal bucket-NN.tar file into the media tree.
-        # Caught end-to-end, not reasoned about — five stray tarballs appeared
-        # inside pub/media the first time max_buckets exceeded what was used.
+        # An unused bucket still needs a tar, and it must not be empty: docker
+        # does not recognise a zero-member tar as an archive, so ADD copies it
+        # verbatim and drops a literal bucket-NN.tar into the media tree.
         #
-        # Padding with the tree's top-level directories is idempotent: they are
-        # already members of other buckets (directories may legitimately repeat,
-        # unlike files), they carry their real mode, and re-extracting them
-        # changes nothing.
+        # Top-level directories are the safe padding. They already appear in
+        # other buckets (directories may repeat, unlike files), they carry their
+        # real mode, and re-extracting one changes nothing.
         return sorted(e for e in os.listdir(root)
                       if os.path.isdir(os.path.join(root, e))
                       and not os.path.islink(os.path.join(root, e)))
@@ -113,11 +102,10 @@ def write_bucket(root, members, out_tar, listfile):
     #   Dockerfile overrides ownership for every member — but it keeps the tar
     #   byte-identical across hosts with different passwd databases.
     #
-    # mtimes are deliberately NOT pinned. An earlier draft called for --mtime on
-    # reproducibility grounds; that is wrong here. The source tree comes from a
-    # sha256-pinned cache artifact, so real mtimes are already stable, and
-    # pinning them would make the new path's media tree differ from the old
-    # path's on the one comparison that proves this change is safe.
+    # mtimes are NOT pinned: the source tree comes from a sha256-pinned cache
+    # artifact, so real mtimes are already stable, and pinning them would make
+    # this path's media tree differ from the COPY path's — which is the
+    # comparison that shows the two are equivalent.
     subprocess.run(
         ['tar', 'cf', out_tar, '-C', root, '--no-recursion',
          '--verbatim-files-from', '--numeric-owner', '-T', listfile],
@@ -125,14 +113,11 @@ def write_bucket(root, members, out_tar, listfile):
 
 
 def audit(root, all_members):
-    """Host-side checks. Full coverage, no docker, and cheap because it is local.
+    """Host-side checks: full coverage, no docker, cheap because it is local.
 
-    partition-tree.py needs none of this: it MOVES, so a dropped file is still
-    sitting in the root afterwards. Tarring copies, so a bucket can silently omit
-    files and nothing downstream can tell. (The claim that the existing path is
-    self-verifying was overstated in review — nothing actually asserts the root
-    is empty either, so a dropped file is silently lost there too. This is the
-    first version of this code path that checks.)
+    A bucket that silently omits files is undetectable downstream — the image
+    just ships a smaller media tree — so completeness is asserted here, against
+    the source tree, rather than inferred later.
     """
     problems = []
 
@@ -156,10 +141,9 @@ def audit(root, all_members):
         problems.append(f'{len(missing)} entries in no bucket, e.g. {sorted(missing)[0]}')
     if extra:
         problems.append(f'{len(extra)} bucketed entries not in the tree, e.g. {sorted(extra)[0]}')
-    # Duplicates are checked over FILES only. A directory legitimately appears in
-    # every bucket that holds anything beneath it — that is the ancestor-member
-    # rule above doing its job, and re-extracting a directory entry is idempotent.
-    # A duplicated file, by contrast, means the same bytes ship in two layers.
+    # Files only. A directory appears in every bucket holding anything beneath
+    # it — the ancestor-member rule requires that, and re-extracting a directory
+    # is idempotent. A duplicated FILE means the same bytes ship in two layers.
     counts = {}
     for rel in all_members:
         counts[rel] = counts.get(rel, 0) + 1
@@ -208,10 +192,9 @@ def main(argv):
 
     all_members = []
     print(f'{len(sizes)} of {max_buckets} media buckets used:')
-    # Every index up to the ceiling gets a tar, including empty ones. The
-    # Dockerfile's ADD lines are static and must match a file that exists, and
-    # max_buckets is deliberately a ceiling with headroom rather than a target
-    # — the same reason the existing COPY-based path tolerates empty buckets.
+    # Every index up to the ceiling gets a tar. The Dockerfile's ADD lines are
+    # static, so each must match a file that exists; max_buckets is a ceiling
+    # with headroom, not a target.
     for idx in range(max_buckets):
         members = members_for(root, by_bucket.get(idx, []))
         all_members.extend(members)
@@ -221,8 +204,7 @@ def main(argv):
         used = sizes[idx] if idx < len(sizes) else 0
         print(f'  bucket-{idx:02d}.tar: {used / 2**20:.1f}G, {len(members)} entries')
 
-    # After writing, not before: the audit is what licenses the build to trust
-    # these tars, and it must see exactly what was written.
+    # After writing, so the audit sees exactly the member set that shipped.
     audit(root, all_members)
     print(f'media audit passed: {len(all_members)} entries across {len(sizes)} buckets')
 

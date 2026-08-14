@@ -1,25 +1,26 @@
 #!/bin/bash
 # Runs inside the "restore" build stage of the shopping Dockerfile.
-# Boots the shipped service stack, loads the derived DB dump + media +
-# synthesizes config.php, reindexes search, validates the storefront in-build,
-# shuts everything down cleanly (quiesced mariadb), trims junk, audits runtime
-# file ownership, then partitions /opt/magento into /staging buckets small
-# enough for the final stage to COPY as <=10G registry layers.
+# Boots the shipped service stack, loads the derived DB dump, synthesizes
+# config.php, reindexes search, validates the storefront in-build, shuts
+# everything down cleanly (quiesced mariadb), trims junk, audits runtime file
+# ownership, then partitions /opt/magento into /staging buckets small enough for
+# the final stage to COPY as <=10G registry layers. pub/media does not pass
+# through this stage — see [media] in image.toml.
 set -euo pipefail
 
 MAGE=/opt/magento
 # 7G, not the 8G its siblings use: buildkit's per-COPY working set scales with
-# the bucket, and run 31669103000 was OOM-killed during `COPY --from=restore
-# /staging/bucket-04/` with dockerd holding ~10.9G on a 16 GiB box. The tree is
-# 50.4G, so this lands ~8 buckets instead of 7.
+# the bucket, and 8G is enough to OOM dockerd on a 16 GiB box.
 BUCKET_LIMIT_KB=$((7 * 1024 * 1024))
 # A ceiling, NOT a target: plan() first-fits under BUCKET_LIMIT_KB and only
 # fails if it runs past this, so raising it alone changes nothing — the limit
-# above is what sets the bucket count. Deliberately 2 above the ~8 expected, so
-# a growing dataset or a worse first-fit packing does not fail the build at the
-# partition step. Empty buckets are already shipped by ../../vwa/classifieds
-# (12 declared, 10 filled) and their COPY is a no-op.
-BUCKET_COUNT=10  # must match the COPY --from lines in the Dockerfile's final stage
+# above is what sets the bucket count. The headroom absorbs a growing dataset or
+# a worse first-fit packing without failing the build at the partition step; a
+# COPY of an empty bucket is a no-op.
+#
+# What is partitioned here is the ~5G code tree (vendor, generated, var), which
+# lands 1-2 buckets.
+BUCKET_COUNT=4  # must match the COPY --from lines in the Dockerfile's final stage
 
 echo "=== boot the shipped stack ==="
 . /run-services.sh
@@ -52,10 +53,12 @@ products=$(mariadb -N -e 'SELECT COUNT(*) FROM magentodb.catalog_product_entity'
 [ "$products" = 104368 ] || { echo "product count $products != 104368 — bad DB load" >&2; exit 1; }
 echo "DB loaded: $products products"
 
-echo "=== media ==="
-tar xf /mnt/shopping_media.tar -C "$MAGE/pub"
-chown -R app:app "$MAGE/pub/media"
-test -d "$MAGE/pub/media/catalog/product"
+echo "=== media (routed around this stage; see [media] in image.toml) ==="
+# pub/media is bucketed on the CI host and ADDed straight into the final image,
+# so this stage needs the directory but not its 45G of contents: nothing below
+# reads a media file (the reindex is DB/ES only, the storefront assertions grep
+# HTML). app:app because Magento writes resized-image caches beneath it.
+install -d -o app -g app "$MAGE/pub/media"
 
 echo "=== synthesize config.php + reindex (NEVER setup:upgrade/di:compile: ==="
 echo "=== core setup_module rows are absent in this dataset) ==="

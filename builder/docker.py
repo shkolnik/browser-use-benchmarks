@@ -191,18 +191,18 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
 def media_dir(ref: ImageRef) -> Path:
     """Where the bucket tars live: inside the build context, on purpose.
 
-    build_cmd passes str(ref.path) as the positional context, so this is the one
-    place the final stage can ADD from — ADD auto-extracts only from the default
-    context and has no --from (a Dockerfile parse error, verified). Gitignored.
+    build_cmd passes str(ref.path) as the positional context, and ADD
+    auto-extracts only from the DEFAULT context — it has no --from — so this is
+    the one place the final stage can ADD them from. Gitignored.
     """
     return ref.path / ".media"
 
 def media_work_dir(datasets_dir: Path, ref: ImageRef) -> Path:
     """Where the archive is extracted: OUTSIDE the build context, on purpose.
 
-    Putting the loose tree in the image dir would hand buildkit tens of millions
-    of small files to sync into its content store as build context — the exact
-    per-entry cost this whole change exists to avoid.
+    A loose tree inside the image dir would hand buildkit millions of small
+    files to sync into its content store as build context, which is the
+    per-entry cost the media path exists to avoid.
     """
     return datasets_dir / ".media-work" / ref.name.replace("/", "-")
 
@@ -210,10 +210,9 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
                    repo_root: Path) -> None:
     """Extract the media archive and bucket it into tars, on the host.
 
-    Runs between prepare and build. Everything here used to happen inside the
-    restore stage — tar x into the snapshot, partition into staging directories,
-    then one COPY --from per bucket — which is what made the bucket COPYs the
-    single most expensive phase of the shopping build (2841s on run 31735955132).
+    Runs between prepare and build, so the final stage can ADD the tars instead
+    of the restore stage materialising the tree and the final stage COPYing it
+    back out entry by entry.
     """
     media, out = m.media, media_dir(ref)
     work = media_work_dir(datasets_dir, ref)
@@ -238,19 +237,16 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
          str(media.limit_kb), str(media.max_buckets), str(work), str(out)])
 
     if not media.restore_needs_media:
-        # The extracted tree is the largest transient on disk. Dropping it here
-        # rather than after the build is what keeps peak disk at the archive
-        # plus the tars rather than both plus the loose tree.
+        # The extracted tree is the largest transient on disk; dropping it now
+        # keeps peak disk at the archive plus the tars.
         shutil.rmtree(work, ignore_errors=True)
 
 def clean_media(refs, datasets_dir: Path) -> None:
     """Remove bucket tars and any extracted tree.
 
-    Deliberately NOT called from run_build: build, smoke and push are three
-    separate CLI invocations, so the tars have to survive from one to the next.
-    Called after a successful push, and from CI's always() step — the path that
-    matters is the pull-request build, which runs smoke and never pushes, and
-    would otherwise strand tens of gigabytes per image on a dev host.
+    Deliberately NOT called from run_build: build, smoke and push are separate
+    CLI invocations, so the tars must survive from one to the next. Called after
+    a successful push and from run_clean, which CI runs under always().
     """
     for ref in refs:
         for path in (media_dir(ref), media_work_dir(datasets_dir, ref)):
@@ -278,7 +274,8 @@ def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[
         tags.append(m.source.tag)
     return [["docker", "image", "rm", "-f"] + tags]
 
-def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=print) -> None:
+def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=print,
+              datasets_dir: Path | None = None) -> None:
     # Best-effort by design: clean runs in CI's always() step, where the image
     # may never have been built — and `docker image rm -f` exits non-zero on a
     # missing image (verified live), so failures warn and cleaning continues.
@@ -288,6 +285,12 @@ def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=p
             log("+ " + " ".join(cmd))
             if runner(cmd).returncode != 0:
                 log(f"warning: cleanup command failed (continuing): {' '.join(cmd)}")
+    # Media tars ride here rather than in a workflow step of their own: this
+    # runs under always(), so it covers the paths that would otherwise strand
+    # them — a pull-request build, which smokes and never pushes, and any
+    # failure between build and push. Idempotent after a successful push.
+    if datasets_dir is not None:
+        clean_media(refs, datasets_dir)
 
 def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
                    sleep=time.sleep, log=print) -> None:
@@ -307,8 +310,8 @@ def run_push(refs, registry: str, repo_root: Path,
     for ref in refs:
         for cmd in push_cmds(ref, registry, version):
             run_with_retry(cmd)
-    # After the push, not before: the bucket tars are build context, and a push
-    # that has to retry must not find them gone.
+    # After the push: the tars are build context, and a retrying push must not
+    # find them gone.
     if datasets_dir is not None:
         clean_media(refs, datasets_dir)
 
