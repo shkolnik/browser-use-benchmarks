@@ -30,6 +30,32 @@ class Prepare:
 
 
 @dataclass(frozen=True)
+class Media:
+    """An inert subtree that the build threads through without transforming it.
+
+    Declaring this section is how an image opts into the media path: the subtree
+    is bucketed into tars on the CI host and ADDed straight into the final
+    image, instead of being extracted into the restore stage and COPYed out of
+    it entry by entry. No section = today's behaviour, unchanged.
+
+    It is deliberately a SUBTREE and not the whole staged tree. shopping stages
+    all of /opt/magento — composer's vendor tree, generated/, the config.php
+    written during restore — and only pub/media is inert. The rest keeps the
+    existing partition-and-COPY machinery.
+    """
+    archive: str         # prepare output holding the tree, e.g. shopping_media.tar
+    strip: str           # subtree within that archive to treat as media, '' = all
+    dest: str            # absolute path in the image, e.g. /opt/magento/pub/media
+    chown: str           # ADD --chown target, e.g. app:app
+    limit_kb: int        # per-bucket ceiling; buckets become layers
+    max_buckets: int     # ceiling, not a target; empty tars are not emitted
+    # Most restore stages never read the media — shopping's reindex is DB/ES
+    # only and its in-build assertions grep HTML. The ones that do pay a
+    # bind-mount and a --target split; the default is not to.
+    restore_needs_media: bool = False
+
+
+@dataclass(frozen=True)
 class Manifest:
     datasets: list[Dataset] = field(default_factory=list)
     healthcheck: str | None = None
@@ -42,6 +68,7 @@ class Manifest:
     build_args: dict[str, str] = field(default_factory=dict)
     source: Source = Source(kind="build")
     prepare: Prepare | None = None
+    media: Media | None = None
 
 def _die(path: Path, msg: str):
     raise SystemExit(f"error: {path / 'image.toml'}: {msg}")
@@ -100,6 +127,35 @@ def load_manifest(image_dir: Path) -> Manifest:
         _die(image_dir,
              f"datasets marked prepare_input ({', '.join(lazy)}) but there is no "
              "[prepare] section to fetch them — nothing would ever download them")
+    media = None
+    med = data.get("media")
+    if med is not None:
+        if prepare is None:
+            _die(image_dir, "[media] needs a [prepare] section — media.archive names "
+                            "one of its outputs")
+        for key in ("archive", "dest", "chown", "limit_kb", "max_buckets"):
+            if key not in med:
+                _die(image_dir, f"media missing '{key}'")
+        if med["archive"] not in prepare.outputs:
+            _die(image_dir, f"media.archive '{med['archive']}' is not one of "
+                            f"prepare.outputs ({', '.join(prepare.outputs)})")
+        if not str(med["dest"]).startswith("/"):
+            _die(image_dir, "media.dest must be an absolute path in the image")
+        # ADD --chown does not fail the build on an unresolvable name: it lands
+        # everything 0:0 root:root and exits clean. There is no way to catch that
+        # from here (the image's passwd database is not known until it is built),
+        # which is why the final stage carries a directory-ownership assert.
+        if ":" not in str(med["chown"]):
+            _die(image_dir, "media.chown must be 'user:group'")
+        media = Media(
+            archive=med["archive"],
+            strip=str(med.get("strip", "")).strip("/"),
+            dest=str(med["dest"]).rstrip("/"),
+            chown=str(med["chown"]),
+            limit_kb=int(med["limit_kb"]),
+            max_buckets=int(med["max_buckets"]),
+            restore_needs_media=bool(med.get("restore_needs_media", False)),
+        )
     svc = data.get("service", {})
     if "healthcheck_timeout_s" in svc:
         _die(image_dir,
@@ -115,4 +171,5 @@ def load_manifest(image_dir: Path) -> Manifest:
         build_args={k: str(v) for k, v in data.get("build", {}).get("args", {}).items()},
         source=Source(kind=kind, dataset=src.get("dataset"), tag=src.get("tag")),
         prepare=prepare,
+        media=media,
     )

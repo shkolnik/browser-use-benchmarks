@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -14,6 +15,68 @@ def run(cmd: list[str]) -> None:
     print("+ " + " ".join(cmd))
     if subprocess.run(cmd).returncode != 0:
         raise SystemExit(f"error: command failed: {' '.join(cmd)}")
+
+def run_piped(src: list[str], dst: list[str]) -> None:
+    """`src | dst`, failing the build if either end does.
+
+    A shell would report only the right-hand status by default, which is the
+    half that stays 0 when the producer dies mid-stream — a truncated archive
+    extracting cleanly up to the cut.
+    """
+    print("+ " + " ".join(src) + " | " + " ".join(dst))
+    producer = subprocess.Popen(src, stdout=subprocess.PIPE)
+    consumer = subprocess.Popen(dst, stdin=producer.stdout)
+    # Only the consumer should hold the read end, so the producer sees EPIPE and
+    # exits if the consumer dies first rather than blocking on a full pipe.
+    producer.stdout.close()
+    consumer_rc, producer_rc = consumer.wait(), producer.wait()
+    if producer_rc != 0 or consumer_rc != 0:
+        raise SystemExit(f"error: command failed "
+                         f"({' '.join(src)} -> {producer_rc}, "
+                         f"{' '.join(dst)} -> {consumer_rc})")
+
+def log_resources(phase: str, path: Path, log=print) -> None:
+    """One JSONL reading of memory, swap and free disk at a phase boundary.
+
+    A build that goes quiet is indistinguishable from one that is swapping or
+    out of disk until someone can read these three numbers, and by then the
+    ephemeral runner that held them is gone. Emitted in-stream because the log
+    already timestamps every line.
+
+    Best-effort: a missing /proc degrades to nulls rather than failing a build
+    over its own instrumentation.
+    """
+    mem = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, value = line.partition(":")
+            mem[key] = int(value.split()[0])  # kB
+    except (OSError, ValueError, IndexError):
+        pass
+    # statvfs needs a path that exists, and the datasets dir does not until
+    # something writes to it — so the reading at :start, the one that says what
+    # the job began with, is exactly the one that would come back null. Free
+    # space is a property of the filesystem, not the directory, so the nearest
+    # existing ancestor answers the same question.
+    disk = None
+    for candidate in (path.resolve(), *path.resolve().parents):
+        try:
+            disk = shutil.disk_usage(candidate)
+            break
+        except OSError:
+            continue
+    swap_total, swap_free = mem.get("SwapTotal"), mem.get("SwapFree")
+    log(json.dumps({
+        "metric": "resources",
+        "phase": phase,
+        "mem_available_mb": mem["MemAvailable"] // 1024 if "MemAvailable" in mem else None,
+        "mem_total_mb": mem["MemTotal"] // 1024 if "MemTotal" in mem else None,
+        "swap_used_mb": (swap_total - swap_free) // 1024
+                        if swap_total is not None and swap_free is not None else None,
+        "disk_free_gb": disk.free // 2**30 if disk else None,
+        "disk_total_gb": disk.total // 2**30 if disk else None,
+    }))
+
 
 def version_tag(repo_root: Path) -> str:
     # Pure function of HEAD — never wall clock. CI computes the tag
@@ -108,12 +171,33 @@ def prepare_inputs_digest(m: Manifest) -> str | None:
     lines = sorted(f"{ds.filename}:{ds.sha256}" for ds in pins)
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
+def output_paths(datasets_dir: Path, name: str) -> list[Path]:
+    """The files a prepare output actually landed as: itself, or its parts.
+
+    Registry layers over ~10G are refused, so a large output ships to the
+    derived cache split into `<name>.part-NN` and arrives that way on a cache
+    hit. image.toml names the whole thing and this resolves how it turned up,
+    which keeps the part count — a function of the size, not of the recipe —
+    out of a static list.
+
+    Ordered by name, which is the split order: `split -d` pads the suffix, so
+    lexicographic and numeric agree below 100 parts. Beyond that the suffix
+    widens and a misordered join fails the extract rather than corrupting it.
+    """
+    whole = datasets_dir / name
+    if whole.is_file():
+        return [whole]
+    return sorted(datasets_dir.glob(name + ".part-*"))
+
 def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
     script_bytes = (ref.path / m.prepare.script).read_bytes()
     return {
         "script": m.prepare.script,
         "script_sha256": hashlib.sha256(script_bytes).hexdigest(),
-        "outputs": {o: (datasets_dir / o).stat().st_size for o in m.prepare.outputs},
+        # Summed, so an output fingerprints the same whether it arrived whole
+        # from a derive or split from the cache.
+        "outputs": {o: sum(p.stat().st_size for p in output_paths(datasets_dir, o))
+                    for o in m.prepare.outputs},
         # Without this the artifacts survive a pin change untouched: the script
         # is unchanged, the sizes are unchanged, so the derive is skipped and
         # the build silently uses data derived from the previous upstream tar.
@@ -125,7 +209,7 @@ def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
 
 def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str | None:
     """None if the cached artifacts may be reused, else why they may not be."""
-    missing = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
+    missing = [o for o in m.prepare.outputs if not output_paths(datasets_dir, o)]
     if missing:
         return f"missing: {', '.join(missing)}"
     stamp = prepare_stamp_path(datasets_dir, ref)
@@ -177,7 +261,7 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
     if proc.returncode != 0:
         raise SystemExit(f"error: prepare script failed for {ref.name}")
-    still = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
+    still = [o for o in m.prepare.outputs if not output_paths(datasets_dir, o)]
     if still:
         raise SystemExit(
             f"error: prepare for {ref.name} did not produce: {', '.join(still)}")
@@ -187,6 +271,92 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     print(f"{ref.name}: stamped {stamp}")
 
 
+def media_dir(ref: ImageRef) -> Path:
+    """Where the bucket tars live: inside the build context, on purpose.
+
+    build_cmd passes str(ref.path) as the positional context, and ADD
+    auto-extracts only from the DEFAULT context — it has no --from — so this is
+    the one place the final stage can ADD them from. Gitignored.
+    """
+    return ref.path / ".media"
+
+def media_work_dir(datasets_dir: Path, ref: ImageRef) -> Path:
+    """Where the archive is extracted: OUTSIDE the build context, on purpose.
+
+    A loose tree inside the image dir would hand buildkit millions of small
+    files to sync into its content store as build context, which is the
+    per-entry cost the media path exists to avoid.
+    """
+    return datasets_dir / ".media-work" / ref.name.replace("/", "-")
+
+def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
+                   repo_root: Path) -> None:
+    """Turn the media archive into bucket tars, on the host.
+
+    Runs between prepare and build, so the final stage can ADD the tars instead
+    of the restore stage materialising the tree and the final stage COPYing it
+    back out entry by entry.
+
+    Two ways to get there. Unless the restore stage reads the media, the archive
+    is demuxed straight into the buckets and the tree is never written at all;
+    otherwise it is extracted first and bucketed from disk, because a tree that
+    something else needs is not a cost this can avoid.
+    """
+    media, out = m.media, media_dir(ref)
+    work = media_work_dir(datasets_dir, ref)
+    parts = output_paths(datasets_dir, media.archive)
+    if not parts:
+        raise SystemExit(f"error: {datasets_dir / media.archive} not found "
+                         f"(nor its parts) — prepare should have left it")
+
+    shutil.rmtree(out, ignore_errors=True)
+    shutil.rmtree(work, ignore_errors=True)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if not media.restore_needs_media:
+        run(["python3", str(repo_root / "builder" / "stage-lib" / "demux-media.py"),
+             str(media.limit_kb), str(media.max_buckets), media.strip, str(out),
+             *(str(p) for p in parts)])
+        return
+
+    work.mkdir(parents=True, exist_ok=True)
+    # A 45 GiB extract of small files is mute for its whole run without this,
+    # which reads exactly like a hang. A tar record is 10240 bytes, so 100000
+    # records is a line per ~1 GiB, carrying bytes moved and the rate.
+    #
+    # Read from stdin rather than by name, so a split archive is joined in the
+    # pipe. Writing the parts back out as one file first would cost a full read
+    # and a full write of the whole archive, plus a second copy of it on the
+    # disk this workload is already bound by — for bytes whose only consumer is
+    # the extract on the other side of the join.
+    extract = ["tar", "x", "-C", str(work),
+               "--checkpoint=100000",
+               "--checkpoint-action=echo=  media extract: %T after %ds"]
+    if media.strip:
+        # --strip-components counts path segments, so derive it from the prefix
+        # rather than making each image state a number that has to stay in sync
+        # with a path it already declares.
+        extract += [f"--strip-components={len(media.strip.split('/'))}", media.strip]
+    run_piped(["cat", *(str(p) for p in parts)], extract)
+
+    # Left in place: this branch runs only when the restore stage reads the
+    # tree, so it is an input to the build and not a transient to reclaim.
+    run(["python3", str(repo_root / "builder" / "stage-lib" / "bucket-media.py"),
+         str(media.limit_kb), str(media.max_buckets), str(work), str(out)])
+
+def clean_media(refs, datasets_dir: Path) -> None:
+    """Remove bucket tars and any extracted tree.
+
+    Deliberately NOT called from run_build: build, smoke and push are separate
+    CLI invocations, so the tars must survive from one to the next. Called after
+    a successful push and from run_clean, which CI runs under always().
+    """
+    for ref in refs:
+        for path in (media_dir(ref), media_work_dir(datasets_dir, ref)):
+            if path.exists():
+                print(f"+ rm -rf {path}")
+                shutil.rmtree(path, ignore_errors=True)
+
 def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
     version = version_tag(repo_root)
     for ref in refs:
@@ -195,9 +365,15 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
             for cmd in load_cmds(ref, m, registry, datasets_dir, version):
                 run(cmd)
         else:
+            log_resources(f"{ref.name}:start", datasets_dir)
             if m.prepare:
                 run_prepare(ref, m, registry, datasets_dir)
+                log_resources(f"{ref.name}:after-prepare", datasets_dir)
+            if m.media:
+                run_media_prep(ref, m, datasets_dir, repo_root)
+                log_resources(f"{ref.name}:after-media-prep", datasets_dir)
             run(build_cmd(ref, m, registry, datasets_dir, version, repo_root))
+            log_resources(f"{ref.name}:after-build", datasets_dir)
 
 def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:
     tags = [f"{registry}/{ref.name}:{version}", f"{registry}/{ref.name}:latest"]
@@ -205,7 +381,8 @@ def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[
         tags.append(m.source.tag)
     return [["docker", "image", "rm", "-f"] + tags]
 
-def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=print) -> None:
+def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=print,
+              datasets_dir: Path | None = None) -> None:
     # Best-effort by design: clean runs in CI's always() step, where the image
     # may never have been built — and `docker image rm -f` exits non-zero on a
     # missing image (verified live), so failures warn and cleaning continues.
@@ -215,6 +392,12 @@ def run_clean(refs, registry: str, repo_root: Path, runner=subprocess.run, log=p
             log("+ " + " ".join(cmd))
             if runner(cmd).returncode != 0:
                 log(f"warning: cleanup command failed (continuing): {' '.join(cmd)}")
+    # Media tars ride here rather than in a workflow step of their own: this
+    # runs under always(), so it covers the paths that would otherwise strand
+    # them — a pull-request build, which smokes and never pushes, and any
+    # failure between build and push. Idempotent after a successful push.
+    if datasets_dir is not None:
+        clean_media(refs, datasets_dir)
 
 def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
                    sleep=time.sleep, log=print) -> None:
@@ -228,11 +411,16 @@ def run_with_retry(cmd: list[str], attempts: int = 5, runner=subprocess.run,
         sleep(min(60, 10 * attempt))
     raise SystemExit(f"error: command failed after {attempts} attempts: {' '.join(cmd)}")
 
-def run_push(refs, registry: str, repo_root: Path) -> None:
+def run_push(refs, registry: str, repo_root: Path,
+             datasets_dir: Path | None = None) -> None:
     version = version_tag(repo_root)
     for ref in refs:
         for cmd in push_cmds(ref, registry, version):
             run_with_retry(cmd)
+    # After the push: the tars are build context, and a retrying push must not
+    # find them gone.
+    if datasets_dir is not None:
+        clean_media(refs, datasets_dir)
 
 class Health(NamedTuple):
     """Outcome of polling a healthcheck URL.

@@ -1,0 +1,280 @@
+import importlib.util
+import os
+import subprocess
+import tarfile
+import time
+from pathlib import Path
+
+import pytest
+
+# Loaded by path for the same reason test_partition.py does it: stage-lib is
+# shipped into images via a build context and is deliberately not a package.
+_SRC = Path(__file__).resolve().parents[1] / "builder" / "stage-lib" / "bucket-media.py"
+_spec = importlib.util.spec_from_file_location("bucket_media", _SRC)
+bm = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(bm)
+
+
+def write(root: Path, rel: str, kb: int = 1):
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\0" * (kb * 1024))
+    return p
+
+
+def members_of(tar: Path):
+    with tarfile.open(tar) as tf:
+        return sorted(m.name.rstrip("/") for m in tf.getmembers())
+
+
+def run(tmp_path, limit_kb=64, max_buckets=8):
+    out = tmp_path / "out"
+    bm.main(["bucket-media.py", str(limit_kb), str(max_buckets),
+             str(tmp_path / "root"), str(out)])
+    return sorted(out.glob("bucket-*.tar"))
+
+
+# --- the finding this module exists to prevent -------------------------------
+
+def test_every_ancestor_directory_is_an_explicit_member(tmp_path):
+    """`ADD --chown` applies to tar MEMBERS.
+
+    A directory existing only implicitly in a member's path is created by the
+    extractor and never chowned, so `tar cf b.tar a/b/leaf` ships the leaf
+    app-owned and both 'a' and 'a/b' as root:root 0755 — invisible to any
+    assertion that samples files.
+    """
+    write(tmp_path / "root", "catalog/product/cache/deep/img.jpg", 8)
+    tars = run(tmp_path)
+    names = set(members_of(tars[0]))
+    for anc in ["catalog", "catalog/product", "catalog/product/cache",
+                "catalog/product/cache/deep"]:
+        assert anc in names, f"{anc} missing — it would extract as root:root"
+
+
+def test_ancestors_helper():
+    assert bm.ancestors("a/b/c") == ["a", "a/b"]
+    assert bm.ancestors("top") == []
+
+
+# --- partition correctness ---------------------------------------------------
+
+def test_every_entry_lands_in_exactly_one_bucket(tmp_path):
+    root = tmp_path / "root"
+    for i in range(12):
+        write(root, f"dir{i:02d}/file.bin", 16)
+    tars = run(tmp_path)
+    assert len(tars) > 1, "test needs a multi-bucket split to be meaningful"
+
+    seen = []
+    for t in tars:
+        seen.extend(members_of(t))
+    files = [m for m in seen if m.endswith("file.bin")]
+    assert len(files) == 12
+    assert len(set(files)) == 12, "an entry was duplicated across buckets"
+
+
+def test_source_tree_is_left_intact(tmp_path):
+    """Unlike partition-tree.py, this copies. restore may still bind-mount it."""
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    run(tmp_path)
+    assert (root / "a/img.jpg").exists()
+
+
+def test_shared_parent_is_not_swept_into_one_bucket(tmp_path):
+    """--no-recursion is load-bearing: siblings under one parent split apart."""
+    root = tmp_path / "root"
+    for i in range(6):
+        write(root, f"shared/item{i}.bin", 24)
+    tars = run(tmp_path, limit_kb=64)
+    assert len(tars) > 1
+    per_tar = [[m for m in members_of(t) if m.endswith(".bin")] for t in tars]
+    assert all(len(x) < 6 for x in per_tar), "one bucket swallowed the whole parent"
+    assert sum(len(x) for x in per_tar) == 6
+
+
+def test_mtimes_are_preserved_not_pinned(tmp_path):
+    """Pinning would break the old-path/new-path equivalence check."""
+    root = tmp_path / "root"
+    p = write(root, "a/img.jpg", 8)
+    os.utime(p, (1234567890, 1234567890))
+    tars = run(tmp_path)
+    with tarfile.open(tars[0]) as tf:
+        assert tf.getmember("a/img.jpg").mtime == 1234567890
+
+
+# --- the audit must actually fail ---------------------------------------------
+
+def test_audit_rejects_a_missing_entry(tmp_path):
+    """Completeness: an entry under root that no bucket carries."""
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    with pytest.raises(SystemExit, match="in no bucket"):
+        bm.audit(str(root), ["a"])
+
+
+def test_audit_rejects_an_implicit_ancestor(tmp_path):
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    with pytest.raises(SystemExit, match="not an explicit member"):
+        bm.audit(str(root), ["a/img.jpg"])
+
+
+def test_audit_rejects_setgid(tmp_path):
+    root = tmp_path / "root"
+    d = root / "a"
+    write(root, "a/img.jpg", 8)
+    os.chmod(d, 0o2775)
+    with pytest.raises(SystemExit, match="setuid/setgid"):
+        bm.audit(str(root), ["a", "a/img.jpg"])
+
+
+def test_audit_rejects_world_writable(tmp_path):
+    root = tmp_path / "root"
+    p = write(root, "a/img.jpg", 8)
+    os.chmod(p, 0o666)
+    with pytest.raises(SystemExit, match="world-writable"):
+        bm.audit(str(root), ["a", "a/img.jpg"])
+
+
+def test_audit_rejects_escaping_symlink(tmp_path):
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    (root / "a" / "escape").symlink_to(tmp_path)
+    with pytest.raises(SystemExit, match="escapes the tree"):
+        bm.audit(str(root), ["a", "a/img.jpg", "a/escape"])
+
+
+def test_audit_accepts_an_internal_symlink(tmp_path):
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    (root / "a" / "alias").symlink_to(root / "a" / "img.jpg")
+    bm.audit(str(root), ["a", "a/img.jpg", "a/alias"])
+
+
+# --- end to end, against a real extractor -------------------------------------
+
+@pytest.mark.skipif(not os.environ.get("DOCKER_E2E"),
+                    reason="set DOCKER_E2E=1 to run the docker round-trip")
+def test_add_chown_covers_directories_end_to_end(tmp_path):
+    """The property the unit tests approximate, asserted against real buildkit."""
+    root = tmp_path / "root"
+    write(root, "catalog/product/cache/img.jpg", 8)
+    tars = run(tmp_path)
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "bucket.tar").write_bytes(tars[0].read_bytes())
+    (ctx / "Dockerfile").write_text(
+        "FROM debian:trixie-slim\n"
+        "RUN groupadd -g 3000 app && useradd -u 3000 -g 3000 -M app\n"
+        "ADD --chown=app:app bucket.tar /dest/\n"
+        "RUN find /dest ! -user app -print | tee /tmp/bad; [ ! -s /tmp/bad ]\n")
+    subprocess.run(["docker", "build", "--no-cache", "-q", "."],
+                   cwd=ctx, check=True)
+
+
+def test_unused_buckets_are_valid_nonempty_tars(tmp_path):
+    """An empty tar is not recognised as an archive — ADD copies it verbatim,
+    dropping a literal bucket-NN.tar into the media tree.
+
+    max_buckets is a ceiling with headroom and the Dockerfile's ADD lines are
+    static, so unused buckets must exist and must extract to nothing.
+    """
+    root = tmp_path / "root"
+    write(root, "a/img.jpg", 8)
+    tars = run(tmp_path, limit_kb=1024, max_buckets=4)
+    assert len(tars) == 4, "every index up to the ceiling needs a tar"
+    for t in tars:
+        members = members_of(t)
+        assert members, f"{t.name} is empty — docker would ADD it as a file"
+    # the padded ones carry only directories, so nothing is duplicated
+    files = [m for t in tars for m in members_of(t) if m.endswith(".jpg")]
+    assert files == ["a/img.jpg"]
+
+
+def test_media_add_lines_match_max_buckets():
+    """The Dockerfile's ADD lines are static; max_buckets decides how many tars
+    exist. A mismatch either fails the build on a missing file or ships a
+    truncated media tree, so the two are checked against each other here rather
+    than kept in sync by comment.
+    """
+    from builder.manifest import load_manifest
+    root = Path(__file__).resolve().parents[1]
+    for toml in sorted((root / "images").glob("*/*/image.toml")):
+        m = load_manifest(toml.parent)
+        if not m.media:
+            continue
+        df = (toml.parent / "Dockerfile").read_text()
+        adds = [l for l in df.splitlines()
+                if l.startswith("ADD") and ".media/bucket-" in l]
+        assert len(adds) == m.media.max_buckets, (
+            f"{toml.parent.name}: {len(adds)} ADD lines vs "
+            f"max_buckets={m.media.max_buckets}")
+        assert all(m.media.dest in l for l in adds), "an ADD targets another path"
+
+
+# --- concurrency -------------------------------------------------------------
+
+def _overlap_probe(monkeypatch, delay=0.05):
+    """Wrap write_bucket to record how many ran at once, and the peak."""
+    import threading
+    state = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    real = bm.write_bucket
+
+    def probed(root, members, out_tar, listfile):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        try:
+            time.sleep(delay)  # long enough that serial execution cannot overlap
+            return real(root, members, out_tar, listfile)
+        finally:
+            with lock:
+                state["now"] -= 1
+
+    monkeypatch.setattr(bm, "write_bucket", probed)
+    return state
+
+
+def test_bucket_tars_are_written_concurrently(tmp_path, monkeypatch):
+    # The phase is device-latency bound at one outstanding read per tar, so
+    # writing them one after another leaves the volume's concurrency unused.
+    # Serial execution would peak at 1 here.
+    for i in range(6):
+        write(tmp_path / "root", f"d{i}/f{i}", kb=32)
+    state = _overlap_probe(monkeypatch)
+    tars = run(tmp_path, limit_kb=32, max_buckets=6)
+    assert state["peak"] > 1
+    assert len(tars) == 6
+
+
+def test_bucket_concurrency_is_bounded_by_the_bucket_count(tmp_path, monkeypatch):
+    # Not by the CPU count: a tar blocked on a read and the thread waiting on it
+    # both burn no CPU, so the contended resource is the volume's queue. What
+    # keeps this bounded is max_buckets, which the Dockerfile's ADD lines pin.
+    for i in range(4):
+        write(tmp_path / "root", f"d{i}/f{i}", kb=32)
+    monkeypatch.setattr(bm.os, "cpu_count", lambda: 1)
+    state = _overlap_probe(monkeypatch)
+    run(tmp_path, limit_kb=32, max_buckets=4)
+    assert state["peak"] == 4
+
+
+def test_every_bucket_is_still_written_when_run_concurrently(tmp_path):
+    # Coverage is the property the whole module exists for; it must not depend
+    # on the order the tars happen to finish in.
+    for i in range(12):
+        write(tmp_path / "root", f"d{i % 4}/f{i}", kb=16)
+    tars = run(tmp_path, limit_kb=64, max_buckets=6)
+    seen = set()
+    for t in tars:
+        seen.update(members_of(t))
+    on_disk = set()
+    root = tmp_path / "root"
+    for dp, dns, fns in os.walk(root):
+        base = os.path.relpath(dp, root)
+        for n in dns + fns:
+            on_disk.add(os.path.normpath(os.path.join(base, n)))
+    assert on_disk <= seen

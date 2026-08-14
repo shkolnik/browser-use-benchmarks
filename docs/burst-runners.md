@@ -110,6 +110,35 @@ was OOM-killed under `docker run -m 16g` before its index rework (peak ~19 GiB R
 and `webarena/gitlab`'s derive boots a full GitLab omnibus container to take a backup. Anything at
 or above ~16 GiB of RAM is safe for the fleet as it stands.
 
+## Diagnosing a runner that has gone quiet
+
+A build that wedges stops printing, so the log is worth least exactly when it is needed most. Two
+ways in, in order of what they can tell you:
+
+- **`aws ec2 get-console-output --instance-id … --latest`** works with no agent and no network path
+  into the VM, and returns the last 64 KB. It carries kernel messages only, which is enough to rule
+  in or out an OOM kill, a hung-task warning or a disk I/O error — and nothing above that. A quiet
+  job with a clean console has not been killed; that is all it establishes.
+- **Session Manager**, for anything above the kernel: what the process is actually blocked on,
+  `iostat`, the half-written file. This needs three things, and fails closed and invisibly if any is
+  missing — the agent installed in the AMI (`.burst/provision.sh`; Debian's cloud image ships none,
+  unlike Amazon Linux and Ubuntu), `AmazonSSMManagedInstanceCore` on the **instance** role, and
+  outbound 443. `aws ssm describe-instance-information` is the check: an instance that does not
+  appear there cannot be connected to, however healthy it looks in the console.
+
+The agent package is region-pinned in the provision script to match `base_ami`.
+
+### The provision script has a hard size ceiling
+
+`.burst/provision.sh` is uploaded as EC2 user-data alongside burst's own ~9.3 KB payload, against a
+16384-byte raw cap. Measured against this file: **5971 bytes launches, 6949 is rejected** with
+`InvalidParameterValue: User data is limited to 16384 bytes`. Treat ~6 KB as the working budget.
+
+Two consequences worth knowing before editing it. The failure appears at `RunInstances`, i.e. after
+a ten-minute wait, not at edit time — so bisecting for the exact edge is expensive and not worth
+doing. And since the script is mostly comments, the pressure lands on rationale first; long
+explanations belong here instead, with the script keeping a pointer.
+
 ## What was deliberately not changed
 
 - **`concurrency: build-images` stays.** It never serialized the matrix — `max-parallel` did — so

@@ -37,7 +37,7 @@ def main(argv=None) -> int:
         docker.run_build(refs, args.registry, dsdir, repo_root())
         return 0
     if args.cmd == "push":
-        docker.run_push(refs, args.registry, repo_root())
+        docker.run_push(refs, args.registry, repo_root(), dsdir)
         return 0
     if args.cmd == "clean":
         docker.run_clean(refs, args.registry, repo_root())

@@ -739,3 +739,153 @@ def test_smoke_still_checks_the_PUBLISHED_path_after_wait(tmp_path, monkeypatch)
                         or docker_mod.Health(True, 1.0, "HTTP 200"))
     docker_mod.run_smoke([ref], repo)
     assert polled == [("http://localhost:9999/forums", 30)]
+
+
+from builder.docker import log_resources
+
+
+def test_log_resources_emits_one_jsonl_reading(tmp_path):
+    lines = []
+    log_resources("shopping:after-media-prep", tmp_path, log=lines.append)
+    assert len(lines) == 1
+    r = json.loads(lines[0])
+    assert r["metric"] == "resources"
+    assert r["phase"] == "shopping:after-media-prep"
+    # Whatever runs the suite has memory and a disk, so these must be real:
+    # a reading that silently degrades to null is the failure this guards.
+    assert r["mem_total_mb"] > 0 and r["mem_available_mb"] > 0
+    assert r["disk_total_gb"] >= r["disk_free_gb"] >= 0
+    assert r["swap_used_mb"] >= 0
+
+
+def test_log_resources_reads_disk_for_a_path_that_does_not_exist_yet(tmp_path):
+    # The datasets dir does not exist until something writes to it, so the
+    # :start reading — the one that says what the job began with — asks about a
+    # path that is not there. Free space belongs to the filesystem, so this must
+    # still produce real numbers rather than the nulls it would get from statvfs.
+    lines = []
+    log_resources("start", tmp_path / "not" / "created" / "yet", log=lines.append)
+    r = json.loads(lines[0])
+    assert r["disk_total_gb"] >= r["disk_free_gb"] >= 0
+    assert r["disk_total_gb"] > 0
+    # Same filesystem as the ancestor that does exist, so the same reading.
+    same = []
+    log_resources("start", tmp_path, log=same.append)
+    assert json.loads(same[0])["disk_total_gb"] == r["disk_total_gb"]
+
+
+from builder.docker import output_paths, run_piped
+
+
+def test_output_paths_resolves_a_whole_archive_and_a_split_one(tmp_path):
+    (tmp_path / "media.tar").write_bytes(b"whole")
+    assert output_paths(tmp_path, "media.tar") == [tmp_path / "media.tar"]
+
+    (tmp_path / "media.tar").unlink()
+    for i in (2, 0, 1):  # out of order on disk; the join order is what matters
+        (tmp_path / f"media.tar.part-0{i}").write_bytes(b"x")
+    assert [p.name for p in output_paths(tmp_path, "media.tar")] == \
+        ["media.tar.part-00", "media.tar.part-01", "media.tar.part-02"]
+
+    assert output_paths(tmp_path, "absent.tar") == []
+
+
+def test_prepare_output_may_arrive_split(tmp_path):
+    # The derived cache ships a >10G output split, so an output named whole in
+    # image.toml can legitimately land as parts. Reuse and the fingerprint must
+    # both accept that, and must not depend on which form it is in — otherwise
+    # a cache hit invalidates artifacts a derive already stamped.
+    ref, m, ds = _prep_image(tmp_path)
+    _write_output(ds, size=10)
+    stamp = docker_mod.prepare_stamp_path(ds, ref)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(json.dumps(docker_mod.prepare_fingerprint(ref, m, ds)))
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+
+    (ds / "reddit_db.sql.gz").unlink()
+    (ds / "reddit_db.sql.gz.part-00").write_bytes(b"x" * 5)
+    (ds / "reddit_db.sql.gz.part-01").write_bytes(b"x" * 5)
+    assert docker_mod.prepare_reuse_check(ref, m, ds) is None
+
+
+def test_media_prep_demuxes_the_parts_without_writing_a_tree(tmp_path, monkeypatch):
+    # The default path: nothing reads the media tree, so it is never created.
+    from builder.manifest import Media
+    img = tmp_path / "images" / "webarena" / "shopping"
+    img.mkdir(parents=True)
+    ds = tmp_path / "datasets"
+    ds.mkdir()
+    ref = ImageRef("webarena", "shopping", img)
+    m = Manifest(media=Media(archive="shopping_media.tar", strip="pub/media",
+                             dest="/opt/magento/pub/media", chown="app:app",
+                             limit_kb=1024, max_buckets=2))
+    (ds / "shopping_media.tar.part-00").write_bytes(b"x" * 5)
+    (ds / "shopping_media.tar.part-01").write_bytes(b"x" * 5)
+
+    cmds = []
+    monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
+    monkeypatch.setattr(docker_mod, "run_piped",
+                        lambda *a: pytest.fail("the archive must not be extracted"))
+    docker_mod.run_media_prep(ref, m, ds, tmp_path)
+
+    assert len(cmds) == 1
+    assert cmds[0][1].endswith("demux-media.py")
+    # Both parts, in order, read straight rather than joined by anything.
+    assert cmds[0][-2:] == [str(ds / "shopping_media.tar.part-00"),
+                            str(ds / "shopping_media.tar.part-01")]
+    assert "pub/media" in cmds[0], "the strip prefix has to reach the demux"
+    assert not docker_mod.media_work_dir(ds, ref).exists()
+
+
+def test_media_prep_extracts_when_the_restore_stage_reads_the_media(tmp_path, monkeypatch):
+    # The other path. The tree is an input to the build here, so there is no
+    # materialisation to avoid — and the parts are still joined in the pipe
+    # rather than rewritten to disk as one file first.
+    import subprocess
+    from builder.manifest import Media
+    img = tmp_path / "images" / "webarena" / "shopping"
+    img.mkdir(parents=True)
+    ds = tmp_path / "datasets"
+    ds.mkdir()
+    ref = ImageRef("webarena", "shopping", img)
+    m = Manifest(media=Media(archive="shopping_media.tar", strip="pub/media",
+                             dest="/opt/magento/pub/media", chown="app:app",
+                             limit_kb=1024, max_buckets=2,
+                             restore_needs_media=True))
+
+    tree = tmp_path / "src" / "pub" / "media" / "sub"
+    tree.mkdir(parents=True)
+    (tree / "leaf").write_bytes(b"m" * 4096)
+    subprocess.run(["tar", "cf", str(tmp_path / "whole.tar"),
+                    "-C", str(tmp_path / "src"), "pub/media"], check=True)
+    blob = (tmp_path / "whole.tar").read_bytes()
+    cut = len(blob) // 2
+    (ds / "shopping_media.tar.part-00").write_bytes(blob[:cut])
+    (ds / "shopping_media.tar.part-01").write_bytes(blob[cut:])
+
+    monkeypatch.setattr(docker_mod, "run", lambda c: None)  # skip bucket-media.py
+    docker_mod.run_media_prep(ref, m, ds, tmp_path)
+
+    work = docker_mod.media_work_dir(ds, ref)
+    assert (work / "sub" / "leaf").read_bytes() == b"m" * 4096
+    assert not (ds / "shopping_media.tar").exists()
+
+
+def test_media_prep_names_the_parts_when_neither_form_is_there(tmp_path):
+    from builder.manifest import Media
+    img = tmp_path / "images" / "webarena" / "shopping"
+    img.mkdir(parents=True)
+    ds = tmp_path / "datasets"
+    ds.mkdir()
+    m = Manifest(media=Media(archive="shopping_media.tar", strip="", dest="/d",
+                             chown="app:app", limit_kb=1024, max_buckets=2))
+    with pytest.raises(SystemExit, match="nor its parts"):
+        docker_mod.run_media_prep(ImageRef("webarena", "shopping", img), m, ds, tmp_path)
+
+
+def test_run_piped_fails_when_the_producer_does(tmp_path):
+    # A truncated producer leaves the consumer at 0 — it read a valid prefix and
+    # stopped — so checking only the right-hand status would carry a partial
+    # extract forward as a success.
+    with pytest.raises(SystemExit, match="cat"):
+        run_piped(["cat", str(tmp_path / "absent")], ["cat"])

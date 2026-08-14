@@ -37,30 +37,42 @@ volume_gb = 750
 # workload rather than a guess. Raise it with the instance type, not alone.
 volume_throughput_mbps = 500
 
-# Raised 6000 -> 12000 after measuring it as the binding constraint. 6000 was
-# picked as safely *inside* the instance's baseline, never as a number measured
-# to be sufficient — and it turned out not to be.
+# 6000, which is gp3's free tier and comfortably inside the instance baseline.
 #
-# The evidence is a step-for-step A/B of webarena/shopping, same Dockerfile and
-# dataset, home runner (job 93325745256) against a c7i.2xlarge (94315130494):
-# buildkit took 50m25s at home and 3h00m02s here. Two steps in that build are
-# accidental controls. `composer install` — thousands of small files, CPU and
-# network bound — ran 14% *faster* on the c7i, and `push` ran 5x faster. So it
-# is neither CPU nor network. Everything that walks, hashes or copies the 50.4G
-# magento tree is 2-6.6x slower: the restore stage's snapshot commit 6.6x, the
-# bucket COPYs 4.7x, `docker system prune` (no CPU, no network, pure metadata)
-# 4.0x. That is an IOPS signature, and small-file metadata work is exactly what
-# 6000 IOPS — about 24 MB/s of 4K random I/O — starves.
+# This was briefly raised to 12000 on the theory that IOPS was the binding
+# constraint — the c7i was 2-6.6x slower than the home runner on every step that
+# walks the 50.4G magento tree, while CPU- and network-bound steps in the same
+# build were as fast or faster, which reads like an IOPS signature. It is not
+# one, and the raise is reverted because three independent measurements say the
+# ceiling is never approached:
 #
-# 12000 and not gp3's 16000 ceiling, for the same reason the throughput above
-# is 500 and not 1000: it is what the instance *sustains*. c7i.2xlarge reports
-# BaselineIops 12000 and MaximumIops 40000, and the 40000 is burst. shopping
-# runs for hours, so it spends almost all of its time at baseline; provisioning
-# 16000 would buy 4000 IOPS reachable only in the first half hour.
+#   1. The console during a shopping build: one 3500 IOPS spike early, then
+#      never above ~2000 against a 6000 limit. The workload was not throttled.
+#   2. Eight images that do not partition a large tree, A/B'd across the raise,
+#      came back scattered +/-8% around zero — no signal.
+#   3. Bucket COPY time does not track bucket size. On run 31735955132 the eight
+#      buckets are all 6.5-7.0G except one at 2.8G, yet they take 142s to 578s,
+#      and the 2.8G bucket (374s) is slower than the 7.0G one (142s). That is
+#      7.7-50 MB/s of effective throughput on a volume provisioned for 500.
 #
-# Still clears gp3's >= 4 IOPS per MB/s rule against the 500 MB/s above (which
-# needs 2000), and map-nominatim's Postgres import gets the depth it wanted.
-volume_iops = 12000
+# The constraint is per-operation LATENCY at queue depth ~1, not operations per
+# second. buildkit's copy walks the tree one entry at a time and each entry is a
+# dependent stat/open/write/setattr chain, so elapsed time is (number of entries)
+# x (round-trip per op) and the depth never rises enough to consume the IOPS on
+# offer. EBS is network-attached, ~0.5-1 ms per op; local NVMe is ~0.05-0.1 ms.
+# Buying more IOPS buys concurrency this workload cannot generate.
+#
+# Confirmed by moving /var/lib/docker to instance-store NVMe on an i4i.2xlarge
+# (run 31735955132): same commit, same dataset, same bucket layout, and every
+# disk-touching phase improved 17-39% — snapshot commits -39%, bucket COPYs -29%,
+# job total 11162s -> 7919s. That is a wall-clock win but not a cost win (i4i is
+# roughly 2x the hourly rate for a 29% speedup), so the fleet stays on c7i and
+# this stays at 6000. What actually pays here is reducing the entry count per
+# COPY, not paying for I/O the build never issues.
+#
+# Still clears gp3's >= 4 IOPS per MB/s rule against the 500 MB/s above, which
+# needs 2000.
+volume_iops = 6000
 
 # Pinned so a new Debian release upstream cannot silently change what we bake
 # from. burst refuses to guess this; it printed this exact line, and prints a

@@ -118,6 +118,15 @@ WantedBy=multi-user.target
 EOF
 systemctl enable burst-swap.service
 
+# Debian ships no amazon-ssm-agent, so a wedged runner can only be diagnosed
+# from what it printed. Needs AmazonSSMManagedInstanceCore on the instance role
+# to register. Region matches base_ami. See docs/burst-runners.md.
+curl -fsSL --max-time 120 -o /tmp/ssm.deb \
+  https://s3.us-east-2.amazonaws.com/amazon-ssm-us-east-2/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i /tmp/ssm.deb
+rm -f /tmp/ssm.deb
+systemctl enable amazon-ssm-agent
+
 # Fail the bake here rather than the first job: an AMI that cannot build is
 # worth catching while the builder is still running. These also print the exact
 # versions this AMI froze, which is the only record of them.
@@ -130,3 +139,4 @@ systemctl is-enabled docker
 # delivered by user-data at launch and does not exist during the bake, so
 # verify would fail the build over a Before= reference that is correct.
 systemctl is-enabled burst-swap.service
+systemctl is-enabled amazon-ssm-agent

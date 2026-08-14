@@ -101,10 +101,18 @@ COPY --chown=app:app composer.json composer.lock ./
 # the lock deploys the full app skeleton (bin/magento, app/, pub/, setup/, the
 # nginx.conf.sample) into the project root via magento-composer-installer.
 # Every package URL in the lock points at the keyless mirror.mage-os.org.
-RUN composer install --no-interaction --no-progress \
- && composer clear-cache \
- && test -f bin/magento && test -f nginx.conf.sample \
- && ln -s nginx.conf.sample nginx.conf
+# Held rather than streamed: composer emits a line per package, ~1300 of them in
+# one burst, and the Actions live-log channel drops a flush that large — taking
+# the surrounding build's live output with it until the burst ends. Nothing is
+# lost on failure, where those lines are the diagnostic; a green install has
+# nothing in them anyone reads.
+RUN set -e; \
+    composer install --no-interaction --no-progress >/tmp/composer.log 2>&1 \
+      || { cat /tmp/composer.log >&2; exit 1; }; \
+    rm -f /tmp/composer.log; \
+    composer clear-cache; \
+    test -f bin/magento && test -f nginx.conf.sample; \
+    ln -s nginx.conf.sample nginx.conf
 COPY --chown=app:app conf/env.php app/etc/env.php
 
 # --- Restore: boot the appliance stack, load the derived data, reindex, quiesce ---
@@ -112,8 +120,9 @@ FROM code AS restore
 USER root
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
+# Only the DB dump is mounted: this stage reads no media file (see [media] in
+# image.toml), so shopping_media.tar is not bound here.
 RUN --mount=type=bind,from=datasets,source=shopping_db.sql.gz,target=/mnt/shopping_db.sql.gz \
-    --mount=type=bind,from=datasets,source=shopping_media.tar,target=/mnt/shopping_media.tar \
     bash /restore-stage.sh
 
 # --- Final image: runtime + restored state only (never the restore scaffolding) ---
@@ -129,17 +138,47 @@ COPY --from=restore /var/lib/mysql/ /var/lib/mysql/
 COPY --from=restore /var/lib/elasticsearch/ /var/lib/elasticsearch/
 # One layer per staging bucket keeps every pushed layer under ~10G (GHCR's
 # comfortable ceiling). Bucket count must match BUCKET_COUNT in restore-stage.sh.
-# The last few are expected to be empty — BUCKET_COUNT is a ceiling with
-# headroom, and a COPY of an empty bucket is a no-op.
+# These carry the code tree only; the last few are expected to be empty, since
+# BUCKET_COUNT is a ceiling with headroom and a COPY of an empty bucket is a
+# no-op.
 COPY --from=restore /staging/bucket-00/ /opt/magento/
 COPY --from=restore /staging/bucket-01/ /opt/magento/
 COPY --from=restore /staging/bucket-02/ /opt/magento/
 COPY --from=restore /staging/bucket-03/ /opt/magento/
-COPY --from=restore /staging/bucket-04/ /opt/magento/
-COPY --from=restore /staging/bucket-05/ /opt/magento/
-COPY --from=restore /staging/bucket-06/ /opt/magento/
-COPY --from=restore /staging/bucket-07/ /opt/magento/
-COPY --from=restore /staging/bucket-08/ /opt/magento/
-COPY --from=restore /staging/bucket-09/ /opt/magento/
+
+# --- Media: 45G of pub/media, bucketed on the CI host, never in a build stage ---
+# builder/docker.py writes these into .media/, a gitignored subdir of this image
+# dir — which is the default build context, and the only context ADD can extract
+# from (it has no --from).
+#
+# Count must match [media].max_buckets in image.toml. Unused buckets carry only
+# directory entries and extract to nothing.
+ADD --chown=app:app .media/bucket-00.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-01.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-02.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-03.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-04.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-05.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-06.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-07.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-08.tar /opt/magento/pub/media/
+ADD --chown=app:app .media/bucket-09.tar /opt/magento/pub/media/
+
+# Covers the media subtree in place of the restore stage's `find $MAGE ! -user
+# app`, and checks DIRECTORIES on purpose — both silent failures here leave a
+# root-owned directory while every file stays app-owned:
+#
+#   1. `ADD --chown=<name>` does not fail the build when the name does not
+#      resolve; it lands everything 0:0 root:root and exits clean.
+#   2. `--chown` applies to tar MEMBERS, so a directory existing only implicitly
+#      in a member's path is created by the extractor and never chowned.
+#      The host-side bucketing emits every ancestor explicitly to prevent this.
+#
+# php-fpm runs as app and writes resized-image caches under
+# pub/media/catalog/product/cache/, so a root-owned directory here is a runtime
+# failure the HTML-grepping smoke gate cannot see. -quit stops at the first
+# offender; files are never stat'd.
+RUN bad="$(find /opt/magento/pub/media -type d ! -user app -print -quit)"; \
+    if [ -n "$bad" ]; then echo "root-owned media dir: $bad" >&2; exit 1; fi
 
 LABEL org.opencontainers.image.source="https://github.com/shkolnik/browser-use-benchmarks"
