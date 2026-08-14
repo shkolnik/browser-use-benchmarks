@@ -212,6 +212,18 @@ def test_media_add_lines_match_max_buckets():
             f"{toml.parent.name}: {len(adds)} ADD lines vs "
             f"max_buckets={m.media.max_buckets}")
         assert all(m.media.dest in l for l in adds), "an ADD targets another path"
+        # ADD extracts the archive's own uid/gid only when no --chown is given,
+        # so an empty chown that still emitted one would silently flatten the
+        # ownership the image asked to preserve — and a declared one that got
+        # dropped would land the tree root:root.
+        if m.media.chown:
+            assert all(f"--chown={m.media.chown}" in l for l in adds), (
+                f"{toml.parent.name}: [media].chown is declared but an ADD "
+                f"does not carry it")
+        else:
+            assert not any("--chown" in l for l in adds), (
+                f"{toml.parent.name}: [media].chown is empty — an ADD that "
+                f"carries one overrides the archive's own ownership")
 
 
 def test_every_media_image_declares_an_entry_floor():

@@ -46,7 +46,13 @@ class Media:
     archive: str         # prepare output holding the tree, e.g. shopping_media.tar
     strip: str           # subtree within that archive to treat as media, '' = all
     dest: str            # absolute path in the image, e.g. /opt/magento/pub/media
-    chown: str           # ADD --chown target, e.g. app:app
+    # ADD --chown target, e.g. app:app. '' emits no --chown at all, which makes
+    # ADD extract the archive's own uid/gid and mode verbatim. That is the right
+    # answer for a tree owned by more than one account — a Postgres cluster
+    # beside a renderer's cache — where a single --chown would flatten a split
+    # the image depends on. It is the wrong answer for a tree whose archive
+    # carries whatever uid the machine it was captured on happened to use.
+    chown: str
     limit_kb: int        # per-bucket ceiling; buckets become layers
     max_buckets: int     # ceiling, not a target; empty tars are not emitted
     # A floor on the entries the archive must carry, asserted on the host before
@@ -152,8 +158,12 @@ def load_manifest(image_dir: Path) -> Manifest:
         # everything 0:0 root:root and exits clean. There is no way to catch that
         # from here (the image's passwd database is not known until it is built),
         # which is why the final stage carries a directory-ownership assert.
-        if ":" not in str(med["chown"]):
-            _die(image_dir, "media.chown must be 'user:group'")
+        # Required as a KEY even when empty: whether the media path imposes one
+        # owner or preserves the archive's is a decision about the shipped tree,
+        # and an omitted field would let it be made by not thinking about it.
+        if str(med["chown"]) and ":" not in str(med["chown"]):
+            _die(image_dir, "media.chown must be 'user:group', or '' to keep "
+                            "the archive's own uid/gid")
         media = Media(
             archive=med["archive"],
             strip=str(med.get("strip", "")).strip("/"),
