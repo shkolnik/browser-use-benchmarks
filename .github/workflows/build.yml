@@ -9,12 +9,13 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('build {0}', in
 #
 # Its original reason (two runs racing on the home runner's shared datasets
 # cache, appending the same .part download) does die with per-job VMs. It is
-# kept for a second reason that does not: two runs of the same ref would each
-# `bin/build push` the same image to `:latest` and then attest whatever their
-# own `docker inspect` resolved locally, so the losing run can stamp a
-# provenance attestation onto a digest that is no longer what `:latest` points
-# at. Serializing runs is the cheap way to keep the published digest and its
-# attestation the same object.
+# kept for a second reason that does not: two runs of the same ref build the
+# same dated tag from the same source and get two different digests, and they
+# race to promote `:latest`. Each attests its own digest, so neither is
+# unattested — but which image `:latest` ends up naming is decided by whichever
+# run happens to finish second, and that is the image every consumer pulls.
+# Serializing runs is the cheap way to make the published image the one the
+# last completed build produced.
 #
 # Queue, never cancel — every push's build must actually run so its commit
 # status is truthful.
@@ -249,7 +250,7 @@ jobs:
       # never pushes, because "does it boot" is worth knowing there too.
       - name: smoke — boot the built image before publishing it
         run: bin/build smoke '${{ matrix.image }}'
-      - name: push
+      - name: push the dated tag
         if: env.PUBLISH == 'true'
         run: bin/build push '${{ matrix.image }}'
       - name: resolve pushed digest
@@ -257,8 +258,9 @@ jobs:
         if: env.PUBLISH == 'true'
         run: |
           name="ghcr.io/${{ github.repository_owner }}/$(echo '${{ matrix.image }}' | tr / -)"
-          # RepoDigests is populated by the push above; with a single registry
-          # there is exactly one entry.
+          # Inspecting `:latest` resolves the local image, which the dated tag
+          # names too — RepoDigests is a property of that image and the push
+          # above populated it, with exactly one entry for a single registry.
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$name:latest" | cut -d@ -f2)
           echo "resolved: $name@$digest"
           case "$digest" in sha256:*) ;; *) echo "no digest resolved" >&2; exit 1;; esac
@@ -306,6 +308,18 @@ jobs:
           subject-name: ${{ steps.digest.outputs.name }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
+
+      # LAST, and only on the success of everything above it. `:latest` is not
+      # just the convenient tag — it is where discover reads the revision that
+      # decides whether this image needs building again. Moving it before the
+      # attestation exists would let a build that uploaded its bytes and then
+      # died claim to be the current green build of its commit, and no later
+      # run would rebuild it. Nothing here can fail in a way that leaves the
+      # claim standing: the layers are already in the registry, so this is a
+      # manifest write.
+      - name: promote to :latest
+        if: env.PUBLISH == 'true'
+        run: bin/build promote '${{ matrix.image }}'
 
       # Disk hygiene: the runner VM's disk is the scarce resource, so every
       # job leaves docker the way it found it — only the datasets cache

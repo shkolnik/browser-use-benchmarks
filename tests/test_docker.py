@@ -23,10 +23,16 @@ def test_build_cmd():
         "/repo/images/miniwob/server",
     ]
 
-def test_push_cmds():
+def test_push_cmds_publishes_the_dated_tag_only():
+    # `:latest` is deliberately absent: it is the tag discover reads a revision
+    # back from, so it must not name an image whose attestation has not run yet.
     cmds = push_cmds(REF, "localhost:5000", "20260805.abc1234")
     assert cmds == [
         ["docker", "push", "localhost:5000/miniwob-server:20260805.abc1234"],
+    ]
+
+def test_promote_cmds_moves_latest():
+    assert docker_mod.promote_cmds(REF, "localhost:5000") == [
         ["docker", "push", "localhost:5000/miniwob-server:latest"],
     ]
 

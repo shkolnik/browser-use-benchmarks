@@ -139,9 +139,20 @@ def load_cmds(ref: ImageRef, m: Manifest, registry: str,
         ["docker", "tag", m.source.tag, f"{registry}/{ref.name}:latest"],
     ]
 
+# Publishing is two moves, not one, and the order carries meaning. The dated
+# tag goes up first and is what gets attested; `:latest` follows only once the
+# attestation exists. `:latest` is the tag CI reads a revision back from to
+# decide an image needs no rebuild, so it must never name an image that failed
+# after its bytes were uploaded — a build whose attestation died would
+# otherwise sit there claiming to be the current green build of its commit,
+# unattested, and never be rebuilt.
 def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
-    return [["docker", "push", f"{registry}/{ref.name}:{version}"],
-            ["docker", "push", f"{registry}/{ref.name}:latest"]]
+    return [["docker", "push", f"{registry}/{ref.name}:{version}"]]
+
+def promote_cmds(ref: ImageRef, registry: str) -> list[list[str]]:
+    # Both tags name the same local image, so this uploads no layers: the
+    # registry already has every blob, and this is a manifest write.
+    return [["docker", "push", f"{registry}/{ref.name}:latest"]]
 
 # Derived artifacts are expensive (reddit's is a ~41G media tar) so they are
 # cached on the runner between jobs — but "the file is there" was being used as
@@ -452,6 +463,11 @@ def run_push(refs, registry: str, repo_root: Path,
     # find them gone.
     if datasets_dir is not None:
         clean_media(refs, datasets_dir)
+
+def run_promote(refs, registry: str) -> None:
+    for ref in refs:
+        for cmd in promote_cmds(ref, registry):
+            run_with_retry(cmd)
 
 class Health(NamedTuple):
     """Outcome of polling a healthcheck URL.

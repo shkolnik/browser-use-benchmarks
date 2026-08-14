@@ -38,6 +38,11 @@ def test_download_build_push_roundtrip(tmp_path):
                                       Path(__file__).resolve().parents[2], rev))
         for cmd in bdocker.push_cmds(ref, "127.0.0.1:5000", version):
             bdocker.run(cmd)
+        # `:latest` carries no revision until it is promoted, which in CI
+        # happens only after the attestation exists.
+        assert published_revision("127.0.0.1:5000/itest-svc:latest") is None
+        for cmd in bdocker.promote_cmds(ref, "127.0.0.1:5000"):
+            bdocker.run(cmd)
         out = subprocess.run(
             ["docker", "run", "--rm", f"127.0.0.1:5000/itest-svc:{version}"],
             capture_output=True, text=True, check=True).stdout
