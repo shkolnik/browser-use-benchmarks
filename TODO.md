@@ -40,18 +40,19 @@ BUNDLES (verified in the pinned base image — `gitaly_backup.rb` runs `gitaly-b
 `CreateRepositoryFromBundleRequest`), so the shipped repos are rebuilt from bundles: same
 reachable objects and SHAs, different packfiles, no unreachable objects, no reflogs.
 
-**Open items, ranked.**
+**Also landed, from the same pass.**
 
-1. **Report progress through every long extraction.** `--checkpoint` exists in exactly one
-   place in the repo, on the branch the media path no longer takes. Every multi-GiB extract
-   inside an image is mute for its whole run, which reads exactly like a hang.
-2. **Measure whether nominatim's extract can stop before the flatnode volume.** It reads all
-   116.2 GiB to get 34.8 GiB. `--occurrence` does NOT solve it (the wanted member is a
-   directory, so tar would stop at the directory entry); a correct early exit needs a streaming
-   reader. Step 1 is establishing member order by ranged GETs over the header chain, not code.
-3. **Write down that an audit of an extracted tree audits the extractor.** `tar x` applies the
-   caller's umask and drops setgid for a non-member caller. Mostly moot in-build (root, and
-   GNU tar defaults to `-p`), but it is the trap for whoever next adds a permissions audit.
+- Progress through the three phases that were mute for minutes at a time: nominatim's extract
+  (tar `--checkpoint`), `partition-tree.py`'s measuring walk and move loop, and dataset
+  sha256 verification — the last being the one that runs even on a full cache, ~180G on a map
+  build that downloads nothing.
+- `docs/build-data-path.md` — the measured `tar`/`ADD`/buildkit behaviour the data path is
+  built around, every item of it a silent failure. Includes the audit-the-extractor trap.
+- What nominatim's extract actually costs: **34.8G, not 116G**. The two volumes do not
+  interleave (nominatim-data is members 0–7220, the flatnode volume is three members after
+  it) and tar lseeks over a member it is not extracting when the archive is seekable —
+  0.002s via `-f` against 3.4s through a pipe, on an 8G archive with a huge tail member. No
+  streaming reader is needed; the only thing that would undo it is piping the archive.
 
 **Decisions waiting on James.**
 

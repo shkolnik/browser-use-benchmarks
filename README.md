@@ -114,3 +114,6 @@ CI builds run on a self-hosted runner for the same reason
   ports, proxy mode, sizing.
 - [`docs/registry-limits.md`](docs/registry-limits.md) — empirical findings on
   pushing very large images to GHCR and Docker Hub.
+- [`docs/build-data-path.md`](docs/build-data-path.md) — measured behaviour of
+  `tar`, `ADD` and buildkit that the data path is built around. Every trap in it
+  fails silently: the build goes green and the image is wrong.
