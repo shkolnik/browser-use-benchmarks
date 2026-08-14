@@ -18,8 +18,19 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('build {0}', in
 #
 # Queue, never cancel — every push's build must actually run so its commit
 # status is truthful.
+#
+# A run with push_images off publishes nothing, so neither reason applies to
+# it and it gets a group of its own: timing an expensive build should not have
+# to wait behind — or be waited on by — the run that publishes. Keyed by
+# run_id so two of them do not serialize against each other either.
+#
+# The event_name test is load-bearing, not belt-and-braces. A push event has no
+# inputs, and GitHub casts both null and false to 0 when comparing across
+# types, so `inputs.push_images == false` is TRUE on every push — which would
+# put the runs that actually publish into per-run groups and silently drop the
+# serialization this block exists for.
 concurrency:
-  group: build-images
+  group: build-images${{ (github.event_name == 'workflow_dispatch' && inputs.push_images == false) && format('-nopush-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 # GITHUB_TOKEN scopes: the default token couldn't push to ghcr (the first
@@ -46,6 +57,15 @@ on:
         description: "Downgrade a pinned derived-cache miss to a warning (GHCR outage escape hatch)"
         type: boolean
         default: false
+      # Everything through `smoke` still runs, so a non-publishing run answers
+      # "does this build, and how long does it take" without touching :latest.
+      # Two runs that both push the same tag are the race the concurrency
+      # block above exists to prevent; turning this off is what makes running
+      # one alongside a real build safe.
+      push_images:
+        description: "Publish to GHCR and attest. Off = build and smoke only."
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths: ["images/**", "builder/**", "bin/**", ".github/workflows/build.yml"]
@@ -158,6 +178,12 @@ jobs:
       # requirement, documented in docs/burst-runners.md.
       matrix:
         image: ${{ fromJSON(needs.discover.outputs.images) }}
+    # Publishing is push, digest, ghcr-wait and attest — four steps that must
+    # agree, since any one of them running without the others leaves an image
+    # with no provenance or an attestation with no image. Decided once here.
+    # A push event has no inputs, so the first clause is what keeps it true.
+    env:
+      PUBLISH: ${{ github.event_name == 'push' || inputs.push_images }}
     steps:
       - uses: actions/checkout@v7
       - name: login to ghcr
@@ -194,11 +220,11 @@ jobs:
       - name: smoke — boot the built image before publishing it
         run: bin/build smoke '${{ matrix.image }}'
       - name: push
-        if: github.event_name == 'push' || github.event.inputs.target != ''
+        if: env.PUBLISH == 'true'
         run: bin/build push '${{ matrix.image }}'
       - name: resolve pushed digest
         id: digest
-        if: github.event_name == 'push' || github.event.inputs.target != ''
+        if: env.PUBLISH == 'true'
         run: |
           name="ghcr.io/${{ github.repository_owner }}/$(echo '${{ matrix.image }}' | tr / -)"
           # RepoDigests is populated by the push above; with a single registry
@@ -224,7 +250,7 @@ jobs:
       # guarantee. Costs nothing on the every-other-run path: an already-known
       # package answers 200 on the first poll.
       - name: wait for ghcr to authorize the package
-        if: github.event_name == 'push' || github.event.inputs.target != ''
+        if: env.PUBLISH == 'true'
         env:
           SUBJECT_NAME: ${{ steps.digest.outputs.name }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -244,7 +270,7 @@ jobs:
           exit 1
 
       - name: attest build provenance
-        if: github.event_name == 'push' || github.event.inputs.target != ''
+        if: env.PUBLISH == 'true'
         uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.digest.outputs.name }}
