@@ -47,7 +47,9 @@ rm -rf "$PGDATA"
 install -d -o postgres -g postgres -m 700 "$PGDATA"
 tar --numeric-owner -C "$PGDATA" --strip-components=7 -xf "$TAR" \
     projects/metis2/docker/docker/volumes/nominatim-data
-rm -f "$TAR"
+# No `rm` here, and none is wanted: $TAR is a read-only bind mount of the
+# datasets context, so it occupies no space in this stage to reclaim, and
+# unlinking a mount point fails with the archive still in use.
 
 [ -f "$PGDATA/PG_VERSION" ] || { echo "restore: $PGDATA/PG_VERSION missing — tar layout changed" >&2; exit 1; }
 

@@ -28,10 +28,12 @@ ARG SRC_COMMIT=a6a9bbc86f44
 FROM node:${NODE_VERSION}-alpine AS assets
 ARG SRC
 WORKDIR /app
-COPY --from=datasets ${SRC} /tmp/src.tar.gz
-RUN set -eux; \
+# Bind-mounted, not COPYed: the tarball is read once and kept never, so a COPY
+# would only commit it to a layer for the following `rm` to whiteout. The same
+# archive feeds three stages, and none of them ships it.
+RUN --mount=type=bind,from=datasets,source=${SRC},target=/tmp/src.tar.gz \
+    set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
-    rm /tmp/src.tar.gz; \
     apk add --no-cache curl; \
     yarn; \
     yarn run build-prod; \
@@ -44,10 +46,9 @@ RUN set -eux; \
 FROM composer:${COMPOSER_VERSION} AS composer_cache
 ARG SRC
 WORKDIR /app
-COPY --from=datasets ${SRC} /tmp/src.tar.gz
-RUN set -eux; \
+RUN --mount=type=bind,from=datasets,source=${SRC},target=/tmp/src.tar.gz \
+    set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
-    rm /tmp/src.tar.gz; \
     # Held rather than streamed: composer emits a line per package, and a burst
     # that size overruns the Actions live-log channel — the dropped flush takes
     # the surrounding build's live output with it until the burst ends. The
@@ -138,10 +139,9 @@ WORKDIR /app
 FROM runtime AS app
 ARG SRC
 ARG SRC_COMMIT
-COPY --from=datasets ${SRC} /tmp/src.tar.gz
-RUN set -eux; \
+RUN --mount=type=bind,from=datasets,source=${SRC},target=/tmp/src.tar.gz \
+    set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
-    rm /tmp/src.tar.gz; \
     rm -rf /app/node_modules /app/Dockerfile /app/docker-compose.yml
 
 COPY --from=composer_cache /app/vendor /app/vendor
@@ -198,12 +198,12 @@ RUN set -eux; \
 # Restore — load the derived data into a build-time postgres cluster.
 # =======
 FROM app AS restore
-COPY --from=datasets reddit_db.sql.gz /tmp/reddit_db.sql.gz
 # reddit_media.tar is deliberately absent: this stage reads no uploaded image
 # (see [media] in image.toml), so the archive never enters a build stage.
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
-RUN /bin/sh /restore-stage.sh
+RUN --mount=type=bind,from=datasets,source=reddit_db.sql.gz,target=/tmp/reddit_db.sql.gz \
+    /bin/sh /restore-stage.sh
 
 # =======
 # Audit — its own layer so a failed assertion does not re-run the restore.

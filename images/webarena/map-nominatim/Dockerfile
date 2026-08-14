@@ -11,16 +11,20 @@
 # cluster is a PostgreSQL 14 data directory that only starts under a 14 base.
 # restore-stage.sh asserts that major, so a moved tag fails the build loudly.
 FROM mediagis/nominatim@sha256:d0eae7b513747e57b33933a11ba7297cb499684eb9f1dd3f206cbb2db1b8741e AS restore
-# The builder passes the verified tar via the `datasets` build context, so the
-# 116G archive never becomes a layer of the shipped image.
-#
-# osm_dump.tar is deliberately NOT copied in: the project data is inert, so it is
-# demuxed into bucket tars on the CI host and ADDed into the final stage (see
-# [media] in image.toml). Nothing here reads it.
-COPY --from=datasets nominatim_volumes.tar /tmp/nominatim_volumes.tar
+# osm_dump.tar is deliberately absent from this stage: the project data is inert,
+# so it is demuxed into bucket tars on the CI host and ADDed into the final stage
+# (see [media] in image.toml). Nothing here reads it.
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
-RUN /bin/bash /restore-stage.sh
+# Bind-mounted rather than COPYed. COPY --from=datasets would write all
+# 124,774,901,760 bytes into a build layer to read 34.8G back out of them, and
+# the `rm` that used to follow reclaimed none of it — a deleted file in a
+# committed layer is a whiteout in the next one, not free space. That single
+# line was over a fifth of this image's 520.7G measured peak disk. A bind mount
+# is read-only and never committed, so the archive is read where it already
+# sits.
+RUN --mount=type=bind,from=datasets,source=nominatim_volumes.tar,target=/tmp/nominatim_volumes.tar \
+    /bin/bash /restore-stage.sh
 
 FROM mediagis/nominatim@sha256:d0eae7b513747e57b33933a11ba7297cb499684eb9f1dd3f206cbb2db1b8741e
 # The base image ships its OWN initdb'd cluster at this path, created when the

@@ -49,8 +49,6 @@ rm -f /tmp/reddit_db.sql
 
 su-exec postgres "$PGBIN/pg_ctl" -D "$PGDATA" -w stop
 
-rm -f /tmp/reddit_db.sql.gz
-
 # The uploaded images ("withimg" in the upstream tar's name) never reach this
 # stage: they are bucketed on the CI host and ADDed straight into the final
 # image — see [media] in image.toml. Nothing below reads them, and the app stage

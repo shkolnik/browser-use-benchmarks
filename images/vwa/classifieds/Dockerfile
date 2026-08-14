@@ -105,11 +105,13 @@ WORKDIR /usr/src/myapp
 # App — Osclass 8.1.2 from its own release zip, plus WebArena's changes.
 # ===
 FROM runtime AS app
-COPY --from=datasets osclass-v8.1.2.zip /tmp/osclass.zip
-COPY --from=datasets classifieds_docker_compose.zip /tmp/compose.zip
 COPY webarena-modifications.patch /tmp/webarena-modifications.patch
 COPY config.php /tmp/config.php
-RUN set -eux; \
+# The two zips are bind-mounted, not COPYed: each is read once and kept never,
+# and a COPY commits it to a layer that the `rm` below can only whiteout.
+RUN --mount=type=bind,from=datasets,source=osclass-v8.1.2.zip,target=/tmp/osclass.zip \
+    --mount=type=bind,from=datasets,source=classifieds_docker_compose.zip,target=/tmp/compose.zip \
+    set -eux; \
     unzip -qq /tmp/osclass.zip -d /usr/src/myapp; \
     patch -p1 -d /usr/src/myapp --batch < /tmp/webarena-modifications.patch; \
     # classifieds_restore.sql is the RESET script the reset controller executes,
@@ -121,7 +123,7 @@ RUN set -eux; \
         classifieds_docker_compose/mysql/classifieds_restore.sql \
         -d /usr/src/myapp; \
     cp /tmp/config.php /usr/src/myapp/config.php; \
-    rm -f /tmp/osclass.zip /tmp/compose.zip /tmp/webarena-modifications.patch /tmp/config.php; \
+    rm -f /tmp/webarena-modifications.patch /tmp/config.php; \
     # ⚠️ DEVIATION 2: three runtime log files (oc-content/debug.log,
     # queries.log, explain_queries.log — 73 MB) and the macOS .DS_Store/._*
     # AppleDouble files are baked into the upstream image. They are debris from
@@ -139,10 +141,10 @@ RUN set -eux; \
 # image.toml), so nothing here reads or writes them.
 # =======
 FROM app AS restore
-COPY --from=datasets classifieds_docker_compose.zip /tmp/compose.zip
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
-RUN /bin/bash /restore-stage.sh
+RUN --mount=type=bind,from=datasets,source=classifieds_docker_compose.zip,target=/tmp/compose.zip \
+    /bin/bash /restore-stage.sh
 
 # =====
 # Audit — its own layer so a failed assertion does not re-run the restore.

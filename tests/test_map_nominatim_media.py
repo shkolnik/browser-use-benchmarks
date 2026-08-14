@@ -164,4 +164,7 @@ def test_the_cluster_is_not_on_the_media_path():
     restore = (IMAGE / "restore-stage.sh").read_text()
     assert "service postgresql start" in restore
     df = (IMAGE / "Dockerfile").read_text()
-    assert "COPY --from=datasets nominatim_volumes.tar" in df
+    # Reaching the restore stage is the point, not how it gets there — it is
+    # bind-mounted rather than COPYed so the 116G archive never becomes a layer.
+    assert "source=nominatim_volumes.tar" in df
+    assert "COPY --from=datasets nominatim_volumes.tar" not in df

@@ -9,9 +9,10 @@ DB_NAME=osclass
 DB_PASS=password
 APP=/usr/src/myapp
 
+# /tmp/compose.zip is a read-only bind mount of the datasets context, so there
+# is nothing here to delete afterwards — it never occupied a layer.
 unzip -qq -j /tmp/compose.zip \
     classifieds_docker_compose/mysql/osclass_craigslist.sql -d /tmp
-rm -f /tmp/compose.zip
 
 mkdir -p /var/run/mysqld /var/lib/mysql
 chown -R mysql:mysql /var/run/mysqld /var/lib/mysql

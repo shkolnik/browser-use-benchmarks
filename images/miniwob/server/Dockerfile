@@ -1,16 +1,19 @@
 # syntax=docker/dockerfile:1
 FROM nginx:alpine
-COPY --from=datasets miniwob-plusplus.tar.gz /tmp/miniwob-plusplus.tar.gz
 # The tag archive's task HTML lives at <top-dir>/miniwob/html/{miniwob,common,core,...}/.
 # Stripping 3 path components (top-dir, "miniwob", "html") while restricting extraction
 # to that one subtree lands miniwob/, common/, core/ as siblings directly under the
 # nginx root, matching the relative asset paths ("../core/...", "../common/...") the
 # task HTML files use.
-RUN mkdir -p /usr/share/nginx/miniwob \
+#
+# Bind-mounted rather than COPYed: the archive is read twice and kept never, and
+# a COPY would commit it to a layer that the following `rm` could only whiteout,
+# not reclaim. Nothing deletes it here because nothing wrote it.
+RUN --mount=type=bind,from=datasets,source=miniwob-plusplus.tar.gz,target=/tmp/miniwob-plusplus.tar.gz \
+    mkdir -p /usr/share/nginx/miniwob \
  && top="$(tar -tzf /tmp/miniwob-plusplus.tar.gz | head -1)" \
  && tar -xzf /tmp/miniwob-plusplus.tar.gz --strip-components=3 \
-      -C /usr/share/nginx/miniwob "${top}miniwob/html" \
- && rm /tmp/miniwob-plusplus.tar.gz
+      -C /usr/share/nginx/miniwob "${top}miniwob/html"
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 8399
