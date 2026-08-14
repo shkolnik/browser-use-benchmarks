@@ -101,10 +101,18 @@ COPY --chown=app:app composer.json composer.lock ./
 # the lock deploys the full app skeleton (bin/magento, app/, pub/, setup/, the
 # nginx.conf.sample) into the project root via magento-composer-installer.
 # Every package URL in the lock points at the keyless mirror.mage-os.org.
-RUN composer install --no-interaction --no-progress \
- && composer clear-cache \
- && test -f bin/magento && test -f nginx.conf.sample \
- && ln -s nginx.conf.sample nginx.conf
+# Held rather than streamed: composer emits a line per package, ~1300 of them in
+# one burst, and the Actions live-log channel drops a flush that large — taking
+# the surrounding build's live output with it until the burst ends. Nothing is
+# lost on failure, where those lines are the diagnostic; a green install has
+# nothing in them anyone reads.
+RUN set -e; \
+    composer install --no-interaction --no-progress >/tmp/composer.log 2>&1 \
+      || { cat /tmp/composer.log >&2; exit 1; }; \
+    rm -f /tmp/composer.log; \
+    composer clear-cache; \
+    test -f bin/magento && test -f nginx.conf.sample; \
+    ln -s nginx.conf.sample nginx.conf
 COPY --chown=app:app conf/env.php app/etc/env.php
 
 # --- Restore: boot the appliance stack, load the derived data, reindex, quiesce ---
