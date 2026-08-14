@@ -216,21 +216,24 @@ def demux(paths, outdir, strip, limit, max_buckets):
                       f'{now - started:.0f}s', flush=True)
                 last = now
 
-    for i in range(max_buckets):
-        if i not in opened:
-            # An unused bucket still needs a tar, and it must not be empty:
-            # docker does not recognise a zero-member tar as an archive, so ADD
-            # copies it verbatim and drops a literal bucket-NN.tar into the
-            # tree. Top-level directories are safe padding — they already appear
-            # in other buckets, they carry their real mode, and re-extracting
-            # one changes nothing.
-            for d in top_dirs:
-                buckets[i].addfile(d)
-                entries[i] += 1
+    unused = [i for i in range(max_buckets) if i not in opened]
+    for i in unused:
+        # An unused bucket still needs a tar, and it must not be empty: docker
+        # does not recognise a zero-member tar as an archive, so ADD copies it
+        # verbatim and drops a literal bucket-NN.tar into the tree. Top-level
+        # directories are safe padding — they already appear in other buckets,
+        # they carry their real mode, and re-extracting one changes nothing.
+        # When there are none to pad with, the refusal below is what fires.
+        for d in top_dirs:
+            buckets[i].addfile(d)
+            entries[i] += 1
     for b in buckets:
         b.close()
     stream.close()
 
+    # Ahead of the sizing check below, which is a question about this image's
+    # max_buckets. What the audit found is a question about the tree itself, and
+    # it is the more useful thing to be told when both are true.
     if problems:
         for cat, p in problems.items():
             print(f"  media audit: {p['n']} x {cat}, e.g. "
@@ -240,6 +243,18 @@ def demux(paths, outdir, strip, limit, max_buckets):
                                      for cat, p in problems.items()))
     if not n:
         raise SystemExit('error: the media archive held no entries')
+    if unused and not top_dirs:
+        # Padding is the only thing keeping an unused bucket from being that
+        # zero-member tar, and there is nothing to pad with when the archive's
+        # top level is all files — which is what `strip` leaves behind when it
+        # points at a directory holding no subdirectories. Refused here rather
+        # than shipped, because the failure is silent downstream: the build is
+        # green and the image carries a tar where the tree should be.
+        raise SystemExit(
+            f'error: {len(unused)} of {max_buckets} buckets went unused and the '
+            f'archive has no top-level directory to pad them with. Lower '
+            f'max_buckets to {len(opened)} — the media path cannot emit an empty '
+            f'bucket, and a padded one is what the ADD lines count on.')
     return n, nbytes, entries, len(opened), time.monotonic() - started
 
 

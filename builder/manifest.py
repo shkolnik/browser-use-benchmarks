@@ -143,15 +143,19 @@ def load_manifest(image_dir: Path) -> Manifest:
     media = None
     med = data.get("media")
     if med is not None:
-        if prepare is None:
-            _die(image_dir, "[media] needs a [prepare] section — media.archive names "
-                            "one of its outputs")
         for key in ("archive", "dest", "chown", "limit_kb", "max_buckets"):
             if key not in med:
                 _die(image_dir, f"media missing '{key}'")
-        if med["archive"] not in prepare.outputs:
-            _die(image_dir, f"media.archive '{med['archive']}' is not one of "
-                            f"prepare.outputs ({', '.join(prepare.outputs)})")
+        # Either origin will do. A derived archive is the shopping case: a prepare
+        # script builds it, so its identity is the script's. A pinned dataset is
+        # the map case: the archive IS the upstream object, there is nothing to
+        # derive, and `download` has already verified its sha256 end to end —
+        # a stronger guarantee than a prepare output carries, not a weaker one.
+        # run_media_prep resolves both through the same output_paths() call.
+        known = [d.filename for d in datasets] + (prepare.outputs if prepare else [])
+        if med["archive"] not in known:
+            _die(image_dir, f"media.archive '{med['archive']}' is neither a pinned "
+                            f"dataset nor a prepare output ({', '.join(known)})")
         if not str(med["dest"]).startswith("/"):
             _die(image_dir, "media.dest must be an absolute path in the image")
         # ADD --chown does not fail the build on an unresolvable name: it lands
