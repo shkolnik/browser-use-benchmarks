@@ -118,21 +118,13 @@ WantedBy=multi-user.target
 EOF
 systemctl enable burst-swap.service
 
-# --- SSM agent: the only way to look at a runner that has gone quiet ---
-# Debian's cloud image ships no amazon-ssm-agent (Amazon Linux and Ubuntu do),
-# so without this a wedged job can only be diagnosed from whatever it managed
-# to print — and a job wedges precisely when it stops printing. `aws ec2
-# get-console-output` still works agentless, but it carries kernel messages
-# only, so it can rule out an OOM kill and nothing above it.
-#
-# Needs AmazonSSMManagedInstanceCore on the instance role to register; without
-# it the agent runs and stays invisible, which fails closed and costs nothing.
-#
-# Region-pinned to match base_ami in burst.toml, which is us-east-2-specific.
-curl -fsSL --max-time 120 -o /tmp/amazon-ssm-agent.deb \
+# Debian ships no amazon-ssm-agent, so a wedged runner can only be diagnosed
+# from what it printed. Needs AmazonSSMManagedInstanceCore on the instance role
+# to register. Region matches base_ami. See docs/burst-runners.md.
+curl -fsSL --max-time 120 -o /tmp/ssm.deb \
   https://s3.us-east-2.amazonaws.com/amazon-ssm-us-east-2/latest/debian_amd64/amazon-ssm-agent.deb
-dpkg -i /tmp/amazon-ssm-agent.deb
-rm -f /tmp/amazon-ssm-agent.deb
+dpkg -i /tmp/ssm.deb
+rm -f /tmp/ssm.deb
 systemctl enable amazon-ssm-agent
 
 # Fail the bake here rather than the first job: an AMI that cannot build is
