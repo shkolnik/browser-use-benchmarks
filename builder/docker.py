@@ -291,11 +291,16 @@ def media_work_dir(datasets_dir: Path, ref: ImageRef) -> Path:
 
 def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
                    repo_root: Path) -> None:
-    """Extract the media archive and bucket it into tars, on the host.
+    """Turn the media archive into bucket tars, on the host.
 
     Runs between prepare and build, so the final stage can ADD the tars instead
     of the restore stage materialising the tree and the final stage COPYing it
     back out entry by entry.
+
+    Two ways to get there. Unless the restore stage reads the media, the archive
+    is demuxed straight into the buckets and the tree is never written at all;
+    otherwise it is extracted first and bucketed from disk, because a tree that
+    something else needs is not a cost this can avoid.
     """
     media, out = m.media, media_dir(ref)
     work = media_work_dir(datasets_dir, ref)
@@ -306,9 +311,15 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
 
     shutil.rmtree(out, ignore_errors=True)
     shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
 
+    if not media.restore_needs_media:
+        run(["python3", str(repo_root / "builder" / "stage-lib" / "demux-media.py"),
+             str(media.limit_kb), str(media.max_buckets), media.strip, str(out),
+             *(str(p) for p in parts)])
+        return
+
+    work.mkdir(parents=True, exist_ok=True)
     # A 45 GiB extract of small files is mute for its whole run without this,
     # which reads exactly like a hang. A tar record is 10240 bytes, so 100000
     # records is a line per ~1 GiB, carrying bytes moved and the rate.
@@ -328,13 +339,10 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
         extract += [f"--strip-components={len(media.strip.split('/'))}", media.strip]
     run_piped(["cat", *(str(p) for p in parts)], extract)
 
+    # Left in place: this branch runs only when the restore stage reads the
+    # tree, so it is an input to the build and not a transient to reclaim.
     run(["python3", str(repo_root / "builder" / "stage-lib" / "bucket-media.py"),
          str(media.limit_kb), str(media.max_buckets), str(work), str(out)])
-
-    if not media.restore_needs_media:
-        # The extracted tree is the largest transient on disk; dropping it now
-        # keeps peak disk at the archive plus the tars.
-        shutil.rmtree(work, ignore_errors=True)
 
 def clean_media(refs, datasets_dir: Path) -> None:
     """Remove bucket tars and any extracted tree.

@@ -808,9 +808,39 @@ def test_prepare_output_may_arrive_split(tmp_path):
     assert docker_mod.prepare_reuse_check(ref, m, ds) is None
 
 
-def test_media_prep_streams_split_parts_into_one_extract(tmp_path, monkeypatch):
-    # The point of leaving the archive split: the parts are joined in the pipe,
-    # so no rejoined copy is ever written to the disk this workload is bound by.
+def test_media_prep_demuxes_the_parts_without_writing_a_tree(tmp_path, monkeypatch):
+    # The default path: nothing reads the media tree, so it is never created.
+    from builder.manifest import Media
+    img = tmp_path / "images" / "webarena" / "shopping"
+    img.mkdir(parents=True)
+    ds = tmp_path / "datasets"
+    ds.mkdir()
+    ref = ImageRef("webarena", "shopping", img)
+    m = Manifest(media=Media(archive="shopping_media.tar", strip="pub/media",
+                             dest="/opt/magento/pub/media", chown="app:app",
+                             limit_kb=1024, max_buckets=2))
+    (ds / "shopping_media.tar.part-00").write_bytes(b"x" * 5)
+    (ds / "shopping_media.tar.part-01").write_bytes(b"x" * 5)
+
+    cmds = []
+    monkeypatch.setattr(docker_mod, "run", lambda c: cmds.append(c))
+    monkeypatch.setattr(docker_mod, "run_piped",
+                        lambda *a: pytest.fail("the archive must not be extracted"))
+    docker_mod.run_media_prep(ref, m, ds, tmp_path)
+
+    assert len(cmds) == 1
+    assert cmds[0][1].endswith("demux-media.py")
+    # Both parts, in order, read straight rather than joined by anything.
+    assert cmds[0][-2:] == [str(ds / "shopping_media.tar.part-00"),
+                            str(ds / "shopping_media.tar.part-01")]
+    assert "pub/media" in cmds[0], "the strip prefix has to reach the demux"
+    assert not docker_mod.media_work_dir(ds, ref).exists()
+
+
+def test_media_prep_extracts_when_the_restore_stage_reads_the_media(tmp_path, monkeypatch):
+    # The other path. The tree is an input to the build here, so there is no
+    # materialisation to avoid — and the parts are still joined in the pipe
+    # rather than rewritten to disk as one file first.
     import subprocess
     from builder.manifest import Media
     img = tmp_path / "images" / "webarena" / "shopping"
@@ -821,8 +851,6 @@ def test_media_prep_streams_split_parts_into_one_extract(tmp_path, monkeypatch):
     m = Manifest(media=Media(archive="shopping_media.tar", strip="pub/media",
                              dest="/opt/magento/pub/media", chown="app:app",
                              limit_kb=1024, max_buckets=2,
-                             # Kept only so the extracted tree survives to be
-                             # asserted on; run_media_prep drops it otherwise.
                              restore_needs_media=True))
 
     tree = tmp_path / "src" / "pub" / "media" / "sub"

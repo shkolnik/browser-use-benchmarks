@@ -164,7 +164,7 @@ ADD --chown=app:app .media/bucket-09.tar /opt/magento/pub/media/
 #      resolve; it lands everything 0:0 root:root and exits clean.
 #   2. `--chown` applies to tar MEMBERS, so a directory existing only implicitly
 #      in a member's path is created by the extractor and never chowned.
-#      bucket-media.py emits every ancestor explicitly to prevent this.
+#      The host-side bucketing emits every ancestor explicitly to prevent this.
 #
 # php-fpm runs as app and writes resized-image caches under
 # pub/media/catalog/product/cache/, so a root-owned directory here is a runtime
