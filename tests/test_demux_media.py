@@ -268,7 +268,7 @@ def test_the_whole_archive_is_scanned_before_it_is_refused(tmp_path, capsys):
         tf.addfile(d)
         for i in range(20):
             ti = tarfile.TarInfo(f"media/loose-{i:02d}")
-            ti.size, ti.mode = 8, 0o666
+            ti.size, ti.mode = 8, 0o4755
             tf.addfile(ti, io.BytesIO(b"x" * 8))
         ln = tarfile.TarInfo("media/escape")
         ln.type, ln.linkname, ln.mode = tarfile.SYMTYPE, "/etc/passwd", 0o777
@@ -279,12 +279,16 @@ def test_the_whole_archive_is_scanned_before_it_is_refused(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
     # Both kinds, and the count covers entries past the tenth.
-    assert "world-writable x20" in str(exc.value)
+    assert "setuid/setgid x20" in str(exc.value)
     assert "symlink escapes the tree x1" in str(exc.value)
     assert len(capsys.readouterr().err.strip().splitlines()) == 2
 
 
-def test_a_world_writable_file_is_refused(tmp_path):
+def test_a_world_writable_file_ships_with_the_bit_cleared(tmp_path, capsys):
+    # nominatim's osm_dump.tar carries wikimedia-importance.sql.gz at 0777.
+    # Refusing it would block the build over upstream packaging; the mode is
+    # corrected instead, and only the audited bit is touched — 0666 -> 0664
+    # keeps group-write, which the predicate never objected to.
     src = tmp_path / "media.tar"
     with tarfile.open(src, "w") as tf:
         d = tarfile.TarInfo("media")
@@ -296,8 +300,38 @@ def test_a_world_writable_file_is_refused(tmp_path):
 
     out = tmp_path / "out"
     out.mkdir()
-    with pytest.raises(SystemExit, match="world-writable"):
-        dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
+    # One bucket: the archive's top level is a single file, so there is no
+    # directory to pad spare buckets with and asking for more is refused.
+    dm.demux([str(src)], str(out), "media", 1024 * 1024, 1)
+    assert read_buckets(out, 1)[0]["loose.jpg"].mode == 0o664
+    err = capsys.readouterr().err
+    assert "normalised 1 world-writable entry" in err
+    assert "loose.jpg 0666 -> 0664" in err
+
+
+def test_a_world_writable_directory_is_corrected_in_every_bucket(tmp_path):
+    # Ancestors are carried into each bucket from one shared TarInfo, so a
+    # correction that did not reach that object would ship the original mode
+    # everywhere except the bucket the directory was first written into.
+    src = tmp_path / "media.tar"
+    with tarfile.open(src, "w") as tf:
+        d = tarfile.TarInfo("media")
+        d.type, d.mode = tarfile.DIRTYPE, 0o755
+        tf.addfile(d)
+        sub = tarfile.TarInfo("media/sub")
+        sub.type, sub.mode = tarfile.DIRTYPE, 0o777
+        tf.addfile(sub)
+        for i in range(3):
+            ti = tarfile.TarInfo(f"media/sub/f{i}")
+            ti.size, ti.mode = 4096, 0o644
+            tf.addfile(ti, io.BytesIO(b"x" * 4096))
+
+    out = tmp_path / "out"
+    out.mkdir()
+    # One file per bucket, so `sub` is carried into all three.
+    dm.demux([str(src)], str(out), "media", 6000, 3)
+    buckets = read_buckets(out, 3)
+    assert [b["sub"].mode for b in buckets.values()] == [0o775] * 3
 
 
 def test_an_empty_archive_is_refused(tmp_path):
