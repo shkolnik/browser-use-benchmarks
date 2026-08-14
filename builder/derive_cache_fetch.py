@@ -138,12 +138,23 @@ def registry_creds(registry):
     so this library needs no credentials of its own; on the runner that is the
     GITHUB_TOKEN the `login to ghcr` step logs in with.
 
-    Returns None when the entry is missing or held by a credential helper. An
-    anonymous token is tried instead — enough for a public package, and for a
-    private one the fetch then fails loudly rather than writing a 401 body
-    into a blob file.
+    `REGISTRY_TOKEN` overrides it, for callers that have a token but no reason
+    to have run `docker login` — a job that only reads a manifest should not
+    have to authenticate a whole daemon to do it, and inheriting a login some
+    earlier job happened to leave behind is not a credential path worth
+    depending on.
+
+    Returns None when neither is available or the entry is held by a
+    credential helper. An anonymous token is tried instead — enough for a
+    public package, and for a private one the fetch then fails loudly rather
+    than writing a 401 body into a blob file.
     """
     import base64
+    token = os.environ.get("REGISTRY_TOKEN")
+    if token:
+        # The username is not checked by GHCR's token endpoint; the token is
+        # the credential.
+        return ("x", token)
     path = Path(os.environ.get("DOCKER_CONFIG") or
                 os.path.expanduser("~/.docker")) / "config.json"
     try:

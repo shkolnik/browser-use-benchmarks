@@ -245,6 +245,7 @@ def test_credentials_come_from_the_docker_config(tmp_path, monkeypatch):
     (cfg / "config.json").write_text(json.dumps({"auths": {"reg.example": {
         "auth": base64.b64encode(b"user:secret").decode()}}}))
     monkeypatch.setenv("DOCKER_CONFIG", str(cfg))
+    monkeypatch.delenv("REGISTRY_TOKEN", raising=False)
     assert dcf.registry_creds("reg.example") == ("user", "secret")
     assert dcf.registry_creds("other.example") is None
 
@@ -257,7 +258,21 @@ def test_a_credential_helper_entry_reads_as_no_credentials(tmp_path, monkeypatch
     (cfg / "config.json").write_text(json.dumps(
         {"auths": {"reg.example": {}}, "credHelpers": {"reg.example": "ecr"}}))
     monkeypatch.setenv("DOCKER_CONFIG", str(cfg))
+    monkeypatch.delenv("REGISTRY_TOKEN", raising=False)
     assert dcf.registry_creds("reg.example") is None
+
+
+def test_registry_token_overrides_the_docker_config(tmp_path, monkeypatch):
+    """A caller that only reads a manifest should not have to authenticate a
+    docker daemon to do it, nor inherit whatever login an earlier job left."""
+    import base64
+    cfg = tmp_path / "dockercfg"
+    cfg.mkdir()
+    (cfg / "config.json").write_text(json.dumps({"auths": {"reg.example": {
+        "auth": base64.b64encode(b"user:secret").decode()}}}))
+    monkeypatch.setenv("DOCKER_CONFIG", str(cfg))
+    monkeypatch.setenv("REGISTRY_TOKEN", "from-env")
+    assert dcf.registry_creds("reg.example") == ("x", "from-env")
 
 
 # --- manifest handling --------------------------------------------------------

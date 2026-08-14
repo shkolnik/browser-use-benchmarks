@@ -103,10 +103,16 @@ def published_revision(ref: str, opener=None) -> str | None:
     # one level further down. Prefer linux/amd64 — the only platform this fleet
     # builds — and fall back to the first entry rather than failing, so a
     # single-platform index without a populated platform field still resolves.
+    #
+    # Entries whose platform is `unknown/unknown` are excluded from that
+    # fallback: that is how a provenance attestation rides in an image index,
+    # and its config carries none of the image's labels. Preferring amd64
+    # already steps over it, but the fallback would walk straight into it.
     if "manifests" in manifest and "config" not in manifest:
-        entries = manifest.get("manifests") or []
+        entries = [e for e in manifest.get("manifests") or []
+                   if (e.get("platform") or {}).get("architecture") != "unknown"]
         if not entries:
-            raise Unavailable(f"{ref}: index lists no manifests")
+            raise Unavailable(f"{ref}: index lists no image manifests")
         chosen = next(
             (e for e in entries
              if (e.get("platform") or {}).get("architecture") == "amd64"
