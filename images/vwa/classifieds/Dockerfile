@@ -17,7 +17,7 @@
 
 # ⚠️ Pinned by digest, not by the tag. The tag is what upstream's history
 # records; the digest is what makes this build repeatable.
-FROM php:8.1.27-cli@sha256:3ffa0f8fdef6a56e1da293e092b6adb3574de88e4181bb901d454366ef5dda82 AS runtime
+FROM php:8.5.9-cli@sha256:54d82ff9be6bd198145e90c917fc9b2e24230b42e52def8deb3554baf61c451a AS runtime
 
 # ⚠️ DEVIATION 1 (database server): upstream's compose db is `mysql:8.1`, which
 # cannot be installed — 8.1 was an innovation release, and Oracle's apt repo for
