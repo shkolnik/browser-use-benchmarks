@@ -818,7 +818,7 @@ def test_media_prep_demuxes_the_parts_without_writing_a_tree(tmp_path, monkeypat
     ref = ImageRef("webarena", "shopping", img)
     m = Manifest(media=Media(archive="shopping_media.tar", strip="pub/media",
                              dest="/opt/magento/pub/media", chown="app:app",
-                             limit_kb=1024, max_buckets=2))
+                             limit_kb=1024, max_buckets=2, min_entries=17))
     (ds / "shopping_media.tar.part-00").write_bytes(b"x" * 5)
     (ds / "shopping_media.tar.part-01").write_bytes(b"x" * 5)
 
@@ -834,6 +834,10 @@ def test_media_prep_demuxes_the_parts_without_writing_a_tree(tmp_path, monkeypat
     assert cmds[0][-2:] == [str(ds / "shopping_media.tar.part-00"),
                             str(ds / "shopping_media.tar.part-01")]
     assert "pub/media" in cmds[0], "the strip prefix has to reach the demux"
+    # Positional, and the strip prefix may legitimately be '' — so assert the
+    # order rather than mere presence, or a floor swapped with a strip would
+    # parse as 0 and disable itself silently.
+    assert cmds[0][2:6] == ["1024", "2", "17", "pub/media"]
     assert not docker_mod.media_work_dir(ds, ref).exists()
 
 

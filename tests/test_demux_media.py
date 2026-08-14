@@ -322,3 +322,38 @@ def test_a_bucket_tar_stays_under_the_limit(tmp_path):
         size = os.path.getsize(out / f"bucket-{i:02d}.tar")
         # tar closes with two zero blocks and pads to its 10240-byte record.
         assert size - 10240 <= limit, f"bucket-{i:02d} is {size} bytes, over {limit}"
+
+
+def test_an_archive_under_its_declared_floor_is_refused(tmp_path):
+    # The floor is the last point at which a short archive is visible. Past the
+    # demux the tree is layers: it never enters a build stage, so no in-build
+    # assertion can count it, and an image whose media went missing builds clean
+    # and smokes clean — the gates grep HTML, and a page renders without photos.
+    src = build_archive(tmp_path / "media.tar",
+                        [(f"catalog/img-{i}.jpg", 64) for i in range(5)])
+    out = tmp_path / "out"
+    out.mkdir()
+    argv = ["demux-media.py", "1024", "4", "500", "media", str(out), str(src)]
+    with pytest.raises(SystemExit, match="under the 500"):
+        dm.main(argv)
+
+
+def test_an_archive_that_meets_its_floor_passes(tmp_path):
+    # The floor counts every member, not just the files — the directories the
+    # archive carries are entries too, so a floor set from a file count is
+    # satisfied with room to spare rather than landing exactly on it.
+    src = build_archive(tmp_path / "media.tar",
+                        [(f"catalog/img-{i}.jpg", 64) for i in range(5)])
+    out = tmp_path / "out"
+    out.mkdir()
+    dm.main(["demux-media.py", "1024", "4", "5", "media", str(out), str(src)])
+    assert (out / "bucket-00.tar").exists()
+
+
+def test_the_floor_is_optional(tmp_path):
+    # 0 = no floor, which is what an image that declares no min_entries sends.
+    src = build_archive(tmp_path / "media.tar", [("catalog/img.jpg", 64)])
+    out = tmp_path / "out"
+    out.mkdir()
+    dm.main(["demux-media.py", "1024", "4", "0", "media", str(out), str(src)])
+    assert (out / "bucket-00.tar").exists()

@@ -315,8 +315,8 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
 
     if not media.restore_needs_media:
         run(["python3", str(repo_root / "builder" / "stage-lib" / "demux-media.py"),
-             str(media.limit_kb), str(media.max_buckets), media.strip, str(out),
-             *(str(p) for p in parts)])
+             str(media.limit_kb), str(media.max_buckets), str(media.min_entries),
+             media.strip, str(out), *(str(p) for p in parts)])
         return
 
     work.mkdir(parents=True, exist_ok=True)

@@ -45,6 +45,45 @@ urls = [
 script = "derive-backup.sh"
 outputs = ["reddit_db.sql.gz", "reddit_media.tar"]
 
+# The uploaded images are inert: 38.5G that would enter and leave the build
+# byte-identical. This section routes them around the build entirely — bucketed
+# into tars on the CI host, ADDed straight into the final image — rather than
+# extracted into the restore snapshot and COPYed back out entry by entry, a
+# phase that costs per entry rather than per byte.
+#
+# Only public/ below moves. The rest of /app — Postmill's source, composer's
+# vendor tree, the built assets, the dumped .env.local.php — is produced by the
+# build and keeps the partition-and-COPY machinery.
+[media]
+archive = "reddit_media.tar"
+# derive-backup.sh writes it as `cd .../public && tar cf ... media
+# submission_images`, so the archive has TWO top-level directories and no common
+# prefix to strip. dest is therefore their shared parent rather than either one.
+strip = ""
+dest = "/app/public"
+# php-fpm's workers and nginx both run as www-data, and Postmill writes resized
+# thumbnails under public/media/cache, so this tree is www-data's — matching the
+# `chown -R www-data:www-data /app/public` the app stage already applies.
+chown = "www-data:www-data"
+# Same 7G as ../shopping: dockerd's heap grows with the bucket while it is
+# ADDed, and 8G was enough to OOM a 16 GiB runner there. Lands 6 buckets over
+# the measured 38.5G.
+limit_kb = 7340032
+# A ceiling with headroom, not a target. Unused buckets still get a tar — an
+# empty one would not be recognised as an archive and would be ADDed verbatim.
+max_buckets = 8
+# A floor on the uploaded images, asserted where they are still countable — past
+# the demux they are layers, and no in-build assertion can see them. Measured at
+# 277 files under media/ and 31,467 under submission_images/, so this is a floor
+# on the files alone; the entry count also carries their directories.
+min_entries = 31000
+# The restore stage loads a pg_dump and stops; the audit stage after it only
+# counts rows. Neither opens a file under public/, and the Symfony work that
+# does touch public/ (composer install, dump-env, the asset build) all runs in
+# earlier stages, before this archive would have existed. Stated explicitly
+# because a missing image is invisible to every in-build assertion.
+restore_needs_media = false
+
 [service]
 # The PUBLISHED address the smoke gate reaches this service at (9999) —
 # deliberately different from the Dockerfile's HEALTHCHECK, which probes the

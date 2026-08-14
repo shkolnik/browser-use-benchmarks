@@ -130,13 +130,16 @@ RUN set -eux; \
     mkdir -p /usr/src/myapp/oc-content/uploads
 
 # =======
-# Restore — load the seed dump into a build-time MySQL datadir and unpack the
-# item photos. All of it happens ONCE here, so a container boot does no restore
-# work at all — the same property the reddit and Magento images have.
+# Restore — load the seed dump into a build-time MySQL datadir. All of it
+# happens ONCE here, so a container boot does no restore work at all — the same
+# property the reddit and Magento images have.
+#
+# classifieds_uploads.tar is deliberately NOT copied in: the item photos are
+# bucketed on the CI host and ADDed into the final stage instead (see [media] in
+# image.toml), so nothing here reads or writes them.
 # =======
 FROM app AS restore
 COPY --from=datasets classifieds_docker_compose.zip /tmp/compose.zip
-COPY --from=datasets classifieds_uploads.tar /tmp/classifieds_uploads.tar
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
 RUN /bin/bash /restore-stage.sh
@@ -150,37 +153,68 @@ COPY audit.sh /audit.sh
 RUN /bin/bash /audit.sh
 
 # =====
-# Final — carries the restored datadir and app tree, but neither the dump nor
-# the photo tarball that produced them.
+# Final — carries the restored datadir, the app tree and the item photos, but
+# not the dump that produced the datadir.
 # =====
 FROM runtime
-# One layer per staging bucket keeps every pushed layer under ~10G: the app tree
-# is ~73G because oc-content/uploads holds the item photos. Bucket count must
-# match BUCKET_COUNT in restore-stage.sh.
+# One layer per staging bucket keeps every pushed layer under ~10G. These carry
+# the 105 MB app tree only — the photos arrive through the ADD block below — so
+# the second bucket is expected to be empty and a COPY of an empty bucket is a
+# no-op. Bucket count must match BUCKET_COUNT in restore-stage.sh.
 COPY --from=audited /staging/bucket-00/ /usr/src/myapp/
 COPY --from=audited /staging/bucket-01/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-02/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-03/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-04/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-05/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-06/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-07/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-08/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-09/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-10/ /usr/src/myapp/
-COPY --from=audited /staging/bucket-11/ /usr/src/myapp/
 COPY --from=audited /var/lib/mysql /var/lib/mysql
 # The shared supervisor (#73): any service that exits fails the container.
 COPY --from=stagelib run-services.sh /run-services.sh
+
+# --- Media: 73G of item photos, bucketed on the CI host, never in a build stage ---
+# builder/docker.py writes these into .media/, a gitignored subdir of this image
+# dir — which is the default build context, and the only context ADD can extract
+# from (it has no --from).
+#
+# The target is oc-content, not oc-content/uploads: the archive's own members are
+# uploads/<item>/…, which is why [media].strip is empty. Count must match
+# [media].max_buckets in image.toml. Unused buckets carry only the `uploads`
+# directory entry and extract to nothing.
+ADD --chown=www-data:www-data .media/bucket-00.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-01.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-02.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-03.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-04.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-05.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-06.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-07.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-08.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-09.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-10.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-11.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-12.tar /usr/src/myapp/oc-content/
+ADD --chown=www-data:www-data .media/bucket-13.tar /usr/src/myapp/oc-content/
+
+# Checks DIRECTORIES on purpose — both silent failures here leave a root-owned
+# directory while every file stays www-data-owned:
+#
+#   1. `ADD --chown=<name>` does not fail the build when the name does not
+#      resolve; it lands everything 0:0 root:root and exits clean.
+#   2. `--chown` applies to tar MEMBERS, so a directory existing only implicitly
+#      in a member's path is created by the extractor and never chowned.
+#      The host-side bucketing emits every ancestor explicitly to prevent this.
+#
+# Osclass writes new item photos into oc-content/uploads/<item>/ as www-data, so
+# a root-owned directory here is a runtime failure that a healthcheck fetching
+# the home page cannot see. -quit stops at the first offender; files are never
+# stat'd.
+RUN bad="$(find /usr/src/myapp/oc-content/uploads -type d ! -user www-data -print -quit)"; \
+    if [ -n "$bad" ]; then echo "root-owned uploads dir: $bad" >&2; exit 1; fi
 
 # ⚠️ No `chown -R` here, and that is not a style preference. A recursive chown
 # over the app tree touches all 336,634 photo files, and every touched file is
 # COPIED INTO A NEW LAYER by the union filesystem — so the fix-the-permissions
 # step would have added a second full copy of the 73G payload to the image.
 # Measured the wrong way first: the chown alone ran past 12 minutes on this
-# host before it was killed. Ownership is therefore set once, in the restore
-# stage, on the staging buckets; COPY --from preserves uid/gid, so it arrives
-# correct and free.
+# host before it was killed. Ownership is therefore never repaired after the
+# fact: the app tree is chowned once in the restore stage and COPY --from
+# preserves uid/gid, and the photos carry theirs from `ADD --chown` above.
 RUN set -eux; \
     mkdir -p /var/run/mysqld; \
     chown mysql:mysql /var/run/mysqld

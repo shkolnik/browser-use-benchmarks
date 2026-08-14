@@ -49,6 +49,13 @@ class Media:
     chown: str           # ADD --chown target, e.g. app:app
     limit_kb: int        # per-bucket ceiling; buckets become layers
     max_buckets: int     # ceiling, not a target; empty tars are not emitted
+    # A floor on the entries the archive must carry, asserted on the host before
+    # any of them become a layer. Nothing downstream can check this: the tree
+    # never enters a build stage, so an image that ships an empty or truncated
+    # media archive builds clean, smokes clean (the gates grep HTML, and a page
+    # renders without its photos), and is only wrong once someone looks at it.
+    # 0 = no floor.
+    min_entries: int = 0
     # Most restore stages never read the media — shopping's reindex is DB/ES
     # only and its in-build assertions grep HTML. The ones that do pay a
     # bind-mount and a --target split; the default is not to.
@@ -154,6 +161,7 @@ def load_manifest(image_dir: Path) -> Manifest:
             chown=str(med["chown"]),
             limit_kb=int(med["limit_kb"]),
             max_buckets=int(med["max_buckets"]),
+            min_entries=int(med.get("min_entries", 0)),
             restore_needs_media=bool(med.get("restore_needs_media", False)),
         )
     svc = data.get("service", {})

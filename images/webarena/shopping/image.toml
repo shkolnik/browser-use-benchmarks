@@ -41,6 +41,10 @@ limit_kb = 7340032
 # A ceiling with headroom, not a target. Unused buckets still get a tar — an
 # empty one would not be recognised as an archive and would be ADDed verbatim.
 max_buckets = 10
+# A floor on the media, in the last place it can be counted: past the demux it
+# is layers, and the storefront assertions grep HTML — a page renders without
+# its product images. Measured at 4,482,820 entries.
+min_entries = 4000000
 # The reindex is DB/ES only and the in-build storefront assertions grep HTML,
 # so restore never reads a media file. Stated explicitly because a smoke
 # failure is what would expose this assumption being wrong.

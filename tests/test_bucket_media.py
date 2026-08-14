@@ -214,6 +214,23 @@ def test_media_add_lines_match_max_buckets():
         assert all(m.media.dest in l for l in adds), "an ADD targets another path"
 
 
+def test_every_media_image_declares_an_entry_floor():
+    """Opting into the media path removes the tree from every build stage, and
+    with it every in-build assertion that could have counted it. The floor is
+    what replaces them; an image that declares none has no check on its data at
+    all, and ships an empty media tree green.
+    """
+    from builder.manifest import load_manifest
+    root = Path(__file__).resolve().parents[1]
+    for toml in sorted((root / "images").glob("*/*/image.toml")):
+        m = load_manifest(toml.parent)
+        if not m.media:
+            continue
+        assert m.media.min_entries > 0, (
+            f"{toml.parent.name}: [media] with no min_entries — nothing would "
+            f"notice a truncated or empty archive")
+
+
 # --- concurrency -------------------------------------------------------------
 
 def _overlap_probe(monkeypatch, delay=0.05):
