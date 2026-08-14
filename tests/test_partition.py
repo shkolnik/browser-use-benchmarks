@@ -1,7 +1,7 @@
 import errno
-import re
 import importlib.util
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -30,8 +30,8 @@ def test_small_tree_yields_children_not_root(tmp_path):
     write(tmp_path, "vendor/lib.php", 4)
     assignments, sizes = pt.plan(str(tmp_path), 1024 * 1024, 4)
     assert len(sizes) == 1
-    assert {Path(p).name for p, _ in assignments} == {"public", "vendor"}
-    assert str(tmp_path) not in {p for p, _ in assignments}
+    assert {Path(p).name for p, _, _ in assignments} == {"public", "vendor"}
+    assert str(tmp_path) not in {p for p, _, _ in assignments}
 
 
 def test_descends_into_oversized_directory(tmp_path):
@@ -40,10 +40,27 @@ def test_descends_into_oversized_directory(tmp_path):
     write(tmp_path, "app.php", 4)
     # 250K limit forces uploads/ (600K) to be split file by file.
     assignments, sizes = pt.plan(str(tmp_path), 250, 10)
-    names = sorted(Path(p).name for p, _ in assignments)
+    names = sorted(Path(p).name for p, _, _ in assignments)
     assert names == ["app.php"] + [f"img{i}.jpg" for i in range(6)]
     assert all(n <= 250 * 1024 for n in sizes)
     assert len(sizes) >= 3
+
+
+def test_an_assignment_carries_the_size_the_progress_line_reports(tmp_path):
+    """The move loop reports bytes moved against the tree's total, and both
+    numbers come from here: the per-piece size in each assignment and the sum of
+    the bucket sizes. If they were measured differently the line would drift —
+    finishing at 31G of 30G, or stalling at 90% — so this pins them to each
+    other and to what measure() says the pieces cost.
+    """
+    for i in range(6):
+        write(tmp_path, f"uploads/img{i}.jpg", 100)
+    write(tmp_path, "app.php", 4)
+    assignments, sizes = pt.plan(str(tmp_path), 250, 10)
+    measured = pt.measure(str(tmp_path))
+    for piece, _, nbytes in assignments:
+        assert nbytes == measured[piece]
+    assert sum(n for _, _, n in assignments) == sum(sizes)
 
 
 def test_a_bucket_is_measured_as_the_tar_it_becomes(tmp_path):
@@ -319,3 +336,23 @@ def test_bucket_count_matches_the_dockerfile_copy_lines(script):
         f"{dockerfile.relative_to(REPO_ROOT)} COPYs buckets {copied}, but "
         f"{script.name} sets BUCKET_COUNT={count}. The final stage needs "
         f"exactly one contiguous COPY --from line per bucket, 00..{count - 1}.")
+
+
+def test_both_long_phases_report_progress(tmp_path, monkeypatch, capsys):
+    """The measuring walk and the move loop were both silent, and on gitlab's
+    30G both are minutes long — a silent build stage is indistinguishable from
+    a hung one. Driven with the interval at zero because at its real 30s a test
+    tree would never reach the first tick.
+    """
+    monkeypatch.setattr(pt.Ticker, "INTERVAL", 0)
+    root, staging = tmp_path / "root", tmp_path / "staging"
+    for name in ("a/one.bin", "b/two.bin"):
+        write(root, name, 40)
+    staging.mkdir()
+    pt.main(["partition-tree.py", "900", "4", str(root), str(staging)])
+    out = capsys.readouterr().out
+    assert "partition: measured " in out, "the measuring walk reported nothing"
+    assert "partition: moved " in out, "the move loop reported nothing"
+    # The move line is in bytes against the tree total: a piece is a whole
+    # subtree, so a count of pieces would say nothing about what is left.
+    assert re.search(r"partition: moved \d+\.\dG of \d+\.\dG after \d+s", out)

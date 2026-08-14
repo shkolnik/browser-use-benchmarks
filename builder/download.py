@@ -1,16 +1,37 @@
 import hashlib
 import subprocess
+import time
 from pathlib import Path
 from builder.manifest import Dataset
 
 class FetchError(Exception):
     pass
 
-def sha256_of(path: Path) -> str:
+PROGRESS_INTERVAL_S = 30
+
+def sha256_of(path: Path, log=None) -> str:
+    """Hash the file, reporting every PROGRESS_INTERVAL_S seconds when given a log.
+
+    Every pinned dataset is verified on every run, cache hit included — so a
+    map build that downloads nothing still reads ~180G here, and it is the one
+    long phase that cannot be skipped by having the data already. curl prints
+    its own meter during a fetch, which is why the download beside this is
+    visible and this was not.
+    """
     h = hashlib.sha256()
+    total = path.stat().st_size
+    done = 0
+    started = last = time.monotonic()
     with path.open("rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
+            done += len(chunk)
+            now = time.monotonic()
+            if log and now - last >= PROGRESS_INTERVAL_S:
+                last = now
+                log(f"{path.name}: verifying, {done / 2**30:.1f}G of "
+                    f"{total / 2**30:.1f}G at "
+                    f"{done / (now - started) / 2**20:.0f}MB/s")
     return h.hexdigest()
 
 def fetch_curl(url: str, dest: Path) -> None:
@@ -37,7 +58,7 @@ def ensure_dataset(ds: Dataset, datasets_dir: Path, fetch=fetch_curl,
     datasets_dir.mkdir(parents=True, exist_ok=True)
     final = datasets_dir / ds.filename
     if final.exists():
-        if sha256_of(final) == ds.sha256:
+        if sha256_of(final, log) == ds.sha256:
             log(f"{ds.filename}: cached and verified, skipping download")
             return final
         log(f"{ds.filename}: cached copy fails verification")
@@ -54,7 +75,7 @@ def ensure_dataset(ds: Dataset, datasets_dir: Path, fetch=fetch_curl,
                 errors.append(f"{url}: {e}")
                 continue
 
-            if not part.exists() or sha256_of(part) != ds.sha256:
+            if not part.exists() or sha256_of(part, log) != ds.sha256:
                 size = part.stat().st_size if part.exists() else 0
                 if part.exists():
                     _quarantine(part, ds.filename, log)

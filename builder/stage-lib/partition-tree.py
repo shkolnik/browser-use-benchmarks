@@ -26,8 +26,37 @@ import os
 import shutil
 import stat
 import sys
+import time
 
 BLOCK = 512
+
+
+class Ticker:
+    """Prints at most every INTERVAL seconds, flushed.
+
+    Both halves of this script are long and were silent: the measuring walk
+    stats every inode in the tree, and the move loop then rewrites most of it,
+    since a piece coming from a lower overlay layer is copied rather than
+    renamed (see move_preserving). On gitlab's 30G that is minutes in which
+    nothing prints, and a silent build stage is indistinguishable from a hung
+    one.
+
+    Flushed because stdout is a pipe under buildkit, so Python block-buffers
+    it — the progress would otherwise all surface at the end, which is exactly
+    when it is no longer progress.
+    """
+
+    INTERVAL = 30
+
+    def __init__(self):
+        self.started = self.last = time.monotonic()
+
+    def tick(self, msg):
+        now = time.monotonic()
+        if now - self.last >= self.INTERVAL:
+            self.last = now
+            print(f'  partition: {msg} after {now - self.started:.0f}s',
+                  flush=True)
 
 
 def entry_blocks(size):
@@ -62,6 +91,7 @@ def measure(root):
     registry refuses after the whole tree has already been built.
     """
     sizes = {}
+    ticker = Ticker()
 
     def walk(path, name):
         st = os.lstat(path)
@@ -76,6 +106,9 @@ def measure(root):
         else:
             total = entry_blocks(st.st_size) + extra
         sizes[path] = total
+        # After the entry is recorded, so the count is of entries finished
+        # rather than of frames on the way down.
+        ticker.tick(f'measured {len(sizes):,} entries')
         return total
 
     walk(root, os.path.basename(root.rstrip(os.sep)))
@@ -100,7 +133,13 @@ def children(path, limit, sizes):
 
 
 def plan(root, limit_kb, max_buckets):
-    """Return (assignments, bucket_sizes) — first-fit over the tree's pieces."""
+    """Return (assignments, bucket_sizes) — first-fit over the tree's pieces.
+
+    An assignment is (piece, bucket_index, bytes). The size is carried out
+    rather than recomputed: the move loop reports progress against the tree's
+    total, and re-measuring a piece to say how big it was would walk the whole
+    tree a second time to learn something already known here.
+    """
     limit = limit_kb * 1024
     sizes = measure(root)
     buckets = []  # [used_bytes, index]
@@ -118,14 +157,14 @@ def plan(root, limit_kb, max_buckets):
         for b in buckets:
             if b[0] + nbytes <= limit:
                 b[0] += nbytes
-                assignments.append((piece, b[1]))
+                assignments.append((piece, b[1], nbytes))
                 break
         else:
             if len(buckets) == max_buckets:
                 raise SystemExit(f'tree outgrew {max_buckets} buckets; raise the '
                                  'count here and add COPY lines in the Dockerfile')
             buckets.append([nbytes, len(buckets)])
-            assignments.append((piece, len(buckets) - 1))
+            assignments.append((piece, len(buckets) - 1, nbytes))
     return assignments, [used for used, _ in buckets]
 
 
@@ -223,13 +262,20 @@ def move_preserving(src, dest):
 def main(argv):
     limit_kb, max_buckets, root, staging = int(argv[1]), int(argv[2]), argv[3], argv[4]
     assignments, sizes = plan(root, limit_kb, max_buckets)
-    for piece, idx in assignments:
+    total = sum(sizes)
+    ticker, moved = Ticker(), 0
+    for piece, idx, nbytes in assignments:
         rel = os.path.relpath(piece, root)
         bucket = os.path.join(staging, f'bucket-{idx:02d}')
         mkdir_mirroring(root, bucket, os.path.dirname(rel))
         # Not shutil.move: its cross-filesystem fallback drops ownership, and
         # cross-layer directory renames DO hit EXDEV here. See move_preserving.
         move_preserving(piece, os.path.join(bucket, rel))
+        moved += nbytes
+        # Bytes, not pieces: a piece is a whole subtree that fit under the limit,
+        # so they run from one file to most of a bucket and a count of them says
+        # nothing about how much is left.
+        ticker.tick(f'moved {moved / 2**30:.1f}G of {total / 2**30:.1f}G')
     print(f'{len(sizes)} buckets, sized as the tar each one becomes:')
     for idx, used in enumerate(sizes):
         print(f'  bucket-{idx:02d}: {used / 2**30:.1f}G')

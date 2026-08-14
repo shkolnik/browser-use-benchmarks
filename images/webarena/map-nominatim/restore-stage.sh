@@ -31,8 +31,16 @@ echo "=== extract the upstream Postgres cluster ==="
 # The member argument is load-bearing, not cosmetic. This archive holds TWO
 # volumes: nominatim-data (34.8G, the cluster) and nominatim-flatnode (87G,
 # osm2pgsql's node cache). Naming the member extracts only the first — see
-# README.md for why the flatnode file is deliberately not shipped. tar still
-# reads all 116G to find the members, but writes only the 34.8G we keep.
+# README.md for why the flatnode file is deliberately not shipped.
+#
+# It costs the 34.8G, not the 116G, and that depends on $TAR BEING A FILE. The
+# two volumes do not interleave: walking the archive's header chain puts every
+# nominatim-data member in the first 34.77 GiB and the whole flatnode volume in
+# three members after it. tar lseeks over a member it is not extracting when the
+# archive is seekable, and only reads through it when it is not — measured on an
+# 8G archive whose tail is one huge member, 0.002s via -f against 3.4s through a
+# pipe. Feeding this through `cat` (joining split parts, say) would therefore
+# put the 81G back on the clock without changing a visible thing.
 #
 # --numeric-owner is load-bearing too: the archive carries uid/gid 101:103,
 # which is exactly postgres:postgres inside this image (verified with `id`).
@@ -45,7 +53,14 @@ rm -rf "$PGDATA"
 # start on, and the ownership assertion further down is what would have caught
 # it — ten minutes into a build, after a two-hour download.
 install -d -o postgres -g postgres -m 700 "$PGDATA"
+# --checkpoint so the phase is not mute. 34.8G is minutes of a build during which
+# nothing else prints, and a silent stage is indistinguishable from a hung one —
+# which is the state this image is most often suspected of. A checkpoint counts
+# RECORDS, and a record is the blocking factor's 20 x 512B, so 100000 of them is
+# ~1.02GB and the extract reports about thirty times. %T is tar's own progress
+# (bytes, human size and rate); %d is seconds elapsed.
 tar --numeric-owner -C "$PGDATA" --strip-components=7 -xf "$TAR" \
+    --checkpoint=100000 --checkpoint-action=echo='  restore: extract %T after %ds' \
     projects/metis2/docker/docker/volumes/nominatim-data
 # No `rm` here, and none is wanted: $TAR is a read-only bind mount of the
 # datasets context, so it occupies no space in this stage to reclaim, and

@@ -210,7 +210,7 @@ def main(argv):
     print(f'planning media buckets under {root}', flush=True)
     assignments, sizes = partition_tree.plan(root, limit_kb, max_buckets)
     by_bucket = {}
-    for piece, idx in assignments:
+    for piece, idx, _ in assignments:
         by_bucket.setdefault(idx, []).append(os.path.relpath(piece, root))
     print(f'planned in {time.monotonic() - started:.0f}s', flush=True)
 
