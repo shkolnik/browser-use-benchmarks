@@ -118,8 +118,8 @@ From the booted upstream stack (`mysql:8.1` + the dump). The earlier guess of "~
 | app tree excluding uploads | 105 MB |
 | PHP / Osclass | 8.1.27 / 8.1.2 |
 
-The uploads are per-item directories, not a flat dump, so the staging-bucket partitioner
-splits them at item granularity and no single piece comes close to a layer limit.
+The uploads are per-item directories, not a flat dump, so a bucketer splits them at item
+granularity and no single piece comes close to a layer limit.
 
 ## Deviations from upstream, and why
 
@@ -156,6 +156,29 @@ the derived-inputs cache. The Dockerfile then goes `runtime` → `restore` → `
 own layer) → final with one `COPY` per staging bucket, using the shared
 `builder/stage-lib/partition-tree.py`.
 
+### The photos do not go through the build
+
+The 73 GB of `oc-content/uploads` never enters a build stage. `image.toml`'s `[media]`
+section opts this image into the host-side media path: between prepare and build,
+`builder/docker.py` streams `classifieds_uploads.tar` through
+`builder/stage-lib/demux-media.py`, which writes it straight out as ≤7 GiB bucket tars in
+this directory's gitignored `.media/`, and the final stage `ADD`s those. The tree is never
+materialised on disk at all — no extract, no walk, no read-back — and the restore stage
+partitions the 105 MB app tree only, which is why `BUCKET_COUNT` is 2 rather than 12.
+
+Two constants have to move together, and a unit test holds each: the number of
+`ADD .media/bucket-NN.tar` lines equals `[media].max_buckets`
+(`tests/test_bucket_media.py`), and the number of `COPY --from=audited /staging/bucket-NN/`
+lines equals `BUCKET_COUNT` in `restore-stage.sh` (`tests/test_partition.py`).
+
+`[media].strip` is empty and `dest` is `oc-content` rather than `oc-content/uploads`, even
+though `derive-backup.sh` writes the archive as `tar cf … -C …/oc-content uploads` and
+stripping the prefix would be legal. Stripping it would promote the 84,148 per-item
+directories to the archive's top level, and the demuxer keeps every top-level directory as
+padding for unused buckets — so each unused bucket would carry 84,148 directory entries,
+built with a scan of the list per entry. Rooting one level higher leaves exactly one
+top-level entry.
+
 ## What has been verified by running, and what has not
 
 Verified locally, with the real dump and the real Osclass zip, and a synthetic uploads tar
@@ -176,6 +199,12 @@ and the audit run against the true cardinality:
   `Error: Invalid token`.
 
 **Not yet exercised** — this is what the CI build proves: the real 73 GB derivation, the
-8 GB split and its cache reassembly, more than one staging bucket actually filling (the
-synthetic tar fits in one), and the ~73 GB push to GHCR. Do not merge until an image
-pulled **by digest** has been booted and re-checked against the table above.
+8 GB split and its cache reassembly, the host-side demux filling ~11 of its 14 buckets, and
+the ~73 GB push to GHCR. Do not merge until an image pulled **by digest** has been booted
+and re-checked against the table above.
+
+The media path in particular is reasoned rather than run here: the local verification above
+predates it and used a synthetic uploads tar, and this host has no copy of the real
+archive. Two of its checks can only fail against the real data — `demux-media.py` refuses a
+world-writable or setuid entry, and it refuses hard links, neither of which anyone has
+looked for in the upstream image's uploads tree.

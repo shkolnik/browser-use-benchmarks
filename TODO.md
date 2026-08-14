@@ -6,6 +6,75 @@ items that were already done).
 
 ## In progress
 
+### Build data path: what the media work found, and what is left to apply
+
+Added 2026-08-14. Mirrors the session task list (`TaskList`); this file is the durable copy.
+
+**Landed.** `[media]` routes an inert archive around the docker build: the CI host demuxes it
+straight into one tar per image layer and the final stage `ADD`s them, so the tree never enters
+a build stage. shopping merged as PR #51 — media phase 36 min → 6.5 min, whole build 1h52m →
+1h20m, three passes over 45G down to one. reddit and classifieds are PR #52 (38.5G and 73G
+routed off the build; staging buckets 7→2 and 12→2), which also carries:
+
+- map-osrm (7.9G), map-nominatim's project data (1.75G) and map-tile's cluster (38.4G). The
+  last two of those needed `[media].archive` to accept a pinned dataset and not only a prepare
+  output — `download` has already verified its sha256 end to end, which is the stronger
+  guarantee, not the weaker one. map-tile has no restore stage left at all.
+- The demux now REFUSES an unpaddable spare bucket instead of emitting a zero-member tar.
+  Docker does not recognise one as an archive, so `ADD` copies it verbatim and drops a literal
+  `bucket-NN.tar` into the image — green build, wrong tree.
+- `partition-tree.py` bounds a bucket by what its layer tar writes rather than by `du`, which
+  is wrong in both directions (measured on 2,000-entry trees: tiny files, `du` over by 4×;
+  block-aligned files, under by 512 B/entry; one 64 MB sparse file, `du` says 0 K against a
+  real 65,540 K).
+- Every remaining `COPY --from=datasets` of a read-once archive is a `--mount=type=bind`.
+
+**The precondition, stated correctly.** Not "does the restore stage touch the tree" — that
+excluded three images wrongly. It is "does the restore stage TRANSFORM the tree". map-tile
+(`cat PG_VERSION`, `[ -f ]` marker, `stat`, `du`) and map-osrm (`[ -f ]` file list,
+`stat -c %s`) are read-only and qualify. map-nominatim's cluster genuinely does not — it starts
+Postgres, replays the snapshot's WAL, queries `placex` and shuts down cleanly, so what ships is
+not what was extracted. gitlab does not either: `gitlab-backup` stores repositories as git
+BUNDLES (verified in the pinned base image — `gitaly_backup.rb` runs `gitaly-backup` with
+`-layout pointer`, and the binary carries `CreateBundleFromRefListRequest` /
+`CreateRepositoryFromBundleRequest`), so the shipped repos are rebuilt from bundles: same
+reachable objects and SHAs, different packfiles, no unreachable objects, no reflogs.
+
+**Also landed, from the same pass.**
+
+- Progress through the three phases that were mute for minutes at a time: nominatim's extract
+  (tar `--checkpoint`), `partition-tree.py`'s measuring walk and move loop, and dataset
+  sha256 verification — the last being the one that runs even on a full cache, ~180G on a map
+  build that downloads nothing.
+- `docs/build-data-path.md` — the measured `tar`/`ADD`/buildkit behaviour the data path is
+  built around, every item of it a silent failure. Includes the audit-the-extractor trap.
+- What nominatim's extract actually costs: **34.8G, not 116G**. The two volumes do not
+  interleave (nominatim-data is members 0–7220, the flatnode volume is three members after
+  it) and tar lseeks over a member it is not extracting when the archive is seekable —
+  0.002s via `-f` against 3.4s through a pipe, on an 8G archive with a huge tail member. No
+  streaming reader is needed; the only thing that would undo it is piping the archive.
+
+**Decisions waiting on James.**
+
+- map-nominatim ships **1.75 GiB of pure import input** in the final image:
+  `us-northeast-latest.osm.pbf` (1,485,107,682 bytes) and `wikimedia-importance.sql.gz`
+  (393,574,858), under `/nominatim/data`. Nothing on the query path reads it; the Dockerfile
+  says so itself. The stated reasons are that `PBF_PATH` should name a file that exists and
+  that a re-import is possible from the image alone. The first does not survive reading
+  `/app/config.sh`, which checks the VARIABLE is set, not the file. The second is undercut by
+  the 81.44 GiB flatnode file being deliberately absent — the pbf makes a re-import cheaper,
+  not self-contained. Converting it to the media path (in flight) keeps exactly what ships
+  today; deleting it is a separate call.
+- `bucket-media.py` (267 lines + 280 of tests) now has **no caller** — every `[media]` image
+  sets `restore_needs_media = false`. Kept as the documented fallback for a future image that
+  needs the tree in-build. Revisit once the fleet is green.
+- shopping-admin has a media tar but it is 85M and its restore stage reads it. Converting costs
+  complexity and saves nothing.
+
+**Known and deliberate, not a candidate.** wikipedia joins 88.7 GiB of parts into one file at
+first boot (~632 s, roughly doubling runtime disk). libzim serves every article from split
+parts but gives no full-text search at all; measured and documented in that image's README.
+
 ### Derived-inputs GHCR cache → authoritative digest-pinned input (finish the cleanup)
 
 DECIDED (James): oras artifacts, fail-by-default on a pinned miss, with the simplest possible

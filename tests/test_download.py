@@ -113,3 +113,28 @@ def test_download_prepare_inputs_fetches_only_those(tmp_path):
     run_download([ref], tmp_path / "ds", fetch=_recording_fetch(fetched),
                  prepare_inputs=True)
     assert fetched == ["https://metis/upstream.tar"]
+
+def test_verification_reports_progress_and_still_returns_the_digest(tmp_path, monkeypatch):
+    """Every pinned dataset is re-verified on each run, cache hit included, so
+    this phase reads ~180G on a map build that downloads nothing. It used to
+    print nothing at all, which is the shape of a hang. The digest is asserted
+    alongside the reporting because a progress line that cost correctness would
+    be a bad trade.
+    """
+    import builder.download as dl
+    blob = b"x" * (4 << 20)
+    f = tmp_path / "big.tar"
+    f.write_bytes(blob)
+    monkeypatch.setattr(dl, "PROGRESS_INTERVAL_S", 0)
+    lines = []
+    assert dl.sha256_of(f, lines.append) == hashlib.sha256(blob).hexdigest()
+    assert lines, "hashing reported nothing"
+    assert all(l.startswith("big.tar: verifying, ") for l in lines)
+    assert "of 0.0G at" in lines[0]
+
+def test_verification_is_silent_without_a_log(tmp_path):
+    """The log is optional, and sha256_of is called in contexts that have none."""
+    import builder.download as dl
+    f = tmp_path / "small.tar"
+    f.write_bytes(b"abc")
+    assert dl.sha256_of(f) == hashlib.sha256(b"abc").hexdigest()

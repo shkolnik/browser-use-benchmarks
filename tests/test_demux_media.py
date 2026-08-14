@@ -190,8 +190,11 @@ def test_a_symlink_is_kept_and_not_read_as_world_writable(tmp_path):
 
     out = tmp_path / "out"
     out.mkdir()
-    dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
-    members = read_buckets(out, 3)[0]
+    # One bucket, because this archive's top level is two files and no
+    # directory: a spare bucket would have nothing to pad with, which the demux
+    # refuses on its own account. Nothing here is about bucket sizing.
+    dm.demux([str(src)], str(out), "media", 1024 * 1024, 1)
+    members = read_buckets(out, 1)[0]
     assert members["link.jpg"].issym()
     assert members["link.jpg"].linkname == "real.jpg"
 
@@ -322,3 +325,64 @@ def test_a_bucket_tar_stays_under_the_limit(tmp_path):
         size = os.path.getsize(out / f"bucket-{i:02d}.tar")
         # tar closes with two zero blocks and pads to its 10240-byte record.
         assert size - 10240 <= limit, f"bucket-{i:02d} is {size} bytes, over {limit}"
+
+
+def test_an_archive_under_its_declared_floor_is_refused(tmp_path):
+    # The floor is the last point at which a short archive is visible. Past the
+    # demux the tree is layers: it never enters a build stage, so no in-build
+    # assertion can count it, and an image whose media went missing builds clean
+    # and smokes clean — the gates grep HTML, and a page renders without photos.
+    src = build_archive(tmp_path / "media.tar",
+                        [(f"catalog/img-{i}.jpg", 64) for i in range(5)])
+    out = tmp_path / "out"
+    out.mkdir()
+    argv = ["demux-media.py", "1024", "4", "500", "media", str(out), str(src)]
+    with pytest.raises(SystemExit, match="under the 500"):
+        dm.main(argv)
+
+
+def test_an_archive_that_meets_its_floor_passes(tmp_path):
+    # The floor counts every member, not just the files — the directories the
+    # archive carries are entries too, so a floor set from a file count is
+    # satisfied with room to spare rather than landing exactly on it.
+    src = build_archive(tmp_path / "media.tar",
+                        [(f"catalog/img-{i}.jpg", 64) for i in range(5)])
+    out = tmp_path / "out"
+    out.mkdir()
+    dm.main(["demux-media.py", "1024", "4", "5", "media", str(out), str(src)])
+    assert (out / "bucket-00.tar").exists()
+
+
+def test_the_floor_is_optional(tmp_path):
+    # 0 = no floor, which is what an image that declares no min_entries sends.
+    src = build_archive(tmp_path / "media.tar", [("catalog/img.jpg", 64)])
+    out = tmp_path / "out"
+    out.mkdir()
+    dm.main(["demux-media.py", "1024", "4", "0", "media", str(out), str(src)])
+    assert (out / "bucket-00.tar").exists()
+
+
+def test_a_spare_bucket_with_nothing_to_pad_it_is_refused(tmp_path):
+    # An archive whose top level is all files — nominatim's osm_dump after its
+    # prefix is stripped. There is no directory to pad a spare bucket with, and
+    # a zero-member tar is not an archive to docker: ADD would copy it verbatim
+    # and drop a literal bucket-01.tar into the image, building green.
+    src = build_archive(tmp_path / "media.tar", [("a.pbf", 4096), ("b.sql.gz", 4096)])
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(SystemExit) as e:
+        dm.demux([str(src)], str(out), "media", 64 * 1024, 2)
+    assert "no top-level directory to pad" in str(e.value)
+    assert "Lower max_buckets to 1" in str(e.value)
+
+
+def test_a_spare_bucket_is_padded_when_the_archive_has_a_directory(tmp_path):
+    src = build_archive(tmp_path / "media.tar", [("car/a.osrm", 4096)])
+    out = tmp_path / "out"
+    out.mkdir()
+    dm.demux([str(src)], str(out), "media", 64 * 1024, 3)
+    buckets = read_buckets(out, 3)
+    # Padded, not empty — and with the real directory, so re-extracting it is a
+    # no-op rather than a second copy of anything.
+    for i in (1, 2):
+        assert list(buckets[i]) == ["car"]

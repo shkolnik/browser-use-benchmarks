@@ -46,9 +46,22 @@ class Media:
     archive: str         # prepare output holding the tree, e.g. shopping_media.tar
     strip: str           # subtree within that archive to treat as media, '' = all
     dest: str            # absolute path in the image, e.g. /opt/magento/pub/media
-    chown: str           # ADD --chown target, e.g. app:app
+    # ADD --chown target, e.g. app:app. '' emits no --chown at all, which makes
+    # ADD extract the archive's own uid/gid and mode verbatim. That is the right
+    # answer for a tree owned by more than one account — a Postgres cluster
+    # beside a renderer's cache — where a single --chown would flatten a split
+    # the image depends on. It is the wrong answer for a tree whose archive
+    # carries whatever uid the machine it was captured on happened to use.
+    chown: str
     limit_kb: int        # per-bucket ceiling; buckets become layers
     max_buckets: int     # ceiling, not a target; empty tars are not emitted
+    # A floor on the entries the archive must carry, asserted on the host before
+    # any of them become a layer. Nothing downstream can check this: the tree
+    # never enters a build stage, so an image that ships an empty or truncated
+    # media archive builds clean, smokes clean (the gates grep HTML, and a page
+    # renders without its photos), and is only wrong once someone looks at it.
+    # 0 = no floor.
+    min_entries: int = 0
     # Most restore stages never read the media — shopping's reindex is DB/ES
     # only and its in-build assertions grep HTML. The ones that do pay a
     # bind-mount and a --target split; the default is not to.
@@ -130,23 +143,31 @@ def load_manifest(image_dir: Path) -> Manifest:
     media = None
     med = data.get("media")
     if med is not None:
-        if prepare is None:
-            _die(image_dir, "[media] needs a [prepare] section — media.archive names "
-                            "one of its outputs")
         for key in ("archive", "dest", "chown", "limit_kb", "max_buckets"):
             if key not in med:
                 _die(image_dir, f"media missing '{key}'")
-        if med["archive"] not in prepare.outputs:
-            _die(image_dir, f"media.archive '{med['archive']}' is not one of "
-                            f"prepare.outputs ({', '.join(prepare.outputs)})")
+        # Either origin will do. A derived archive is the shopping case: a prepare
+        # script builds it, so its identity is the script's. A pinned dataset is
+        # the map case: the archive IS the upstream object, there is nothing to
+        # derive, and `download` has already verified its sha256 end to end —
+        # a stronger guarantee than a prepare output carries, not a weaker one.
+        # run_media_prep resolves both through the same output_paths() call.
+        known = [d.filename for d in datasets] + (prepare.outputs if prepare else [])
+        if med["archive"] not in known:
+            _die(image_dir, f"media.archive '{med['archive']}' is neither a pinned "
+                            f"dataset nor a prepare output ({', '.join(known)})")
         if not str(med["dest"]).startswith("/"):
             _die(image_dir, "media.dest must be an absolute path in the image")
         # ADD --chown does not fail the build on an unresolvable name: it lands
         # everything 0:0 root:root and exits clean. There is no way to catch that
         # from here (the image's passwd database is not known until it is built),
         # which is why the final stage carries a directory-ownership assert.
-        if ":" not in str(med["chown"]):
-            _die(image_dir, "media.chown must be 'user:group'")
+        # Required as a KEY even when empty: whether the media path imposes one
+        # owner or preserves the archive's is a decision about the shipped tree,
+        # and an omitted field would let it be made by not thinking about it.
+        if str(med["chown"]) and ":" not in str(med["chown"]):
+            _die(image_dir, "media.chown must be 'user:group', or '' to keep "
+                            "the archive's own uid/gid")
         media = Media(
             archive=med["archive"],
             strip=str(med.get("strip", "")).strip("/"),
@@ -154,6 +175,7 @@ def load_manifest(image_dir: Path) -> Manifest:
             chown=str(med["chown"]),
             limit_kb=int(med["limit_kb"]),
             max_buckets=int(med["max_buckets"]),
+            min_entries=int(med.get("min_entries", 0)),
             restore_needs_media=bool(med.get("restore_needs_media", False)),
         )
     svc = data.get("service", {})

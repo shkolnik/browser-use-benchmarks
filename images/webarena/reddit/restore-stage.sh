@@ -1,8 +1,7 @@
 #!/bin/sh
-# Build-time restore: initialise a postgres 14 cluster, load the derived dump,
-# and unpack the uploaded media. All of this happens ONCE at build time, so a
-# container boot does no restore work at all — the same property the Magento
-# and gitlab images have.
+# Build-time restore: initialise a postgres 14 cluster and load the derived
+# dump. All of this happens ONCE at build time, so a container boot does no
+# restore work at all — the same property the Magento and gitlab images have.
 set -eux
 
 PGDATA=/var/lib/postgresql/data
@@ -50,22 +49,23 @@ rm -f /tmp/reddit_db.sql
 
 su-exec postgres "$PGBIN/pg_ctl" -D "$PGDATA" -w stop
 
-# Uploaded images — this is what "withimg" in the upstream tar's name means:
-# public/media is 2.4 MB, but public/submission_images beside it is 38.5G.
-mkdir -p /app/public
-tar xf /tmp/reddit_media.tar -C /app/public
-chown -R www-data:www-data /app/public
-
-rm -f /tmp/reddit_db.sql.gz /tmp/reddit_media.tar
+# The uploaded images ("withimg" in the upstream tar's name) never reach this
+# stage: they are bucketed on the CI host and ADDed straight into the final
+# image — see [media] in image.toml. Nothing below reads them, and the app stage
+# already created public/media/cache and public/submission_images as www-data,
+# so there is nothing to prepare for them here either.
 
 # ==========
-# Partition /app into staging buckets, one per final-image layer, so no layer
-# carries the whole 39G tree. Shared implementation:
-# builder/stage-lib/partition-tree.py, reached through the `stagelib` build
-# context.
+# Partition /app into staging buckets, one per final-image layer. Shared
+# implementation: builder/stage-lib/partition-tree.py, reached through the
+# `stagelib` build context.
 # ==========
 BUCKET_LIMIT_KB=$((8 * 1024 * 1024))  # 8G target, under GHCR's ~10G comfort zone
-BUCKET_COUNT=7  # must match the COPY --from lines in the Dockerfile's final stage
+# What is partitioned here is the code tree only — source, vendor, built assets,
+# var — since the 38.5G of uploaded images no longer passes through this stage.
+# That fits one bucket several times over; the second is headroom against a
+# growing tree, and a COPY of an empty bucket is a no-op.
+BUCKET_COUNT=2  # must match the COPY --from lines in the Dockerfile's final stage
 
 # The postgres cluster ships as its own single layer; assert it fits rather
 # than discovering a 10G+ layer at push time.

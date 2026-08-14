@@ -210,7 +210,7 @@ def main(argv):
     print(f'planning media buckets under {root}', flush=True)
     assignments, sizes = partition_tree.plan(root, limit_kb, max_buckets)
     by_bucket = {}
-    for piece, idx in assignments:
+    for piece, idx, _ in assignments:
         by_bucket.setdefault(idx, []).append(os.path.relpath(piece, root))
     print(f'planned in {time.monotonic() - started:.0f}s', flush=True)
 
@@ -224,7 +224,7 @@ def main(argv):
         all_members.extend(members)
         used = sizes[idx] if idx < len(sizes) else 0
         print(f'  bucket-{idx:02d}.tar: {len(members)} entries, '
-              f'{used / 2**20:.1f}G', flush=True)
+              f'{used / 2**30:.1f}G', flush=True)
         plans.append((idx, members))
 
     # Written concurrently because each of these is a million-odd small reads

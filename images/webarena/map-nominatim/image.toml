@@ -28,6 +28,78 @@ urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/osm_dump.ta
 # The import that produced the baked cluster consumed these; nothing at run time
 # does. Shipped anyway so the PBF_PATH/IMPORT_WIKIPEDIA settings name real files
 # and the image can be re-imported from itself. Hash computed at import, as above.
+#
+# Routed through [media] below, so it is never copied into a build stage.
+
+# The project data is inert: two files that enter and leave the build with not a
+# byte changed. Extracting them into the restore stage and COPYing them back out
+# wrote 1.75 GiB three times — into /tmp as the tar, into /nominatim/data as the
+# tree, and again into the final image's layer — for bytes nothing transforms.
+# This section demuxes the archive into bucket tars on the CI host and the final
+# stage ADDs them, which leaves exactly one copy: the one that ships.
+#
+# The Postgres cluster in nominatim_volumes.tar is NOT eligible and keeps the
+# partition-and-COPY machinery. Its restore stage starts the cluster, replays the
+# snapshot's WAL and shuts it down cleanly, so what ships is deliberately not
+# what was extracted — the crash recovery is the point.
+[media]
+archive = "osm_dump.tar"
+# The archive's members are osm_dump/<file>, and dest is /nominatim/data, so the
+# prefix has to go — the same reason restore-stage.sh passed
+# --strip-components=1. Upstream instead extracts with no strip and mounts the
+# result at /nominatim/data, which puts the files at /nominatim/data/osm_dump/…
+# while PBF_PATH says /nominatim/data/us-northeast-latest.osm.pbf; see README.md.
+# strip is the prefix itself, not a count — run_media_prep derives the count from
+# the number of segments.
+#
+# Stripping is safe here in the way it is not for ../../vwa/classifieds: what it
+# promotes to top level is two FILES, not 84,148 item directories, so the
+# unused-bucket padding demux-media.py builds from the top-level directories
+# stays empty and costs nothing. With max_buckets = 1 there is no unused bucket
+# to pad in the first place.
+strip = "osm_dump"
+dest = "/nominatim/data"
+# Not "" — this is not a tree whose split ownership has to survive. It is two
+# data files in one directory, captured from an upstream AMI, so the uid/gid in
+# the headers is an accident of that machine and preserving it verbatim would
+# make what ships depend on it. Today the restore stage extracts and the final
+# stage COPYs them as root, and root:root is what the image ships; naming it
+# pins that regardless of what the headers say.
+#
+# root:root also has no silent-failure mode. ADD --chown does not fail the build
+# on a name it cannot resolve — it lands everything 0:0 and exits clean — and
+# here 0:0 is the intended answer, so the fallback and the success are the same
+# tree. Nothing writes under /nominatim/data at run time (the import never runs),
+# so no service user needs to own it.
+chown = "root:root"
+# 2 GiB: above the 1.749 GiB the two files cost as tar members (payload rounded
+# to 512-byte blocks, plus a header each), so the archive lands in one bucket,
+# and far under both dockerd's heap during the ADD and GHCR's ~10G layer
+# ceiling. The archive is hash-pinned, so this is a fixed size, not a growing one.
+limit_kb = 2097152
+# One. The ceiling is tight on purpose: an unused bucket still gets a tar, and a
+# tar padded from an empty top-level-directory list would have no members at all
+# — which docker does not recognise as an archive, so ADD would drop a literal
+# bucket-NN.tar into /nominatim/data. Sizing the ceiling to what the archive
+# actually needs removes that case instead of relying on padding.
+max_buckets = 1
+# Two, because the archive holds exactly two members once the stripped osm_dump/
+# root is dropped (it has no member of its own — the destination directory
+# already exists in the image). A floor of two is honest rather than useful: it
+# only catches an empty or half-empty archive.
+#
+# What carries the real weight here is not min_entries. This archive is a PINNED
+# DATASET, not a derived artifact, so `download` has already verified its sha256
+# end to end before the demux ever opens it — truncation cannot reach this far.
+# And the two files are named, not just counted: the final stage asserts that
+# PBF_PATH and IMPORT_WIKIPEDIA resolve to files of a plausible size, which is
+# the check restore-stage.sh used to make and a count of two could never make.
+min_entries = 2
+# Nothing in the build reads these files. The restore stage extracts and starts
+# the Postgres cluster; it never touches the project data. /app/config.sh does
+# read PBF_PATH — it exits 1 unless PBF_PATH or PBF_URL is set — but config.sh
+# runs from /app/start.sh at container BOOT, and no build stage runs either.
+restore_needs_media = false
 
 [service]
 # A real geocoding query, not a liveness stub. `smoke` polls this from the HOST,

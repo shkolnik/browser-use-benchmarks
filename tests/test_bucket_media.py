@@ -212,6 +212,35 @@ def test_media_add_lines_match_max_buckets():
             f"{toml.parent.name}: {len(adds)} ADD lines vs "
             f"max_buckets={m.media.max_buckets}")
         assert all(m.media.dest in l for l in adds), "an ADD targets another path"
+        # ADD extracts the archive's own uid/gid only when no --chown is given,
+        # so an empty chown that still emitted one would silently flatten the
+        # ownership the image asked to preserve — and a declared one that got
+        # dropped would land the tree root:root.
+        if m.media.chown:
+            assert all(f"--chown={m.media.chown}" in l for l in adds), (
+                f"{toml.parent.name}: [media].chown is declared but an ADD "
+                f"does not carry it")
+        else:
+            assert not any("--chown" in l for l in adds), (
+                f"{toml.parent.name}: [media].chown is empty — an ADD that "
+                f"carries one overrides the archive's own ownership")
+
+
+def test_every_media_image_declares_an_entry_floor():
+    """Opting into the media path removes the tree from every build stage, and
+    with it every in-build assertion that could have counted it. The floor is
+    what replaces them; an image that declares none has no check on its data at
+    all, and ships an empty media tree green.
+    """
+    from builder.manifest import load_manifest
+    root = Path(__file__).resolve().parents[1]
+    for toml in sorted((root / "images").glob("*/*/image.toml")):
+        m = load_manifest(toml.parent)
+        if not m.media:
+            continue
+        assert m.media.min_entries > 0, (
+            f"{toml.parent.name}: [media] with no min_entries — nothing would "
+            f"notice a truncated or empty archive")
 
 
 # --- concurrency -------------------------------------------------------------
@@ -245,7 +274,10 @@ def test_bucket_tars_are_written_concurrently(tmp_path, monkeypatch):
     for i in range(6):
         write(tmp_path / "root", f"d{i}/f{i}", kb=32)
     state = _overlap_probe(monkeypatch)
-    tars = run(tmp_path, limit_kb=32, max_buckets=6)
+    # 33K, not 32K: a piece is sized as the tar it becomes, so d{i} costs its
+    # own header plus the file's plus 32K of payload — 33,792 bytes, which is
+    # exactly this limit and twice which is not. One piece per bucket.
+    tars = run(tmp_path, limit_kb=33, max_buckets=6)
     assert state["peak"] > 1
     assert len(tars) == 6
 
@@ -258,7 +290,7 @@ def test_bucket_concurrency_is_bounded_by_the_bucket_count(tmp_path, monkeypatch
         write(tmp_path / "root", f"d{i}/f{i}", kb=32)
     monkeypatch.setattr(bm.os, "cpu_count", lambda: 1)
     state = _overlap_probe(monkeypatch)
-    run(tmp_path, limit_kb=32, max_buckets=4)
+    run(tmp_path, limit_kb=33, max_buckets=4)
     assert state["peak"] == 4
 
 

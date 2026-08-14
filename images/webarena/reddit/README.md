@@ -71,9 +71,17 @@ Measured from the upstream container:
 The uploaded images *are* the point of the upstream tar — it is named
 `postmill-populated-exposed-**withimg**`. So the honest expectation is a **~40 GB**
 image, and the savings over upstream's 53 GB come from the unpacked `node_modules`
-and the kitchen-sink base, not from the data. Because of that, the app tree ships
-**partitioned across 7 staging buckets** (`restore-stage.sh`), one COPY layer each,
-exactly as `../shopping` handles its 45 GB of media.
+and the kitchen-sink base, not from the data.
+
+Those images never enter a build stage. `[media]` in `image.toml` routes
+`reddit_media.tar` around the build: the CI host demuxes it straight into
+`.media/bucket-NN.tar` (7 GiB apiece, so the measured 38.5 GB lands ~6 of the 8
+the Dockerfile `ADD`s), and the final stage `ADD`s those into `/app/public/`. The
+archive holds *two* top-level directories, `media/` and `submission_images/`,
+which is why nothing is stripped and the destination is their shared parent. What
+still passes through the restore stage is the code tree alone — source, `vendor`,
+built assets, `var` — partitioned across **2 staging buckets**
+(`restore-stage.sh`), one COPY layer each.
 
 ## Build-time assertions
 

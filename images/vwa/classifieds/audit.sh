@@ -41,13 +41,11 @@ if ! diff -q <(echo "$expected") "$actual" > /dev/null; then
 fi
 echo "audit: app tree matches app-tree.sha256 ($(wc -l < "$actual") files)"
 
-# The photos are data, so they are counted rather than hashed. Floors, not
-# equalities — measured at 84,148 per-item directories and 336,634 files.
-dirs=$(find /staging/*/oc-content/uploads -mindepth 1 -maxdepth 1 -type d | wc -l)
-files=$(find /staging/*/oc-content/uploads -type f | wc -l)
-[ "$dirs" -ge 84000 ] || fail "oc-content/uploads has $dirs item directories, expected >= 84000"
-[ "$files" -ge 330000 ] || fail "oc-content/uploads has $files files, expected >= 330000"
-echo "audit: uploads = $dirs item directories, $files files"
+# The photos are not counted here. They never enter a build stage — the host
+# buckets the archive straight into layers (see [media] in image.toml) — so
+# /staging holds the app tree alone and any count taken here would be 0. Their
+# floor is [media].min_entries, asserted on the host by demux-media.py against
+# the same measurement: 84,148 per-item directories plus 336,634 files.
 
 # ==========
 # 2. The database restored. Pins measured from the booted upstream stack, not

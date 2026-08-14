@@ -28,10 +28,12 @@ ARG SRC_COMMIT=a6a9bbc86f44
 FROM node:${NODE_VERSION}-alpine AS assets
 ARG SRC
 WORKDIR /app
-COPY --from=datasets ${SRC} /tmp/src.tar.gz
-RUN set -eux; \
+# Bind-mounted, not COPYed: the tarball is read once and kept never, so a COPY
+# would only commit it to a layer for the following `rm` to whiteout. The same
+# archive feeds three stages, and none of them ships it.
+RUN --mount=type=bind,from=datasets,source=${SRC},target=/tmp/src.tar.gz \
+    set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
-    rm /tmp/src.tar.gz; \
     apk add --no-cache curl; \
     yarn; \
     yarn run build-prod; \
@@ -44,10 +46,13 @@ RUN set -eux; \
 FROM composer:${COMPOSER_VERSION} AS composer_cache
 ARG SRC
 WORKDIR /app
-COPY --from=datasets ${SRC} /tmp/src.tar.gz
-RUN set -eux; \
+RUN --mount=type=bind,from=datasets,source=${SRC},target=/tmp/src.tar.gz \
+    set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
-    rm /tmp/src.tar.gz; \
+    # Held rather than streamed: composer emits a line per package, and a burst
+    # that size overruns the Actions live-log channel — the dropped flush takes
+    # the surrounding build's live output with it until the burst ends. The
+    # lines are the diagnostic only on failure, which is where they are printed.
     composer install \
         --ignore-platform-reqs \
         --no-autoloader \
@@ -55,7 +60,9 @@ RUN set -eux; \
         --no-dev \
         --no-progress \
         --no-scripts \
-        --prefer-dist
+        --prefer-dist >/tmp/composer.log 2>&1 \
+      || { cat /tmp/composer.log >&2; exit 1; }; \
+    rm -f /tmp/composer.log
 
 # ==============
 # Runtime base — upstream's postmill_php_base, plus the services that upstream
@@ -132,10 +139,9 @@ WORKDIR /app
 FROM runtime AS app
 ARG SRC
 ARG SRC_COMMIT
-COPY --from=datasets ${SRC} /tmp/src.tar.gz
-RUN set -eux; \
+RUN --mount=type=bind,from=datasets,source=${SRC},target=/tmp/src.tar.gz \
+    set -eux; \
     tar xzf /tmp/src.tar.gz --strip-components=1 -C /app; \
-    rm /tmp/src.tar.gz; \
     rm -rf /app/node_modules /app/Dockerfile /app/docker-compose.yml
 
 COPY --from=composer_cache /app/vendor /app/vendor
@@ -170,11 +176,17 @@ RUN set -eux; \
     # `clear_env = yes` would wipe them from the workers even if it did. A
     # booted image proved it — every page 500'd with
     # `Environment variable not found: "APP_BRANCH"`.
+    #
+    # Held rather than streamed, as in the composer_cache stage: the per-package
+    # burst overruns the Actions live-log channel and blanks the build's live
+    # output until it ends. Printed on failure, where it is the diagnostic.
     composer install \
         --apcu-autoloader \
         --classmap-authoritative \
         --no-dev \
-        --prefer-dist; \
+        --prefer-dist >/tmp/composer.log 2>&1 \
+      || { cat /tmp/composer.log >&2; exit 1; }; \
+    rm -f /tmp/composer.log; \
     sed -i "s|^APP_BRANCH=.*|APP_BRANCH=|; s|^APP_VERSION=.*|APP_VERSION=$SRC_COMMIT|" .env; \
     composer dump-env prod; \
     composer clear-cache; \
@@ -186,11 +198,12 @@ RUN set -eux; \
 # Restore — load the derived data into a build-time postgres cluster.
 # =======
 FROM app AS restore
-COPY --from=datasets reddit_db.sql.gz /tmp/reddit_db.sql.gz
-COPY --from=datasets reddit_media.tar /tmp/reddit_media.tar
+# reddit_media.tar is deliberately absent: this stage reads no uploaded image
+# (see [media] in image.toml), so the archive never enters a build stage.
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
-RUN /bin/sh /restore-stage.sh
+RUN --mount=type=bind,from=datasets,source=reddit_db.sql.gz,target=/tmp/reddit_db.sql.gz \
+    /bin/sh /restore-stage.sh
 
 # =======
 # Audit — its own layer so a failed assertion does not re-run the restore.
@@ -204,17 +217,45 @@ RUN /bin/sh /audit.sh
 # media tarballs that produced them.
 # =====
 FROM runtime
-# One layer per staging bucket keeps every pushed layer under ~10G: the app
-# tree is ~39G because public/submission_images is 38.5G of uploaded images.
-# Bucket count must match BUCKET_COUNT in restore-stage.sh.
+# The code tree, one layer per staging bucket. It fits a single bucket now that
+# the uploaded images arrive by the media path below; the second is headroom and
+# a COPY of an empty bucket is a no-op. Count must match BUCKET_COUNT in
+# restore-stage.sh.
 COPY --from=audited /staging/bucket-00/ /app/
 COPY --from=audited /staging/bucket-01/ /app/
-COPY --from=audited /staging/bucket-02/ /app/
-COPY --from=audited /staging/bucket-03/ /app/
-COPY --from=audited /staging/bucket-04/ /app/
-COPY --from=audited /staging/bucket-05/ /app/
-COPY --from=audited /staging/bucket-06/ /app/
 COPY --from=audited /var/lib/postgresql/data /var/lib/postgresql/data
+
+# --- Uploaded images: 38.5G bucketed on the CI host, never in a build stage ---
+# builder/docker.py writes these into .media/, a gitignored subdir of this image
+# dir — which is the default build context, and the only context ADD can extract
+# from (it has no --from). The archive carries both `media/` and
+# `submission_images/`, so the target is their shared parent.
+#
+# Count must match [media].max_buckets in image.toml. Unused buckets carry only
+# directory entries and extract to nothing.
+ADD --chown=www-data:www-data .media/bucket-00.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-01.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-02.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-03.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-04.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-05.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-06.tar /app/public/
+ADD --chown=www-data:www-data .media/bucket-07.tar /app/public/
+
+# Checks DIRECTORIES on purpose — both silent failures here leave a root-owned
+# directory while every file stays www-data-owned:
+#
+#   1. `ADD --chown=<name>` does not fail the build when the name does not
+#      resolve; it lands everything 0:0 root:root and exits clean.
+#   2. `--chown` applies to tar MEMBERS, so a directory existing only implicitly
+#      in a member's path is created by the extractor and never chowned.
+#      The host-side bucketing emits every ancestor explicitly to prevent this.
+#
+# php-fpm runs as www-data and writes thumbnails under public/media/cache, so a
+# root-owned directory here is a runtime failure no build-time assertion sees.
+# -quit stops at the first offender; files are never stat'd.
+RUN bad="$(find /app/public -type d ! -user www-data -print -quit)"; \
+    if [ -n "$bad" ]; then echo "root-owned media dir: $bad" >&2; exit 1; fi
 COPY nginx.conf /etc/nginx/http.d/default.conf
 # The shared supervisor (#73): any service that exits fails the container.
 COPY --from=stagelib run-services.sh /run-services.sh

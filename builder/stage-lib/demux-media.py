@@ -11,7 +11,8 @@ entries already arrive in depth-first order, and depth-first order is exactly
 what the partition wants: fill a bucket until it reaches the limit, then move
 to the next one. There is no plan to compute, so there is nothing to walk.
 
-    python3 demux-media.py <limit_kb> <max_buckets> <strip> <outdir> <part>...
+    python3 demux-media.py <limit_kb> <max_buckets> <min_entries> <strip>
+                           <outdir> <part>...
 
 The parts are read directly rather than through `cat`, so a split archive costs
 no join. Bucket assignment is sequential and never revisits a bucket, which is
@@ -156,7 +157,7 @@ def demux(paths, outdir, strip, limit, max_buckets):
                for i in range(max_buckets)]
 
     idx, used, entries = 0, 0, [0] * max_buckets
-    stack, opened, top_dirs, problems = [], set(), [], {}
+    stack, opened, top_dirs, top_names, problems = [], set(), [], set(), {}
     n, nbytes, started, last = 0, 0, time.monotonic(), time.monotonic()
 
     with tarfile.open(fileobj=stream, mode='r|') as src:
@@ -173,10 +174,15 @@ def demux(paths, outdir, strip, limit, max_buckets):
             if m.isdir():
                 del stack[depth:]
                 stack.append(m)
-                if depth == 0 and not any(d.name == name for d in top_dirs):
+                if depth == 0 and name not in top_names:
                     # By name, because an archive is free to carry a directory
                     # entry more than once and this list is padding: repeats
                     # would inflate an unused bucket without adding anything.
+                    # Through a set, because `strip` decides what counts as top
+                    # level — stripping one level too deep promotes every item
+                    # directory in the tree, and a linear membership test would
+                    # then be quadratic in the whole archive.
+                    top_names.add(name)
                     top_dirs.append(m)
             elif m.isfile() and used and used + entry_blocks(m.size) > limit:
                 # Forward only. One file therefore lands in exactly one bucket,
@@ -210,21 +216,24 @@ def demux(paths, outdir, strip, limit, max_buckets):
                       f'{now - started:.0f}s', flush=True)
                 last = now
 
-    for i in range(max_buckets):
-        if i not in opened:
-            # An unused bucket still needs a tar, and it must not be empty:
-            # docker does not recognise a zero-member tar as an archive, so ADD
-            # copies it verbatim and drops a literal bucket-NN.tar into the
-            # tree. Top-level directories are safe padding — they already appear
-            # in other buckets, they carry their real mode, and re-extracting
-            # one changes nothing.
-            for d in top_dirs:
-                buckets[i].addfile(d)
-                entries[i] += 1
+    unused = [i for i in range(max_buckets) if i not in opened]
+    for i in unused:
+        # An unused bucket still needs a tar, and it must not be empty: docker
+        # does not recognise a zero-member tar as an archive, so ADD copies it
+        # verbatim and drops a literal bucket-NN.tar into the tree. Top-level
+        # directories are safe padding — they already appear in other buckets,
+        # they carry their real mode, and re-extracting one changes nothing.
+        # When there are none to pad with, the refusal below is what fires.
+        for d in top_dirs:
+            buckets[i].addfile(d)
+            entries[i] += 1
     for b in buckets:
         b.close()
     stream.close()
 
+    # Ahead of the sizing check below, which is a question about this image's
+    # max_buckets. What the audit found is a question about the tree itself, and
+    # it is the more useful thing to be told when both are true.
     if problems:
         for cat, p in problems.items():
             print(f"  media audit: {p['n']} x {cat}, e.g. "
@@ -234,15 +243,28 @@ def demux(paths, outdir, strip, limit, max_buckets):
                                      for cat, p in problems.items()))
     if not n:
         raise SystemExit('error: the media archive held no entries')
+    if unused and not top_dirs:
+        # Padding is the only thing keeping an unused bucket from being that
+        # zero-member tar, and there is nothing to pad with when the archive's
+        # top level is all files — which is what `strip` leaves behind when it
+        # points at a directory holding no subdirectories. Refused here rather
+        # than shipped, because the failure is silent downstream: the build is
+        # green and the image carries a tar where the tree should be.
+        raise SystemExit(
+            f'error: {len(unused)} of {max_buckets} buckets went unused and the '
+            f'archive has no top-level directory to pad them with. Lower '
+            f'max_buckets to {len(opened)} — the media path cannot emit an empty '
+            f'bucket, and a padded one is what the ADD lines count on.')
     return n, nbytes, entries, len(opened), time.monotonic() - started
 
 
 def main(argv):
-    limit_kb, max_buckets, strip, outdir = int(argv[1]), int(argv[2]), argv[3], argv[4]
-    parts = argv[5:]
+    limit_kb, max_buckets = int(argv[1]), int(argv[2])
+    min_entries, strip, outdir = int(argv[3]), argv[4], argv[5]
+    parts = argv[6:]
     if not parts:
         raise SystemExit('usage: demux-media.py <limit_kb> <max_buckets> '
-                         '<strip> <outdir> <part>...')
+                         '<min_entries> <strip> <outdir> <part>...')
     os.makedirs(outdir, exist_ok=True)
     print(f'demuxing {len(parts)} archive part(s) into {max_buckets} bucket tars',
           flush=True)
@@ -252,6 +274,13 @@ def main(argv):
         size = os.path.getsize(os.path.join(outdir, f'bucket-{i:02d}.tar'))
         print(f'  bucket-{i:02d}.tar: {entries[i]} entries, {size} bytes',
               flush=True)
+    if n < min_entries:
+        # The last point at which a short archive is visible. Past here the tree
+        # is layers: it never enters a build stage, so no in-build assertion can
+        # count it, and an image missing its photos builds and smokes green.
+        raise SystemExit(f'error: the media archive holds {n} entries, under the '
+                         f'{min_entries} this image declares — it is truncated, '
+                         f'or the wrong archive')
     print(f'media demux passed: {n} entries, {nbytes / 2**30:.1f}G across {used} '
           f'buckets in {secs:.0f}s ({n / secs:,.0f} entries/s)', flush=True)
 

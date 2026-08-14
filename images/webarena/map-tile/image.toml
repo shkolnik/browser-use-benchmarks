@@ -14,6 +14,90 @@ urls = ["https://webarena-map-server-data.s3.us-east-1.amazonaws.com/osm_tile_se
 # Region is us-east-1. The upstream cloud-init's own aws config says us-east-2, which is
 # wrong; this URL is the region that actually serves the object.
 
+# The tile database is inert: 38.4 GiB that would enter and leave the build
+# byte-identical, since nothing between the extract and the final image writes a
+# byte of it. This section routes it around the build entirely — demuxed into
+# bucket tars on the CI host and ADDed straight into the final image — instead of
+# extracting it into a restore stage, partitioning it there and COPYing the same
+# bytes back out, which wrote the whole 38.4 GiB twice.
+#
+# The whole archive moves, so nothing is left for a restore stage to do and there
+# is none. Like the sibling map-osrm, `archive` names an upstream dataset rather
+# than a prepare output: the cluster is usable exactly as it was captured, so
+# there is nothing to derive from it.
+[media]
+archive = "osm_tile_server.tar"
+# The archive's members are projects/ogma3/docker/volumes/osm-data/_data/<cluster>,
+# and dest is where upstream bind-mounts that volume
+# (`--volume=osm-data:/data/database/`), so the whole 6-component prefix comes off.
+# strip is the prefix itself, not a count — run_media_prep derives the count from
+# the number of segments.
+#
+# Neither upstream's 5 nor an earlier version of this image's 4. Upstream strips 5
+# because it extracts into /var/lib/docker/volumes and wants docker's volume layout
+# rebuilt there — but it justifies the number with the
+# 'projects/ogma3/docker/volumes/' prefix, which is only 4 components, so upstream's
+# own tile extraction eats the volume NAME. The three tars in this backend all
+# differ: count per tar, never copy the number from a sibling.
+#
+# Stripping promotes exactly three entries to top level — planet-import-complete,
+# region.poly and the postgres/ directory — so there is a directory to pad an
+# unused bucket with, which is what the demux requires before it will emit one.
+strip = "projects/ogma3/docker/volumes/osm-data/_data"
+# Only the database. There is NO osm-tiles volume in this archive (a full listing
+# is 1,624 entries and every one is under osm-data), and /data/tiles is the
+# rendered-tile cache: the Dockerfile creates it empty and renderer-owned, and the
+# healthcheck's first zoom-0 request is what starts filling it.
+dest = "/data/database"
+# Empty, and this is the field this image cares about most. /data is split two
+# ways: the cluster under postgres/ carries uid/gid 101:103 and the volume root's
+# two files carry 1000:1000, which are exactly postgres:postgres and
+# renderer:renderer in this image (verified with `id` against the base). A single
+# --chown would flatten that split, and a cluster postgres does not own is a
+# cluster postgres will not start. No --chown at all is what makes ADD extract the
+# archive's own uid/gid and mode verbatim — including the 0700 on postgres/, which
+# Postgres equally refuses to start without.
+#
+# Verbatim means NUMERICALLY: buildkit reads the header's uid/gid and ignores its
+# uname/gname, which here say `systemd-resolve` and `junjieh` — the accounts on
+# the machine the tar was captured on. That is the same reason the extract this
+# replaces needed --numeric-owner.
+chown = ""
+# 8 GiB, measured against the archive's own headers with demux-media.py's
+# accounting — a 512-byte header per member plus the payload rounded up to a
+# block, not the payload alone. The 1,622 members cost 38.445 GiB that way and
+# fill 6 buckets, the largest 7.997 GiB, inside GHCR's ~10G comfort zone.
+#
+# Not the 7 GiB ../shopping had to drop to. That ceiling is dockerd's heap during
+# the ADD, which scales with a bucket's ENTRY count; the busiest bucket here holds
+# 846 entries against shopping's millions, so the pressure it guards against does
+# not exist on this tree.
+limit_kb = 8388608
+# A ceiling with headroom, not a target: the measured split fills 6. The two
+# spares still get a tar, padded with the archive's single top-level directory
+# (postgres/) — a member bucket-00 already carries, which re-extracts to the same
+# 0700 postgres-owned directory and changes nothing. An archive whose top level
+# held only files would have nothing to pad with, and the demux refuses that case
+# rather than emitting an empty tar for ADD to drop into /data/database as a
+# literal bucket-NN.tar.
+max_buckets = 8
+# Measured at 1,622: the archive holds 1,624 entries, and the two that make up the
+# stripped root emit no member of their own because /data/database already exists
+# in the image. The floor sits under that rather than on it — what a re-pinned
+# capture of this cluster would legitimately move is its WAL segment count (181
+# entries today), and a floor tracking the measurement exactly would turn that
+# into a build failure — while staying far above anything an empty, truncated or
+# simply wrong archive would carry.
+#
+# It is a tripwire, not the real check. This archive is a PINNED DATASET, so
+# `download` has verified its sha256 end to end before the demux opens it;
+# truncation cannot reach this far. The real checks are the four in the final
+# stage, which is the only place left that sees what shipped.
+min_entries = 1400
+# There is no restore stage to read it: the media IS the whole dataset, and the
+# only thing that opens the cluster is Postgres at run time.
+restore_needs_media = false
+
 [service]
 # Upstream's own readiness check (webarena-map-backend-boot-init.yaml): a real rendered
 # tile, not a liveness stub. The `smoke` step polls this BEFORE push, so an image that

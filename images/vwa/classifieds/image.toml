@@ -40,6 +40,54 @@ urls = [
 script = "derive-backup.sh"
 outputs = ["classifieds_uploads.tar"]
 
+# oc-content/uploads is inert: 73 GB of item photos across 336,634 files that
+# enter and leave the build byte-identical. This section routes them around the
+# build entirely — bucketed into tars on the CI host, ADDed straight into the
+# final image — rather than extracted into the restore stage and partitioned
+# back out entry by entry, which is the most expensive phase of this build and
+# scales with entry count rather than bytes.
+#
+# Only the photos move. The 105 MB app tree (Osclass's own release zip plus the
+# committed patch) is produced by the build and keeps the partition-and-COPY
+# machinery.
+[media]
+archive = "classifieds_uploads.tar"
+# NOT strip = "uploads", even though derive-backup.sh writes the archive as
+# `tar cf ... -C /usr/src/myapp/oc-content uploads` and stripping would be
+# legal. dest is the directory the members are relative to, and with the prefix
+# stripped the archive's top level becomes the 84,148 per-item directories:
+# demux-media.py keeps every top-level directory as padding for unused buckets
+# and dedupes that list by scanning it, which is 84,148 entries of padding per
+# unused bucket and a quadratic scan to build. Rooting one level higher leaves
+# exactly one top-level entry, `uploads`, and the members still land in
+# oc-content/uploads because that is what their own paths say.
+strip = ""
+dest = "/usr/src/myapp/oc-content"
+# php -S runs as www-data (entrypoint.sh) and Osclass writes new item photos
+# under uploads/ at runtime, so the tree must arrive owned by the server user —
+# which is also what `chown -R www-data:www-data /staging` gives the rest of the
+# app tree.
+chown = "www-data:www-data"
+# 7 GiB, the same ceiling ../../webarena/shopping's buckets use: dockerd's own
+# heap scales with the entry count of a single bucket, and 8G was enough to OOM
+# a 16 GiB runner. Under GHCR's ~10G comfortable layer ceiling either way.
+limit_kb = 7340032
+# A ceiling with headroom, not a target: 73 GB at 7 GiB a bucket lands ~11, and
+# demux only ever moves forward so it wastes at most one photo per boundary.
+# Unused buckets still get a tar — an empty one would not be recognised as an
+# archive and would be ADDed verbatim as a file.
+max_buckets = 14
+# A floor on the photos, in the last place they can still be counted: audit.sh
+# used to take this over /staging, and cannot now that the tree never enters a
+# stage. Measured at 84,148 per-item directories and 336,634 files; a floor, not
+# an equality, and well under both.
+min_entries = 400000
+# The restore stage reads no photo: it loads the seed dump and partitions the
+# app tree, and the app-tree hash it is audited against excludes
+# oc-content/uploads by path. Stated explicitly because getting it wrong is a
+# silent runtime failure rather than a build one.
+restore_needs_media = false
+
 [service]
 # The PUBLISHED address the smoke gate reaches this service at — here it
 # happens to match the Dockerfile's in-container HEALTHCHECK probe (both are

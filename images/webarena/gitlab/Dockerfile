@@ -8,12 +8,20 @@
 # backup tar never enters a shipped layer.
 
 FROM gitlab/gitlab-ce:15.7.5-ce.0 AS restore
-COPY --from=datasets etc-gitlab.tar.gz /tmp/etc-gitlab.tar.gz
-COPY --from=datasets webarena_gitlab_backup.tar /var/opt/gitlab/backups/
 COPY --from=stagelib partition-tree.py /partition-tree.py
 COPY restore-stage.sh /restore-stage.sh
-RUN tar xzf /tmp/etc-gitlab.tar.gz -C / \
-    && chown git:git /var/opt/gitlab/backups/*.tar \
+# Bind-mounted rather than COPYed: the 19G backup tar is read once, by `tar -xf`
+# inside gitlab-backup, and never shipped. A COPY writes all of it into this
+# stage's layer, where deleting it afterwards only records a whiteout.
+#
+# No `chown git:git` goes with it any more, and none is needed. The mount lands
+# the archive root-owned 0644 (verified against buildkit), gitlab-backup opens
+# it as git, and read permission is all it wants: Backup::Manager#unpack does
+# File.exist? then `tar -xf`, extracting into the backups DIRECTORY, which is
+# still writable. Nothing in the restore path writes to or unlinks the archive.
+RUN --mount=type=bind,from=datasets,source=etc-gitlab.tar.gz,target=/tmp/etc-gitlab.tar.gz \
+    --mount=type=bind,from=datasets,source=webarena_gitlab_backup.tar,target=/var/opt/gitlab/backups/webarena_gitlab_backup.tar \
+    tar xzf /tmp/etc-gitlab.tar.gz -C / \
     && /bin/bash /restore-stage.sh
 
 FROM gitlab/gitlab-ce:15.7.5-ce.0

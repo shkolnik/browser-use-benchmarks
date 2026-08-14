@@ -7,8 +7,10 @@
 # buckets small enough to COPY as <=10G layers.
 set -euo pipefail
 
+# osm_dump.tar is absent from this stage on purpose: the project data is inert,
+# so it takes the media path and is ADDed straight into the final image. Only
+# the cluster is restored here, because only the cluster is transformed.
 TAR=/tmp/nominatim_volumes.tar
-DUMP_TAR=/tmp/osm_dump.tar
 PGDATA=/var/lib/postgresql/14/main
 BUCKET_LIMIT_KB=$((8 * 1024 * 1024))  # 8G target keeps layers under GHCR's ~10G comfort zone
 BUCKET_COUNT=6  # must match the COPY --from lines in the Dockerfile's final stage
@@ -29,8 +31,16 @@ echo "=== extract the upstream Postgres cluster ==="
 # The member argument is load-bearing, not cosmetic. This archive holds TWO
 # volumes: nominatim-data (34.8G, the cluster) and nominatim-flatnode (87G,
 # osm2pgsql's node cache). Naming the member extracts only the first — see
-# README.md for why the flatnode file is deliberately not shipped. tar still
-# reads all 116G to find the members, but writes only the 34.8G we keep.
+# README.md for why the flatnode file is deliberately not shipped.
+#
+# It costs the 34.8G, not the 116G, and that depends on $TAR BEING A FILE. The
+# two volumes do not interleave: walking the archive's header chain puts every
+# nominatim-data member in the first 34.77 GiB and the whole flatnode volume in
+# three members after it. tar lseeks over a member it is not extracting when the
+# archive is seekable, and only reads through it when it is not — measured on an
+# 8G archive whose tail is one huge member, 0.002s via -f against 3.4s through a
+# pipe. Feeding this through `cat` (joining split parts, say) would therefore
+# put the 81G back on the clock without changing a visible thing.
 #
 # --numeric-owner is load-bearing too: the archive carries uid/gid 101:103,
 # which is exactly postgres:postgres inside this image (verified with `id`).
@@ -43,9 +53,18 @@ rm -rf "$PGDATA"
 # start on, and the ownership assertion further down is what would have caught
 # it — ten minutes into a build, after a two-hour download.
 install -d -o postgres -g postgres -m 700 "$PGDATA"
+# --checkpoint so the phase is not mute. 34.8G is minutes of a build during which
+# nothing else prints, and a silent stage is indistinguishable from a hung one —
+# which is the state this image is most often suspected of. A checkpoint counts
+# RECORDS, and a record is the blocking factor's 20 x 512B, so 100000 of them is
+# ~1.02GB and the extract reports about thirty times. %T is tar's own progress
+# (bytes, human size and rate); %d is seconds elapsed.
 tar --numeric-owner -C "$PGDATA" --strip-components=7 -xf "$TAR" \
+    --checkpoint=100000 --checkpoint-action=echo='  restore: extract %T after %ds' \
     projects/metis2/docker/docker/volumes/nominatim-data
-rm -f "$TAR"
+# No `rm` here, and none is wanted: $TAR is a read-only bind mount of the
+# datasets context, so it occupies no space in this stage to reclaim, and
+# unlinking a mount point fails with the archive still in use.
 
 [ -f "$PGDATA/PG_VERSION" ] || { echo "restore: $PGDATA/PG_VERSION missing — tar layout changed" >&2; exit 1; }
 
@@ -55,24 +74,6 @@ rm -f "$TAR"
 # it is the documented recovery for a copied data directory, and it is safe here
 # precisely because nothing is running: this is a build stage with no postmaster.
 rm -f "$PGDATA/postmaster.pid"
-
-echo "=== unpack the Nominatim project data (osm_dump) ==="
-# --strip-components=1 removes the archive's own osm_dump/ prefix, so the two
-# files land at the paths upstream's env vars name: /nominatim/data/…
-#
-# Upstream extracts this tar with NO strip into /opt/osm_dump and then mounts
-# that at /nominatim/data, which puts the files at /nominatim/data/osm_dump/…
-# while PBF_PATH says /nominatim/data/us-northeast-latest.osm.pbf. That path
-# does not exist upstream. It never bites, because the only consumer is
-# init.sh, which never runs once the cluster is imported — but it means the
-# upstream setting cannot be copied verbatim and called verified. Stripping the
-# prefix makes the documented paths resolve. See README.md.
-mkdir -p /nominatim/data
-tar -C /nominatim/data --strip-components=1 -xf "$DUMP_TAR"
-rm -f "$DUMP_TAR"
-for f in us-northeast-latest.osm.pbf wikimedia-importance.sql.gz; do
-  [ -f "/nominatim/data/$f" ] || { echo "restore: /nominatim/data/$f missing — osm_dump layout changed" >&2; exit 1; }
-done
 
 echo "=== validate: structure ==="
 # A Postgres cluster only starts under its own major version, and this base
