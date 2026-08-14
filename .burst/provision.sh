@@ -118,6 +118,23 @@ WantedBy=multi-user.target
 EOF
 systemctl enable burst-swap.service
 
+# --- SSM agent: the only way to look at a runner that has gone quiet ---
+# Debian's cloud image ships no amazon-ssm-agent (Amazon Linux and Ubuntu do),
+# so without this a wedged job can only be diagnosed from whatever it managed
+# to print — and a job wedges precisely when it stops printing. `aws ec2
+# get-console-output` still works agentless, but it carries kernel messages
+# only, so it can rule out an OOM kill and nothing above it.
+#
+# Needs AmazonSSMManagedInstanceCore on the instance role to register; without
+# it the agent runs and stays invisible, which fails closed and costs nothing.
+#
+# Region-pinned to match base_ami in burst.toml, which is us-east-2-specific.
+curl -fsSL --max-time 120 -o /tmp/amazon-ssm-agent.deb \
+  https://s3.us-east-2.amazonaws.com/amazon-ssm-us-east-2/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i /tmp/amazon-ssm-agent.deb
+rm -f /tmp/amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent
+
 # Fail the bake here rather than the first job: an AMI that cannot build is
 # worth catching while the builder is still running. These also print the exact
 # versions this AMI froze, which is the only record of them.
@@ -130,3 +147,4 @@ systemctl is-enabled docker
 # delivered by user-data at launch and does not exist during the bake, so
 # verify would fail the build over a Before= reference that is correct.
 systemctl is-enabled burst-swap.service
+systemctl is-enabled amazon-ssm-agent
