@@ -16,6 +16,25 @@ def run(cmd: list[str]) -> None:
     if subprocess.run(cmd).returncode != 0:
         raise SystemExit(f"error: command failed: {' '.join(cmd)}")
 
+def run_piped(src: list[str], dst: list[str]) -> None:
+    """`src | dst`, failing the build if either end does.
+
+    A shell would report only the right-hand status by default, which is the
+    half that stays 0 when the producer dies mid-stream — a truncated archive
+    extracting cleanly up to the cut.
+    """
+    print("+ " + " ".join(src) + " | " + " ".join(dst))
+    producer = subprocess.Popen(src, stdout=subprocess.PIPE)
+    consumer = subprocess.Popen(dst, stdin=producer.stdout)
+    # Only the consumer should hold the read end, so the producer sees EPIPE and
+    # exits if the consumer dies first rather than blocking on a full pipe.
+    producer.stdout.close()
+    consumer_rc, producer_rc = consumer.wait(), producer.wait()
+    if producer_rc != 0 or consumer_rc != 0:
+        raise SystemExit(f"error: command failed "
+                         f"({' '.join(src)} -> {producer_rc}, "
+                         f"{' '.join(dst)} -> {consumer_rc})")
+
 def log_resources(phase: str, path: Path, log=print) -> None:
     """One JSONL reading of memory, swap and free disk at a phase boundary.
 
@@ -152,12 +171,33 @@ def prepare_inputs_digest(m: Manifest) -> str | None:
     lines = sorted(f"{ds.filename}:{ds.sha256}" for ds in pins)
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
+def output_paths(datasets_dir: Path, name: str) -> list[Path]:
+    """The files a prepare output actually landed as: itself, or its parts.
+
+    Registry layers over ~10G are refused, so a large output ships to the
+    derived cache split into `<name>.part-NN` and arrives that way on a cache
+    hit. image.toml names the whole thing and this resolves how it turned up,
+    which keeps the part count — a function of the size, not of the recipe —
+    out of a static list.
+
+    Ordered by name, which is the split order: `split -d` pads the suffix, so
+    lexicographic and numeric agree below 100 parts. Beyond that the suffix
+    widens and a misordered join fails the extract rather than corrupting it.
+    """
+    whole = datasets_dir / name
+    if whole.is_file():
+        return [whole]
+    return sorted(datasets_dir.glob(name + ".part-*"))
+
 def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
     script_bytes = (ref.path / m.prepare.script).read_bytes()
     return {
         "script": m.prepare.script,
         "script_sha256": hashlib.sha256(script_bytes).hexdigest(),
-        "outputs": {o: (datasets_dir / o).stat().st_size for o in m.prepare.outputs},
+        # Summed, so an output fingerprints the same whether it arrived whole
+        # from a derive or split from the cache.
+        "outputs": {o: sum(p.stat().st_size for p in output_paths(datasets_dir, o))
+                    for o in m.prepare.outputs},
         # Without this the artifacts survive a pin change untouched: the script
         # is unchanged, the sizes are unchanged, so the derive is skipped and
         # the build silently uses data derived from the previous upstream tar.
@@ -169,7 +209,7 @@ def prepare_fingerprint(ref: ImageRef, m: Manifest, datasets_dir: Path) -> dict:
 
 def prepare_reuse_check(ref: ImageRef, m: Manifest, datasets_dir: Path) -> str | None:
     """None if the cached artifacts may be reused, else why they may not be."""
-    missing = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
+    missing = [o for o in m.prepare.outputs if not output_paths(datasets_dir, o)]
     if missing:
         return f"missing: {', '.join(missing)}"
     stamp = prepare_stamp_path(datasets_dir, ref)
@@ -221,7 +261,7 @@ def run_prepare(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path) -
     proc = subprocess.run(["/bin/bash", m.prepare.script], cwd=ref.path, env=env)
     if proc.returncode != 0:
         raise SystemExit(f"error: prepare script failed for {ref.name}")
-    still = [o for o in m.prepare.outputs if not (datasets_dir / o).is_file()]
+    still = [o for o in m.prepare.outputs if not output_paths(datasets_dir, o)]
     if still:
         raise SystemExit(
             f"error: prepare for {ref.name} did not produce: {', '.join(still)}")
@@ -259,9 +299,10 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
     """
     media, out = m.media, media_dir(ref)
     work = media_work_dir(datasets_dir, ref)
-    archive = datasets_dir / media.archive
-    if not archive.is_file():
-        raise SystemExit(f"error: {archive} not found — prepare should have left it")
+    parts = output_paths(datasets_dir, media.archive)
+    if not parts:
+        raise SystemExit(f"error: {datasets_dir / media.archive} not found "
+                         f"(nor its parts) — prepare should have left it")
 
     shutil.rmtree(out, ignore_errors=True)
     shutil.rmtree(work, ignore_errors=True)
@@ -271,7 +312,13 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
     # A 45 GiB extract of small files is mute for its whole run without this,
     # which reads exactly like a hang. A tar record is 10240 bytes, so 100000
     # records is a line per ~1 GiB, carrying bytes moved and the rate.
-    extract = ["tar", "xf", str(archive), "-C", str(work),
+    #
+    # Read from stdin rather than by name, so a split archive is joined in the
+    # pipe. Writing the parts back out as one file first would cost a full read
+    # and a full write of the whole archive, plus a second copy of it on the
+    # disk this workload is already bound by — for bytes whose only consumer is
+    # the extract on the other side of the join.
+    extract = ["tar", "x", "-C", str(work),
                "--checkpoint=100000",
                "--checkpoint-action=echo=  media extract: %T after %ds"]
     if media.strip:
@@ -279,7 +326,7 @@ def run_media_prep(ref: ImageRef, m: Manifest, datasets_dir: Path,
         # rather than making each image state a number that has to stay in sync
         # with a path it already declares.
         extract += [f"--strip-components={len(media.strip.split('/'))}", media.strip]
-    run(extract)
+    run_piped(["cat", *(str(p) for p in parts)], extract)
 
     run(["python3", str(repo_root / "builder" / "stage-lib" / "bucket-media.py"),
          str(media.limit_kb), str(media.max_buckets), str(work), str(out)])

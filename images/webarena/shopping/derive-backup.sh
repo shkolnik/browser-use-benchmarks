@@ -60,26 +60,19 @@ assert_dump_complete() {
   echo "derive: $1 completion trailer present"
 }
 
-# Concatenating ~45G of parts takes minutes and a single `cat part-* > out`
-# says nothing while it runs. Appending part by part costs nothing and puts a
-# line in the log per 8G, which is the difference between a slow phase and an
-# apparently hung job.
-reassemble_outputs() {
-  local out="$DATASETS_DIR/shopping_media.tar" n=0
-  local parts=("$DATASETS_DIR"/shopping_media.tar.part-*)
-  : > "$out"
-  for part in "${parts[@]}"; do
-    n=$((n + 1))
-    echo "derive: reassembling $(basename "$part") ($n/${#parts[@]}) into shopping_media.tar"
-    cat "$part" >> "$out"
-  done
-  echo "derive: reassembled shopping_media.tar ($(stat -c%s "$out") bytes)"
-  rm -f "$DATASETS_DIR"/shopping_media.tar.part-*
-}
-
 echo "=== checking derived-inputs cache: $CACHE ==="
 if dcache_pull "$CACHE" "$DATASETS_DIR"; then
-  reassemble_outputs
+  # The media parts are left exactly as they arrived. Joining them into
+  # shopping_media.tar here would read and write ~45G to produce a file whose
+  # only reader joins it back apart; builder/docker.py streams the parts
+  # straight into the extract instead. Nothing else consumes the archive.
+  #
+  # A whole archive from an earlier derive on a persistent runner's datasets
+  # cache would otherwise sit beside the parts, and the reader takes the whole
+  # file when both are present — i.e. these parts would be pulled and ignored.
+  rm -f "$DATASETS_DIR/shopping_media.tar"
+  media_parts=("$DATASETS_DIR"/shopping_media.tar.part-*)
+  echo "derive: media arrived as ${#media_parts[@]} parts, left split"
   assert_dump_complete shopping_db.sql.gz
   echo "derive: cache hit ($DCACHE_HIT_FORMAT), outputs extracted"
   exit 0
@@ -147,6 +140,9 @@ docker cp shopping-derive:/tmp/shopping_db.sql.gz "$DATASETS_DIR/"
 assert_dump_complete shopping_db.sql.gz
 docker exec shopping-derive tar cf /tmp/shopping_media.tar -C /var/www/magento2/pub media
 docker cp shopping-derive:/tmp/shopping_media.tar "$DATASETS_DIR/"
+# The other half of the rule above: one representation of the archive, never
+# both. These would be parts of a previous revision's media tar.
+rm -f "$DATASETS_DIR"/shopping_media.tar.part-*
 docker cp shopping-derive:/var/www/magento2/app/etc/env.php "$DATASETS_DIR/shopping_env.php"
 docker rm -f shopping-derive
 trap - EXIT
