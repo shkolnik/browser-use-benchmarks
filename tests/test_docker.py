@@ -758,11 +758,17 @@ def test_log_resources_emits_one_jsonl_reading(tmp_path):
     assert r["swap_used_mb"] >= 0
 
 
-def test_log_resources_survives_an_unreadable_path(tmp_path):
-    # Instrumentation must never be what fails a build: a path that has gone
-    # away between phases still yields a line, with the disk fields nulled.
+def test_log_resources_reads_disk_for_a_path_that_does_not_exist_yet(tmp_path):
+    # The datasets dir does not exist until something writes to it, so the
+    # :start reading — the one that says what the job began with — asks about a
+    # path that is not there. Free space belongs to the filesystem, so this must
+    # still produce real numbers rather than the nulls it would get from statvfs.
     lines = []
-    log_resources("gone", tmp_path / "does-not-exist", log=lines.append)
+    log_resources("start", tmp_path / "not" / "created" / "yet", log=lines.append)
     r = json.loads(lines[0])
-    assert r["disk_free_gb"] is None and r["disk_total_gb"] is None
-    assert r["mem_total_mb"] > 0
+    assert r["disk_total_gb"] >= r["disk_free_gb"] >= 0
+    assert r["disk_total_gb"] > 0
+    # Same filesystem as the ancestor that does exist, so the same reading.
+    same = []
+    log_resources("start", tmp_path, log=same.append)
+    assert json.loads(same[0])["disk_total_gb"] == r["disk_total_gb"]

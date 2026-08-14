@@ -24,8 +24,8 @@ def log_resources(phase: str, path: Path, log=print) -> None:
     ephemeral runner that held them is gone. Emitted in-stream because the log
     already timestamps every line.
 
-    Best-effort: a missing /proc or an unreadable path degrades to nulls rather
-    than failing a build over its own instrumentation.
+    Best-effort: a missing /proc degrades to nulls rather than failing a build
+    over its own instrumentation.
     """
     mem = {}
     try:
@@ -34,10 +34,18 @@ def log_resources(phase: str, path: Path, log=print) -> None:
             mem[key] = int(value.split()[0])  # kB
     except (OSError, ValueError, IndexError):
         pass
-    try:
-        disk = shutil.disk_usage(path)
-    except OSError:
-        disk = None
+    # statvfs needs a path that exists, and the datasets dir does not until
+    # something writes to it — so the reading at :start, the one that says what
+    # the job began with, is exactly the one that would come back null. Free
+    # space is a property of the filesystem, not the directory, so the nearest
+    # existing ancestor answers the same question.
+    disk = None
+    for candidate in (path.resolve(), *path.resolve().parents):
+        try:
+            disk = shutil.disk_usage(candidate)
+            break
+        except OSError:
+            continue
     swap_total, swap_free = mem.get("SwapTotal"), mem.get("SwapFree")
     log(json.dumps({
         "metric": "resources",
