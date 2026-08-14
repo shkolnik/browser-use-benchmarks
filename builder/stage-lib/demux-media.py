@@ -29,6 +29,8 @@ import sys
 import tarfile
 import time
 
+BLOCK = 512
+
 
 class Parts:
     """The parts read end to end, as one stream. What `cat a b c |` is.
@@ -71,6 +73,17 @@ def strip_prefix(name, strip):
     depth = len(strip.split('/'))
     parts = name.split('/')
     return '/'.join(parts[depth:])
+
+
+def entry_blocks(size):
+    """What one member costs a tar: its header, plus the payload padded out.
+
+    limit_kb is sized against dockerd's heap while the bucket is ADDed, so the
+    ceiling has to be measured in what the file will hold. On a tree of
+    millions of small entries the 512-byte headers and the padding are hundreds
+    of megabytes a bucket — enough to overshoot the limit outright.
+    """
+    return BLOCK + (size + BLOCK - 1) // BLOCK * BLOCK
 
 
 def record(problems, category, detail):
@@ -165,7 +178,7 @@ def demux(paths, outdir, strip, limit, max_buckets):
                     # entry more than once and this list is padding: repeats
                     # would inflate an unused bucket without adding anything.
                     top_dirs.append(m)
-            elif m.isfile() and used and used + m.size > limit:
+            elif m.isfile() and used and used + entry_blocks(m.size) > limit:
                 # Forward only. One file therefore lands in exactly one bucket,
                 # and depth-first order means the next bucket resumes where this
                 # one stopped rather than interleaving unrelated subtrees.
@@ -185,7 +198,7 @@ def demux(paths, outdir, strip, limit, max_buckets):
                     entries[idx] += 1
             buckets[idx].addfile(m, src.extractfile(m) if m.isreg() else None)
             entries[idx] += 1
-            used += m.size
+            used += entry_blocks(m.size)
             n += 1
             nbytes += m.size
             now = time.monotonic()

@@ -303,3 +303,22 @@ def test_an_empty_archive_is_refused(tmp_path):
     out.mkdir()
     with pytest.raises(SystemExit, match="no entries"):
         dm.demux([str(src)], str(out), "media", 1024 * 1024, 3)
+
+
+def test_a_bucket_tar_stays_under_the_limit(tmp_path):
+    # The limit is sized against dockerd's heap while the bucket is ADDed, so
+    # it has to bound the FILE. Counting payload alone ignores a 512-byte header
+    # per entry and the padding to a 512 boundary, which on a tree of millions
+    # of small files is hundreds of megabytes a bucket — over the ceiling.
+    limit = 64 * 1024
+    src = build_archive(tmp_path / "media.tar",
+                        [(f"cache/{i // 16}/img-{i:03d}.jpg", 700) for i in range(256)])
+    out = tmp_path / "out"
+    out.mkdir()
+    _, _, _, used, _ = dm.demux([str(src)], str(out), "media", limit, 10)
+
+    assert used > 1, "the limit must force a roll, or this proves nothing"
+    for i in range(used):
+        size = os.path.getsize(out / f"bucket-{i:02d}.tar")
+        # tar closes with two zero blocks and pads to its 10240-byte record.
+        assert size - 10240 <= limit, f"bucket-{i:02d} is {size} bytes, over {limit}"
