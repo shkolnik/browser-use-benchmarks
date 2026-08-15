@@ -154,9 +154,9 @@ explanations belong here instead, with the script keeping a pointer.
   only `burst`-labeled jobs are counted.
 - **`timeout-minutes: 300` stays.** Confirmed fine by the burst side, which has its own TTL kill.
 
-## Before the first live run
+## What each side owns
 
-Owned by this repo and done: `burst.toml` carries the sizing above as `volume_gb = 750` with
+Owned by this repo: `burst.toml` carries the sizing above as `volume_gb = 750` with
 `volume_iops` / `volume_throughput_mbps` raised off gp3's baseline (125 MB/s would be over an hour
 of pure write time for a 500 GiB job), a pinned `base_ami`, and a `provision` script installing
 docker plus the buildx and compose plugins that `bin/build` needs. burst's own
@@ -166,6 +166,7 @@ documents what a job may rely on: one gp3 root volume holding both the workspace
 that cannot fit.
 
 Owned by the burst operator: a PAT with Administration read/write on this repo, the fork-approval
-repo setting verified, and the first `burst bake`. Until then, jobs labeled `burst` simply sit
-queued — which is also why this branch should not land on `main`: merging it would leave every push
-to `main` queued behind a runner that does not exist yet.
+repo setting verified, and a baked image. Nothing in this repo boots a runner — a push to `main`
+that touches a build input queues its jobs and they wait, however long that is, until the operator's
+fleet supplies slots for them. A run of the full matrix needs more slots than the vCPU quota allows
+at once, so it is supplied in waves.

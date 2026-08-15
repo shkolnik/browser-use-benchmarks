@@ -128,13 +128,15 @@ jobs:
           # deleting its exclude line. Everything else builds on push and
           # reports commit status.
           #
-          # --by-cost, because this list becomes the matrix and GitHub queues
-          # matrix jobs in array order. The fleet has more images than the
-          # vCPU quota has runner slots, so the tail of the array waits for
-          # earlier jobs to finish and hand back their slot; the run is over
-          # when the last of those finishes. Alphabetical put the 0-minute
-          # image first and a 70-minute one tenth. Longest-first is the
-          # standard fix and costs nothing but the order of the array.
+          # --by-cost orders this list longest-first. That is a cost signal
+          # and not a schedule: the fleet has more images than the vCPU quota
+          # has runner slots, but every matrix job carries the same
+          # [self-hosted, burst] label, so a registering runner claims
+          # whichever queued job the scheduler hands it — array position does
+          # not decide who starts. Kept because it costs nothing but the order
+          # of the array, and because it is where a runner supply that booted
+          # per named job would read priority from. order_by_cost has the
+          # measured cost of losing the race.
           enabled=$(bin/build list "$target" --by-cost | cut -f1 \
             | grep -v '^probe/')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
