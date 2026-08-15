@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured.
+build_minutes = 70
+
 # The WebArena wikipedia service is a kiwix-serve appliance over one ZIM
 # archive — no database, no application code, so unlike shopping/reddit/gitlab
 # there is nothing here whose provenance needs rebuilding. The upstream ZIM is

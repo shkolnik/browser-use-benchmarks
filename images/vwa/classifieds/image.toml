@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured.
+build_minutes = 62
+
 # Two datasets, and — as with ../../webarena/reddit — the split matters:
 # 1. the upstream compose zip contributes DATA (the seed dump) and the reset
 #    script, both hash-pinned;

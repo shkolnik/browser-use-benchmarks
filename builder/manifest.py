@@ -82,6 +82,16 @@ class Manifest:
     source: Source = Source(kind="build")
     prepare: Prepare | None = None
     media: Media | None = None
+    # Roughly how long a cold build of this image takes, used only to order the
+    # CI matrix longest-first. Nothing depends on it being accurate: a wrong
+    # number costs queue position and never correctness, so it is a hint to
+    # keep roughly right rather than a figure to maintain.
+    #
+    # None means "not measured", and sorts AHEAD of every known cost rather
+    # than behind. The two errors are not symmetric — a short image scheduled
+    # early wastes one slot for a few minutes, while a long image scheduled
+    # last extends the whole run by its own duration.
+    build_minutes: int | None = None
 
 def _die(path: Path, msg: str):
     raise SystemExit(f"error: {path / 'image.toml'}: {msg}")
@@ -178,6 +188,9 @@ def load_manifest(image_dir: Path) -> Manifest:
             min_entries=int(med.get("min_entries", 0)),
             restore_needs_media=bool(med.get("restore_needs_media", False)),
         )
+    minutes = data.get("build_minutes")
+    if minutes is not None and (not isinstance(minutes, int) or minutes < 0):
+        _die(image_dir, f"build_minutes must be a non-negative integer, got {minutes!r}")
     svc = data.get("service", {})
     if "healthcheck_timeout_s" in svc:
         _die(image_dir,
@@ -194,4 +207,5 @@ def load_manifest(image_dir: Path) -> Manifest:
         source=Source(kind=kind, dataset=src.get("dataset"), tag=src.get("tag")),
         prepare=prepare,
         media=media,
+        build_minutes=minutes,
     )

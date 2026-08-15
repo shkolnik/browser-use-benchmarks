@@ -122,7 +122,15 @@ jobs:
           # to a provenance-clear build are excluded below; enabling one =
           # deleting its exclude line. Everything else builds on push and
           # reports commit status.
-          enabled=$(bin/build list "$target" | cut -f1 \
+          #
+          # --by-cost, because this list becomes the matrix and GitHub queues
+          # matrix jobs in array order. The fleet has more images than the
+          # vCPU quota has runner slots, so the tail of the array waits for
+          # earlier jobs to finish and hand back their slot; the run is over
+          # when the last of those finishes. Alphabetical put the 0-minute
+          # image first and a 70-minute one tenth. Longest-first is the
+          # standard fix and costs nothing but the order of the array.
+          enabled=$(bin/build list "$target" --by-cost | cut -f1 \
             | grep -v '^probe/')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 

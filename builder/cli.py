@@ -1,6 +1,6 @@
 import argparse
 from pathlib import Path
-from builder.discover import find_images
+from builder.discover import find_images, order_by_cost
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -14,6 +14,11 @@ def main(argv=None) -> int:
         sp.add_argument("target", help="all, <benchmark>, or <benchmark>/<service>")
         sp.add_argument("--registry", default="ghcr.io/shkolnik")
         sp.add_argument("--datasets-dir", type=Path, default=None)
+        if name == "list":
+            sp.add_argument(
+                "--by-cost", action="store_true",
+                help="order longest build first (CI matrix order); default is "
+                     "by name, which is what a human reading the list wants")
         if name == "download":
             sp.add_argument(
                 "--prepare-inputs", action="store_true",
@@ -23,6 +28,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     refs = find_images(repo_root(), args.target)
     if args.cmd == "list":
+        if args.by_cost:
+            refs = order_by_cost(refs)
         for r in refs:
             print(f"{r.benchmark}/{r.service}\t{r.name}")
         return 0

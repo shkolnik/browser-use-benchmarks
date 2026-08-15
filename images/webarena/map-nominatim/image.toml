@@ -1,3 +1,9 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Estimated — no green build to measure yet. It reached the
+# media audit 38 minutes in before failing there.
+build_minutes = 45
+
 # WebArena map backend — Nominatim geocoding, served from a baked Postgres cluster.
 # Provenance, the flatnode decision, and the upstream-yaml divergences: README.md.
 

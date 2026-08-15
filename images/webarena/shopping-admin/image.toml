@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured.
+build_minutes = 5
+
 [[datasets]]
 filename = "shopping_admin_final_0719.tar"
 sha256 = "ad607557a79f1bacf83c4661730802bbedc6bcbbf15078352ae59bcec74182b8"

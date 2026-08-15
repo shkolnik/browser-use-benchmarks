@@ -1,3 +1,9 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured under a minute: this image is a docker-save load
+# and re-tag, with no build stage at all.
+build_minutes = 1
+
 [[datasets]]
 filename = "miniwob-plusplus.tar.gz"
 sha256 = "f31570f8f7ed5a05cbe23b9b11e90d62a685dce8043f1e9884769a05c34269e0"
