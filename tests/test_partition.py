@@ -249,6 +249,45 @@ def test_no_image_carries_an_inline_partitioner(script):
             f"partitioner ({marker!r}). A private fork of this code has silently "
             f"lost directory ownership before.")
 
+def _partition_root(script):
+    """The absolute path the script hands partition-tree.py, $VARS resolved."""
+    arg = re.search(r'/partition-tree\.py\s+\S+\s+\S+\s+"?(\S+?)"?\s',
+                    script.read_text()).group(1)
+    name = re.fullmatch(r"\$\{?(\w+)\}?", arg)
+    if not name:
+        return arg
+    return re.search(rf'^{name.group(1)}=(\S+)', script.read_text(), re.M).group(1)
+
+
+@pytest.mark.parametrize(
+    "script", _partitioning_scripts(),
+    ids=lambda p: f"{p.parent.parent.name}-{p.parent.name}")
+def test_no_bind_mount_lands_inside_the_partitioned_tree(script):
+    # A dataset archive is bind-mounted so it is read without being copied into
+    # a layer. The cost of that is that the mount point cannot be unlinked —
+    # `rm -f` on it returns EBUSY — so an archive mounted inside the tree the
+    # stage partitions is still there when the partitioner walks it, and gets
+    # charged as a member of the layer it is meant to stay out of.
+    #
+    # gitlab did exactly this: a 19G backup tar mounted at
+    # /var/opt/gitlab/backups/ failed the partition with "single file ... is
+    # 19491590K as a tar member, over the 8388608K layer limit", after a
+    # 41-minute restore. Mount outside the tree and symlink in: a symlink is
+    # removable, and the partitioner charges it 512 bytes rather than its
+    # target.
+    root = _partition_root(script)
+    targets = re.findall(r"--mount=type=bind[^\s]*?,target=(\S+?)(?:\s|\\|$)",
+                         (script.parent / "Dockerfile").read_text())
+    assert targets, f"{script.parent.name} bind-mounts nothing; check this regex"
+    inside = [t for t in targets
+              if t == root or t.startswith(root.rstrip("/") + "/")]
+    assert not inside, (
+        f"{script.parent.name} bind-mounts {inside} inside {root}, the tree "
+        f"{script.name} partitions. A mount point cannot be removed before the "
+        f"partition, so it is charged against a bucket. Mount it outside the "
+        f"tree and symlink it in, deleting the link before partitioning.")
+
+
 def _exdev(*_a, **_kw):
     raise OSError(errno.EXDEV, "Invalid cross-device link")
 
