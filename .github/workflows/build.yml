@@ -79,6 +79,11 @@ on:
 # paid the full ~70-minute restore stage. Consequence to be aware of: a
 # green push status now attests only the images that push touched.
 # workflow_dispatch keeps explicit-target semantics (`all` really means all).
+#
+# A push whose head commit carries the trailer `Build-Inputs: none` builds no
+# image at all — the escape hatch for a change that touches a shared input
+# without changing what any image is built from. The discover step has the
+# reasoning and the exact form.
 
 jobs:
   discover:
@@ -134,7 +139,32 @@ jobs:
             | grep -v '^probe/')
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
-          if [ '${{ github.event_name }}' = push ]; then
+          # A declaration, not an inference — because the question it answers
+          # cannot be inferred. Whether a diff changes what an image is built
+          # from is not readable off paths (this file and builder/ are shared
+          # inputs, so a comment edit in either escalates to all eleven) and
+          # not off content hashes either, since a comment changes the hash.
+          # The author of the change knows; nothing in here can.
+          #
+          # Honouring it unverified is safe because the anchor below is each
+          # image's own published revision. A declared-skip commit stays
+          # inside the diff for every image until that image actually builds,
+          # so a wrong declaration defers a rebuild rather than losing one,
+          # and the state it leaves — some images built from older shared
+          # code — is the state any failed or unsupplied build already leaves.
+          #
+          # The tip declares for the whole push, which is the part to be
+          # careful with: a push whose head commit is comment-only but which
+          # carries a real change further back is a misuse of this, and
+          # nothing here will catch it.
+          #
+          # push only. A dispatch already names what it wants built.
+          if [ '${{ github.event_name }}' = push ] &&
+             git log -1 --format=%B '${{ github.sha }}' \
+               | grep -qiE '^build-inputs:[[:space:]]+none[[:space:]]*$'; then
+            echo "head commit declares Build-Inputs: none — no image builds" >&2
+            enabled=
+          elif [ '${{ github.event_name }}' = push ]; then
             # Each image carries the commit it was built from
             # (org.opencontainers.image.revision) and is in GHCR only if its
             # build, smoke and push all succeeded — so the published image is
