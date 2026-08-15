@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured.
+build_minutes = 27
+
 # WebShop — Flask app over ~1.18M scraped Amazon products.
 # Built from OUR FORK, shkolnik/WebShop, pinned at d8c8dc1b0605f86a5d734b37245abff857da38aa
 # (master, 2026-08-07 = upstream princeton-nlp 64fa2a5 plus shkolnik/WebShop#1, which moves

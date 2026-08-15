@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured.
+build_minutes = 42
+
 # WebArena map backend — OpenStreetMap raster tile server.
 # Provenance, the version-dating evidence, and the upstream-yaml divergences: README.md.
 

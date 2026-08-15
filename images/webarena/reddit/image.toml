@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured.
+build_minutes = 37
+
 # Two datasets, and the distinction matters:
 # 1. the upstream docker-save tar — the ONLY source of the populated DATA, and
 #    the thing whose provenance we are removing (its top four layers are hand

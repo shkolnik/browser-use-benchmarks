@@ -1,3 +1,8 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Measured 80-132 minutes over four runs.
+build_minutes = 87
+
 [[datasets]]
 filename = "shopping_final_0712.tar"
 sha256 = "2052430ee930d18a0c362997f1ccd1c500041f720ece8794ed77a77ee99139b5"

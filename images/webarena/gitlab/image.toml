@@ -1,3 +1,9 @@
+# Ordering hint only: CI enqueues the build matrix longest-first, so a
+# wrong number here costs queue position and never correctness.
+# Estimated — no green build to measure yet. The restore
+# stage alone is documented at around 70 minutes.
+build_minutes = 70
+
 [[datasets]]
 filename = "gitlab-populated-final-port8023.tar"
 sha256 = "6269a90527a63c12d86fa4a5da8c5404553b78e75c5123712818c1b6d9f0972d"
