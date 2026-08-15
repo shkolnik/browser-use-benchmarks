@@ -31,6 +31,10 @@ import tarfile
 import time
 
 BLOCK = 512
+# Enough to name every entry a real archive has tripped the mode correction on,
+# with room to spare, and low enough that a pathological tar cannot bury the
+# rest of the log under it.
+MAX_FIXES_LOGGED = 50
 
 
 class Parts:
@@ -103,7 +107,7 @@ def record(problems, category, detail):
         p['examples'].append(detail)
 
 
-def check(m, name, problems):
+def check(m, name, problems, fixed):
     """The per-entry checks, run on the header rather than on a file on disk.
 
     Same predicates bucket-media.py's audit applies to a tree, against the only
@@ -113,8 +117,15 @@ def check(m, name, problems):
     applies the caller's umask, and the kernel drops setgid when the caller is
     not in the entry's group. The tree walk therefore audited laundered modes,
     and which ones depended on the runner's umask. These are the archive's own,
-    so what ships is now the same on any host — and an unsafe mode is refused
-    rather than quietly masked off on the way past.
+    so what ships is the same on any host.
+
+    A privilege is refused; a sloppy mode is corrected and reported. Setuid on
+    an executable is something an archive should not be able to talk us into
+    shipping, so it stops the build. World-writable on a data file is upstream
+    packaging — nominatim's osm_dump.tar carries one at 0777 — and refusing it
+    only trades a deterministic mode for a blocked build, since the tree-walk
+    path this replaced shipped exactly the same file with the bit already
+    masked off by whatever umask the runner happened to have.
     """
     if name.startswith('/') or os.pardir in name.split('/'):
         record(problems, 'absolute or traversing path', name)
@@ -143,7 +154,12 @@ def check(m, name, problems):
         # is a privilege on an executable, and there should be none here.
         record(problems, 'setuid/setgid', f'{name} ({m.mode:04o})')
     if m.mode & 0o002:
-        record(problems, 'world-writable', f'{name} ({m.mode:04o})')
+        # Exactly the audited bit and nothing else. Clearing group-write too
+        # would be tidier to look at and would be this function inventing a
+        # policy it does not hold: the predicate objects to world-writable, so
+        # that is what the correction removes.
+        fixed.append((name, m.mode, m.mode & ~0o002))
+        m.mode &= ~0o002
 
 
 def demux(paths, outdir, strip, limit, max_buckets):
@@ -158,6 +174,7 @@ def demux(paths, outdir, strip, limit, max_buckets):
 
     idx, used, entries = 0, 0, [0] * max_buckets
     stack, opened, top_dirs, top_names, problems = [], set(), [], set(), {}
+    fixed = []
     n, nbytes, started, last = 0, 0, time.monotonic(), time.monotonic()
 
     with tarfile.open(fileobj=stream, mode='r|') as src:
@@ -165,7 +182,11 @@ def demux(paths, outdir, strip, limit, max_buckets):
             name = strip_prefix(m.name, strip)
             if not name:
                 continue
-            check(m, name, problems)
+            # Before the entry is renamed and before it is written, because a
+            # correction here has to reach the object the buckets receive —
+            # and the ancestor stack holds these same objects, so a directory
+            # carried into a later bucket carries the corrected mode too.
+            check(m, name, problems, fixed)
             depth = name.count('/')
             # Renamed before the ancestor stack takes it: the stack holds these
             # very objects, so a strip deferred to flush time would strip an
@@ -230,6 +251,21 @@ def demux(paths, outdir, strip, limit, max_buckets):
     for b in buckets:
         b.close()
     stream.close()
+
+    # Named in full rather than counted. A mode this changes is a difference
+    # between what upstream shipped and what the image ships, so the log has to
+    # be enough to check the claim against the archive — and the number of
+    # entries a real tree trips this on is small enough to print. It is bounded
+    # anyway: a tar that trips it thousands of times is telling us something
+    # about itself that a truncated list would hide.
+    if fixed:
+        print(f"  media audit: normalised {len(fixed)} world-writable "
+              f"{'entry' if len(fixed) == 1 else 'entries'}", file=sys.stderr)
+        for name, was, now_ in fixed[:MAX_FIXES_LOGGED]:
+            print(f'    {name} {was:04o} -> {now_:04o}', file=sys.stderr)
+        if len(fixed) > MAX_FIXES_LOGGED:
+            print(f'    ... and {len(fixed) - MAX_FIXES_LOGGED} more',
+                  file=sys.stderr)
 
     # Ahead of the sizing check below, which is a question about this image's
     # max_buckets. What the audit found is a question about the tree itself, and
