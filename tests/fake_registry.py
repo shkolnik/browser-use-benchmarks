@@ -39,8 +39,12 @@ class Behaviour:
 class FakeRegistry:
     """Serves `blobs` (title -> bytes) at /v2/<repo>/blobs/sha256:<digest>."""
 
-    def __init__(self, blobs, behaviour=None, repo="x"):
+    def __init__(self, blobs, behaviour=None, repo="x", manifests=None):
         self.blobs = {hashlib.sha256(b).hexdigest(): b for b in blobs.values()}
+        # Tag -> manifest bytes. Manifests addressed BY DIGEST are served from
+        # `blobs` like anything else, which is what lets an index and the
+        # per-platform manifest it points at be registered the same way.
+        self.manifests = dict(manifests or {})
         self.behaviour = behaviour or Behaviour()
         self.repo = repo
         self.tokens_issued = 0
@@ -61,6 +65,20 @@ class FakeRegistry:
                     registry.tokens_issued += 1
                     body = json.dumps({"token": "faketoken"}).encode()
                     self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if "/manifests/" in self.path and "sha256:" not in self.path:
+                    tag = self.path.rsplit("/", 1)[-1]
+                    body = registry.manifests.get(tag)
+                    if body is None:
+                        self.send_error(404)
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type",
+                                     "application/vnd.oci.image.manifest.v1+json")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)

@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import NamedTuple
 from builder.discover import ImageRef
 from builder.manifest import Manifest, load_manifest
+# The label the build stamps and CI reads back is defined once, next to the
+# reader: a writer and a reader that spell it separately is the second record
+# this design exists to avoid.
+from builder.registry import REVISION_LABEL
 
 def run(cmd: list[str]) -> None:
     print("+ " + " ".join(cmd))
@@ -87,15 +91,37 @@ def version_tag(repo_root: Path) -> str:
         capture_output=True, text=True, check=True).stdout.split()
     return f"{out[0].replace('-', '')}.{out[1]}"
 
+def revision(repo_root: Path) -> str:
+    """The commit an image is built from, stamped into the image itself.
+
+    This is the anchor CI reads back off the published image to decide whether
+    that image needs building again, so the published artifact is the only
+    record of what it was built from — there is no second place to disagree
+    with it. Full SHA, not the abbreviated one in `version_tag`, because the
+    reader feeds it to `git diff`.
+
+    A dirty tree gets `-dirty` appended. That can never equal a commit SHA, so
+    an image built from uncommitted work is never mistaken for one built from
+    whatever commit HEAD happened to point at, and the next CI build rebuilds
+    it rather than trusting it.
+    """
+    def git(*args) -> str:
+        return subprocess.run(["git", "-C", str(repo_root), *args],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+    sha = git("rev-parse", "HEAD")
+    return f"{sha}-dirty" if git("status", "--porcelain") else sha
+
 def build_cmd(ref: ImageRef, m: Manifest, registry: str, datasets_dir: Path,
-              version: str, repo_root: Path) -> list[str]:
+              version: str, repo_root: Path, rev: str) -> list[str]:
     # `stagelib` is offered to every image whether or not its Dockerfile COPYs
     # from it: a named build context costs nothing unreferenced, and the
     # alternative — per-image opt-in — is how three images ended up with three
     # drifting copies of the same partitioner.
     cmd = ["docker", "build",
            "--build-context", f"datasets={datasets_dir}",
-           "--build-context", f"stagelib={repo_root / 'builder' / 'stage-lib'}"]
+           "--build-context", f"stagelib={repo_root / 'builder' / 'stage-lib'}",
+           "--label", f"{REVISION_LABEL}={rev}"]
     for k, v in m.build_args.items():
         cmd += ["--build-arg", f"{k}={v}"]
     cmd += ["-t", f"{registry}/{ref.name}:{version}",
@@ -113,9 +139,20 @@ def load_cmds(ref: ImageRef, m: Manifest, registry: str,
         ["docker", "tag", m.source.tag, f"{registry}/{ref.name}:latest"],
     ]
 
+# Publishing is two moves, not one, and the order carries meaning. The dated
+# tag goes up first and is what gets attested; `:latest` follows only once the
+# attestation exists. `:latest` is the tag CI reads a revision back from to
+# decide an image needs no rebuild, so it must never name an image that failed
+# after its bytes were uploaded — a build whose attestation died would
+# otherwise sit there claiming to be the current green build of its commit,
+# unattested, and never be rebuilt.
 def push_cmds(ref: ImageRef, registry: str, version: str) -> list[list[str]]:
-    return [["docker", "push", f"{registry}/{ref.name}:{version}"],
-            ["docker", "push", f"{registry}/{ref.name}:latest"]]
+    return [["docker", "push", f"{registry}/{ref.name}:{version}"]]
+
+def promote_cmds(ref: ImageRef, registry: str) -> list[list[str]]:
+    # Both tags name the same local image, so this uploads no layers: the
+    # registry already has every blob, and this is a manifest write.
+    return [["docker", "push", f"{registry}/{ref.name}:latest"]]
 
 # Derived artifacts are expensive (reddit's is a ~41G media tar) so they are
 # cached on the runner between jobs — but "the file is there" was being used as
@@ -359,8 +396,13 @@ def clean_media(refs, datasets_dir: Path) -> None:
 
 def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
     version = version_tag(repo_root)
+    rev = revision(repo_root)
     for ref in refs:
         m = load_manifest(ref.path)
+        # A docker-save image is loaded, not built, so nothing here can stamp a
+        # revision onto it. It therefore never answers "built from this commit"
+        # and CI rebuilds — reloads — it every time, which is the safe way for
+        # this to fail and costs a tar load.
         if m.source.kind == "docker-save":
             for cmd in load_cmds(ref, m, registry, datasets_dir, version):
                 run(cmd)
@@ -372,7 +414,7 @@ def run_build(refs, registry: str, datasets_dir: Path, repo_root: Path) -> None:
             if m.media:
                 run_media_prep(ref, m, datasets_dir, repo_root)
                 log_resources(f"{ref.name}:after-media-prep", datasets_dir)
-            run(build_cmd(ref, m, registry, datasets_dir, version, repo_root))
+            run(build_cmd(ref, m, registry, datasets_dir, version, repo_root, rev))
             log_resources(f"{ref.name}:after-build", datasets_dir)
 
 def clean_cmds(ref: ImageRef, m: Manifest, registry: str, version: str) -> list[list[str]]:
@@ -421,6 +463,11 @@ def run_push(refs, registry: str, repo_root: Path,
     # find them gone.
     if datasets_dir is not None:
         clean_media(refs, datasets_dir)
+
+def run_promote(refs, registry: str) -> None:
+    for ref in refs:
+        for cmd in promote_cmds(ref, registry):
+            run_with_retry(cmd)
 
 class Health(NamedTuple):
     """Outcome of polling a healthcheck URL.

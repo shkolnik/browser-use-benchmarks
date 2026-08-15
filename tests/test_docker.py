@@ -11,21 +11,28 @@ REF = ImageRef("miniwob", "server", Path("/repo/images/miniwob/server"))
 def test_build_cmd():
     m = Manifest(build_args={"FOO": "bar"})
     cmd = build_cmd(REF, m, "ghcr.io/shkolnik", Path("/repo/datasets"),
-                    "20260805.abc1234", Path("/repo"))
+                    "20260805.abc1234", Path("/repo"), "abc1234def")
     assert cmd == [
         "docker", "build",
         "--build-context", "datasets=/repo/datasets",
         "--build-context", "stagelib=/repo/builder/stage-lib",
+        "--label", "org.opencontainers.image.revision=abc1234def",
         "--build-arg", "FOO=bar",
         "-t", "ghcr.io/shkolnik/miniwob-server:20260805.abc1234",
         "-t", "ghcr.io/shkolnik/miniwob-server:latest",
         "/repo/images/miniwob/server",
     ]
 
-def test_push_cmds():
+def test_push_cmds_publishes_the_dated_tag_only():
+    # `:latest` is deliberately absent: it is the tag discover reads a revision
+    # back from, so it must not name an image whose attestation has not run yet.
     cmds = push_cmds(REF, "localhost:5000", "20260805.abc1234")
     assert cmds == [
         ["docker", "push", "localhost:5000/miniwob-server:20260805.abc1234"],
+    ]
+
+def test_promote_cmds_moves_latest():
+    assert docker_mod.promote_cmds(REF, "localhost:5000") == [
         ["docker", "push", "localhost:5000/miniwob-server:latest"],
     ]
 
@@ -128,6 +135,7 @@ def test_run_build_dispatches_docker_save_to_load_path(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(dk, "run", lambda cmd: calls.append(cmd))
     monkeypatch.setattr(dk, "version_tag", lambda root: "v1")
+    monkeypatch.setattr(dk, "revision", lambda root: "0" * 40)
     ref = ImageRef("webarena", "shopping", svc)
     dk.run_build([ref], "ghcr.io/shkolnik", dsdir, tmp_path)
     assert [c[:2] for c in calls] == [["docker", "load"], ["docker", "tag"], ["docker", "tag"]]
@@ -232,6 +240,35 @@ def test_version_tag_uses_commit_date_not_wall_clock(tmp_path):
     sha = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
     assert docker_mod.version_tag(tmp_path) == f"20200102.{sha}"
+
+
+def _init_repo(tmp_path):
+    import subprocess
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty",
+                    "-m", "x"], check=True, env=env)
+    return subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+                          capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def test_revision_is_the_full_head_sha(tmp_path):
+    # Full, not abbreviated: CI feeds it straight to `git diff` as the anchor
+    # for what changed since this image was last built.
+    sha = _init_repo(tmp_path)
+    assert docker_mod.revision(tmp_path) == sha
+    assert len(sha) == 40
+
+
+def test_revision_marks_a_dirty_tree(tmp_path):
+    # An image built from uncommitted work must not claim the commit HEAD
+    # points at: CI would read that claim back and skip rebuilding an image
+    # that was never built from anything in the history.
+    sha = _init_repo(tmp_path)
+    (tmp_path / "unstaged").write_text("x")
+    assert docker_mod.revision(tmp_path) == f"{sha}-dirty"
 
 # ===# smoke — the step that stands between "the image assembled" and "the image is
 # published". These pin the targeting, because a smoke that quietly brings up

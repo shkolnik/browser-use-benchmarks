@@ -9,12 +9,13 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('build {0}', in
 #
 # Its original reason (two runs racing on the home runner's shared datasets
 # cache, appending the same .part download) does die with per-job VMs. It is
-# kept for a second reason that does not: two runs of the same ref would each
-# `bin/build push` the same image to `:latest` and then attest whatever their
-# own `docker inspect` resolved locally, so the losing run can stamp a
-# provenance attestation onto a digest that is no longer what `:latest` points
-# at. Serializing runs is the cheap way to keep the published digest and its
-# attestation the same object.
+# kept for a second reason that does not: two runs of the same ref build the
+# same dated tag from the same source and get two different digests, and they
+# race to promote `:latest`. Each attests its own digest, so neither is
+# unattested — but which image `:latest` ends up naming is decided by whichever
+# run happens to finish second, and that is the image every consumer pulls.
+# Serializing runs is the cheap way to make the published image the one the
+# last completed build produced.
 #
 # Queue, never cancel — every push's build must actually run so its commit
 # status is truthful.
@@ -41,7 +42,6 @@ permissions:
   packages: write
   id-token: write
   attestations: write
-  actions: read   # discover reads the last successful run's head SHA
 
 on:
   workflow_dispatch:
@@ -72,7 +72,8 @@ on:
 
 # Push builds are change-scoped: an image rebuilds only when its own
 # images/<name>/ directory — or a shared input (builder/, bin/, this file) —
-# changed since the last successful push build. The original "layer cache makes no-change
+# changed since THAT image was last published, which each image records in its
+# own org.opencontainers.image.revision label. The original "layer cache makes no-change
 # rebuilds cheap" premise broke on gitlab: its ~50G of build layers never
 # survive the post-job `builder prune --reserved-space 20GB`, so every push
 # paid the full ~70-minute restore stage. Consequence to be aware of: a
@@ -82,8 +83,9 @@ on:
 jobs:
   discover:
     # Deliberately NOT `[self-hosted, burst]`: this job is a checkout, a `git
-    # diff` and one `gh` call, and spending a whole ephemeral VM on it would add
-    # boot latency to every run for no gain. It stays on the home runner.
+    # diff` and one manifest read per image, and spending a whole ephemeral VM
+    # on it would add boot latency to every run for no gain. It stays on the
+    # home runner.
     #
     # Caveat worth knowing: every self-hosted runner carries the implicit
     # `self-hosted` label, burst VMs included, so an idle burst VM COULD pick
@@ -102,7 +104,11 @@ jobs:
           fetch-depth: 0
       - id: ls
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Read scope for the manifest and config fetches that answer "which
+          # commit is this image published from". Passed rather than relying on
+          # a `docker login` this job does not do — and a package that answered
+          # 401 would read as never-published and rebuild forever.
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           target='${{ github.event.inputs.target || 'all' }}'
           # The probe benchmark (images/probe/synthetic) has no [[datasets]]
@@ -121,27 +127,52 @@ jobs:
           test -n "$enabled"   # fail loudly if discovery itself found nothing
 
           if [ '${{ github.event_name }}' = push ]; then
-            # Diff against the last SUCCESSFUL push build, not event.before:
-            # the concurrency group keeps only one pending run, so a queued
-            # run can be superseded before it ever ran — its commits would
-            # vanish from an event.before diff and never build. Anchoring on
-            # the last green run keeps every change in scope until a run
-            # actually builds it (and retries failed images on the next push).
-            base=$(gh run list --workflow build-images --branch main --event push \
-              --status success --limit 1 --json headSha -q '.[0].headSha' || true)
-            if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
-              echo "no usable base '$base': building all"
-            else
+            # Each image carries the commit it was built from
+            # (org.opencontainers.image.revision) and is in GHCR only if its
+            # build, smoke and push all succeeded — so the published image is
+            # its own answer to "when was this last built green", and eleven
+            # independent builds get eleven independent answers. A run
+            # conclusion cannot do that: it is one verdict over the whole
+            # matrix, so one image failing discards the anchor for the ten
+            # that published perfectly, and everything rebuilds from a stale
+            # base on the next push.
+            #
+            # Not event.before, for the reason it never was: the concurrency
+            # group keeps only one pending run, so a queued run can be
+            # superseded before it ever ran and its commits would vanish from
+            # an event.before diff and never build. An anchor that only moves
+            # when an image actually publishes keeps every change in scope
+            # until something builds it.
+            #
+            # `git cat-file -e` is not belt-and-braces. Docker labels are
+            # INHERITED, and bases in the wild carry this one: map-tile's
+            # `overv/openstreetmap-tile-server` publishes a revision naming a
+            # commit in ITS repository. Our own --label overwrites it on every
+            # image we build, so the inherited value can only surface on an
+            # image we have never built — and a SHA from a foreign history is
+            # not in ours, so it fails this check and the image builds.
+            #
+            # A blank or unknown revision means build — a never-published
+            # image, an image whose registry could not be read, or one built
+            # from a dirty tree. Rebuilding when unsure is the cheap mistake.
+            revs=$(bin/build published-revision "$target")
+            enabled=$(echo "$enabled" | while read -r img; do
+              base=$(printf '%s\n' "$revs" | awk -F'\t' -v i="$img" '$1 == i {print $2}')
+              if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
+                echo "$img: no usable published revision '$base' — building" >&2
+                echo "$img"; continue
+              fi
               changed=$(git diff --name-only "$base" '${{ github.sha }}')
               if echo "$changed" | grep -qE '^(builder/|bin/|\.github/workflows/build\.yml)'; then
-                echo "shared build inputs changed: building all"
+                echo "$img: shared build inputs changed since $base — building" >&2
+              elif echo "$changed" | grep -q "^images/$img/"; then
+                echo "$img: changed since $base — building" >&2
               else
-                enabled=$(echo "$enabled" \
-                  | while read -r img; do
-                      echo "$changed" | grep -q "^images/$img/" && echo "$img"
-                    done; true)
+                echo "$img: already built from $base — skipping" >&2
+                continue
               fi
-            fi
+              echo "$img"
+            done)
           fi
 
           images=$(printf '%s\n' "$enabled" \
@@ -219,7 +250,7 @@ jobs:
       # never pushes, because "does it boot" is worth knowing there too.
       - name: smoke — boot the built image before publishing it
         run: bin/build smoke '${{ matrix.image }}'
-      - name: push
+      - name: push the dated tag
         if: env.PUBLISH == 'true'
         run: bin/build push '${{ matrix.image }}'
       - name: resolve pushed digest
@@ -227,8 +258,9 @@ jobs:
         if: env.PUBLISH == 'true'
         run: |
           name="ghcr.io/${{ github.repository_owner }}/$(echo '${{ matrix.image }}' | tr / -)"
-          # RepoDigests is populated by the push above; with a single registry
-          # there is exactly one entry.
+          # Inspecting `:latest` resolves the local image, which the dated tag
+          # names too — RepoDigests is a property of that image and the push
+          # above populated it, with exactly one entry for a single registry.
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$name:latest" | cut -d@ -f2)
           echo "resolved: $name@$digest"
           case "$digest" in sha256:*) ;; *) echo "no digest resolved" >&2; exit 1;; esac
@@ -276,6 +308,18 @@ jobs:
           subject-name: ${{ steps.digest.outputs.name }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
+
+      # LAST, and only on the success of everything above it. `:latest` is not
+      # just the convenient tag — it is where discover reads the revision that
+      # decides whether this image needs building again. Moving it before the
+      # attestation exists would let a build that uploaded its bytes and then
+      # died claim to be the current green build of its commit, and no later
+      # run would rebuild it. Nothing here can fail in a way that leaves the
+      # claim standing: the layers are already in the registry, so this is a
+      # manifest write.
+      - name: promote to :latest
+        if: env.PUBLISH == 'true'
+        run: bin/build promote '${{ matrix.image }}'
 
       # Disk hygiene: the runner VM's disk is the scarce resource, so every
       # job leaves docker the way it found it — only the datasets cache
