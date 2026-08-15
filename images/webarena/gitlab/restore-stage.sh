@@ -55,6 +55,13 @@ done
 echo "=== restore ==="
 gitlab-ctl stop puma
 gitlab-ctl stop sidekiq
+# gitlab-backup only looks in backup_path, and the archive is mounted at /mnt
+# (see the Dockerfile): a mount point under /var/opt/gitlab cannot be unlinked
+# afterwards, and would reach the partitioner as a 19G member of the tree it
+# splits. Backup::Manager#unpack does File.exist? then `tar -xf`, both of which
+# follow the link, and this one can be removed before the partition.
+BACKUP_LINK=/var/opt/gitlab/backups/${BK}_gitlab_backup.tar
+ln -sf /mnt/webarena_gitlab_backup.tar "$BACKUP_LINK"
 gitlab-backup restore BACKUP=$BK force=yes
 gitlab-ctl reconfigure
 
@@ -81,10 +88,10 @@ echo "$pg_status" | grep -q '^down' || { echo "postgresql still up: $pg_status" 
 kill "$WRAPPER_PID" 2>/dev/null || true
 
 echo "=== trim state not worth shipping ==="
-# The backup tar is not deleted here, and must not be: it is a read-only bind
-# mount of the datasets context, so it occupies nothing in this stage, and
-# unlinking a mount point fails outright rather than quietly — `rm -f` returns
-# 1, which under `set -e` would end the build after the whole restore.
+# The symlink to the backup archive, not the archive: the mount itself lives at
+# /mnt, outside the partitioned tree, and disappears with the stage. The link
+# would ship — a dangling pointer to a path no shipped image has.
+rm -f "$BACKUP_LINK"
 # Log CONTENT is not worth shipping; the log DIRECTORY TREE is load-bearing.
 # `gitlab-ctl reconfigure` creates /var/log/gitlab/<name> for each service AND
 # for non-service consumers (gitlab-rails, gitlab-shell), owned by the account

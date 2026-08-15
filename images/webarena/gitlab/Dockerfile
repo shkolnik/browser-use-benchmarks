@@ -14,13 +14,18 @@ COPY restore-stage.sh /restore-stage.sh
 # inside gitlab-backup, and never shipped. A COPY writes all of it into this
 # stage's layer, where deleting it afterwards only records a whiteout.
 #
+# Mounted at /mnt and symlinked into the backups directory by the restore stage,
+# NOT mounted there directly. A mount point cannot be unlinked, so an archive
+# mounted under /var/opt/gitlab stays in the tree the partitioner splits and is
+# refused as a 19G layer member. The symlink is removable; the mount is not.
+#
 # No `chown git:git` goes with it any more, and none is needed. The mount lands
 # the archive root-owned 0644 (verified against buildkit), gitlab-backup opens
 # it as git, and read permission is all it wants: Backup::Manager#unpack does
 # File.exist? then `tar -xf`, extracting into the backups DIRECTORY, which is
 # still writable. Nothing in the restore path writes to or unlinks the archive.
 RUN --mount=type=bind,from=datasets,source=etc-gitlab.tar.gz,target=/tmp/etc-gitlab.tar.gz \
-    --mount=type=bind,from=datasets,source=webarena_gitlab_backup.tar,target=/var/opt/gitlab/backups/webarena_gitlab_backup.tar \
+    --mount=type=bind,from=datasets,source=webarena_gitlab_backup.tar,target=/mnt/webarena_gitlab_backup.tar \
     tar xzf /tmp/etc-gitlab.tar.gz -C / \
     && /bin/bash /restore-stage.sh
 
