@@ -25,6 +25,19 @@ This project packages each benchmark website as a **single pullable Docker image
 - **Health-checked** — every image declares an in-container `HEALTHCHECK`, so
   `docker compose up --wait` blocks until the service actually works.
 
+## Security posture
+
+**These images pin old, in several cases end-of-life, dependency versions, and
+they carry known-vulnerable packages. Run them only on trusted networks; do not
+expose them to the public internet.**
+
+The pins are deliberate. An agent's score is a function of the exact bytes a
+page serves, and dependency upgrades move those bytes — a newer ICU changes how
+Magento renders prices and dates, GitLab reorganised its navigation across 16.x,
+Kiwix changed its URL scheme in 3.4. Patching would quietly invalidate
+comparison against published results. [`SECURITY.md`](SECURITY.md) covers the
+reasoning, what is done instead, and how to run the fleet safely.
+
 ## Images
 
 | Benchmark | Name | Image |

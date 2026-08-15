@@ -1,5 +1,11 @@
 # Standing the fleet up on one host
 
+> **Trusted networks only.** These images pin old, in several cases
+> end-of-life, dependencies and carry known-vulnerable packages — deliberately,
+> so that rendered pages stay comparable with published benchmark results. Do
+> not port-forward them or put them behind a public reverse proxy. See
+> [`SECURITY.md`](../SECURITY.md).
+
 `deploy/compose.yml` brings up all eight benchmark services from the published
 `:latest` images. It is separate from the per-benchmark `images/<bench>/compose.yml`
 files, which exist to smoke-gate one freshly-built image on the build runner and
