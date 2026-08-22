@@ -1,0 +1,57 @@
+# The VisualWebArena input images, pinned once for all three suites.
+#
+# Every VWA task that carries an `image` names a path in the upstream repository
+# tree rather than in a release asset, so the pinnable object is the whole commit
+# tarball: 206,490,478 bytes fetched to place 186,149,527 bytes of images. There
+# is no smaller upstream artifact that holds only them.
+#
+# This file holds the pin and nothing else. A pin has exactly one source of
+# truth — docs/design.md calls a second copy a silent-wrong-data hole rather than
+# redundancy — and all three VWA suites take their images out of this one
+# archive, so a copy of this sha256 in each suite.toml would be three answers to
+# one question, free to drift apart with nothing comparing them. What genuinely
+# differs per site — how many files, how many bytes, which formats, which prefix
+# inside the archive — stays in <site>/suite.toml.
+#
+# Nothing under images/ fetches this. builder/discover.py globs
+# images/*/*/image.toml, so a tasks-side dataset is structurally invisible to
+# bin/build; fetch-images.py, beside this file, is what reads the pin, verifies
+# the sha256 and unpacks the members into the gitignored datasets/ directory.
+fetched_by = "fetch-images.py"
+
+[[datasets]]
+filename = "visualwebarena-89f5af29305c3d1e9f97ce4421462060a70c9a03.tar.gz"
+sha256 = "75bb4a1abb1c952d036faea7d34e3af86db214479009f1e0fbcca2c6ea0ef028"
+bytes = 206490478
+urls = [
+    "https://github.com/web-arena-x/visualwebarena/archive/89f5af29305c3d1e9f97ce4421462060a70c9a03.tar.gz",
+]
+# ⚠️ GitHub generates commit tarballs on demand and does not contract to make
+# them byte-reproducible; the gzip layer is the server's, not the commit's.
+# Fetching this URL repeatedly returns the identical sha256 and the identical
+# 206,490,478 bytes, and the pin is recorded on that basis: if GitHub ever
+# regenerates the archive differently, the fetch fails the checksum and
+# quarantines the file rather than handing a different tree to a run. Re-hosting
+# the images as their own archive is an open decision recorded in each suite
+# manifest as [[open_decisions]] vwa-dataset-pin-source — one id carried by
+# all three, so answering it once answers it for this file too.
+#
+# Every member is under one top-level directory named after the commit, so one
+# leading component is stripped and the `image` paths on the task records then
+# resolve directly:
+#   visualwebarena-89f5af29305c3d1e9f97ce4421462060a70c9a03/<image path>
+archive_prefix = "visualwebarena-89f5af29305c3d1e9f97ce4421462060a70c9a03/"
+# What the three suites take out of it: 346 input images under
+# environment_docker/webarena-homepage/static/input_images/<site>/, plus one file
+# outside that tree, coco_images/000000515982.jpg, which is reddit task 28's SSIM
+# reference. Each suite.toml names its own member_prefix, file count and byte
+# total; none of those files is committed, so checking any of those numbers means
+# unpacking this tarball and measuring the files under that prefix.
+members_used_by = ["classifieds/suite.toml", "shopping/suite.toml", "reddit/suite.toml"]
+# fetch-images.py unpacks two whole trees rather than a file list — the 346
+# images above and all 45 files of coco_images/ — which is 391 files and
+# 193,716,928 bytes on disk. `fetch-images.py --check` compares what it finds
+# against this number, so a partial unpack reports rather than passes. Only one
+# of the 45 coco files is referenced by any VWA task; the other 44 come along
+# because the fetch takes the directory.
+unpacked_files = 391
