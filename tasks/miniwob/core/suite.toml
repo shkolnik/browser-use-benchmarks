@@ -1,0 +1,561 @@
+# MiniWoB++ core suite — the 128 environments miniwob/registration.py registers.
+#
+# READ THE PROVENANCE SPLIT FIRST. Two upstream refs are in play here and they are not
+# interchangeable:
+#
+#   * the SITE is v1.0. images/miniwob/server pins the v1.0 tag archive and extracts
+#     miniwob/html out of it, so the bytes an agent drives are v1.0's.
+#   * the METADATA is main. Everything under ../upstream/ is vendored from
+#     33c3b4ddef8c6eb67c57a29663d844b1eda7e614, because the nondeterministic=True flags
+#     this suite depends on exist only there: 25 at that commit, 4 at v1.0.
+#
+# Both refs are recorded below, because recording one loses something real. The split is
+# safe for exactly one reason, measured rather than assumed: all 361 blobs under
+# miniwob/html/ are byte-identical at v1.0 and at that main commit, core.js included,
+# compared blob by blob over the whole subtree of the two refs' source archives.
+#
+# The vendored METADATA is close but not identical, and the difference is not confined to
+# one file. The registered id set and every entry_point match, and miniwob_envs.py,
+# flightwob_envs.py, constants.py and the licence file are byte-identical at both refs. THREE
+# vendored files differ:
+#
+#   * registration.py — 18738 bytes here against 16428 at v1.0. Every differing line is a
+#     nondeterministic=True flag: 25 here, each carrying its reason as a trailing comment,
+#     against 4 bare ones at v1.0 (click-pie, click-pie-nodelay, stock-market, terminal).
+#   * reward.py — 2400 against 2373. One import line moves, typing -> collections.abc, and
+#     the four function bodies are identical.
+#   * selenium_instance.py — 17316 against 16766, and the only one of the three whose
+#     BEHAVIOUR differs: a docstring typo (ChromDriver -> ChromeDriver), PEP 604
+#     annotations (Optional[X] -> X | None, Dict/List/Tuple -> the builtins), and a
+#     changed create_driver() — see its [[upstream.files]] entry for what that changes.
+
+[suite]
+name = "core"
+benchmark = "miniwob"
+# The registry is the task list. Neither the served directory (130 pages) nor nginx's
+# autoindex is that list, and the two sets are not nested either way — see
+# [tasks.registry_vs_directory].
+task_count = 128
+description = "The 128 registered MiniWoB++ environments: 125 single-page DOM tasks plus 3 FlightWoB form-filling sites, each an HTML page that generates and scores its own instance."
+
+[upstream]
+repo = "https://github.com/Farama-Foundation/miniwob-plusplus"
+# The METADATA ref. Every file listed in [[upstream.files]] is byte-identical to this
+# commit. Pinned to the commit, never to `main`: the branch moves, and the flag count moves
+# with it — which is the whole reason this suite vendors from a development branch at all.
+commit = "33c3b4ddef8c6eb67c57a29663d844b1eda7e614"
+license = "MIT"
+# MIT requires the copyright notice and the permission notice to travel with the copy, and
+# the notice names three holders across the project's three lineages (OpenAI's World of
+# Bits, Stanford's MiniWoB++, Farama's maintenance fork). Carrying only the last one does
+# not satisfy the licence.
+license_file = "../LICENSE.upstream"
+copyright_holders = [
+    "2016 OpenAI (as part of openai/universe)",
+    "2018 Board of Trustees of Leland Stanford Junior University",
+    "2022 Farama Foundation",
+]
+
+# The SITE ref. This table is a CROSS-REFERENCE to the pin, not a second pin: the dataset's
+# one source of truth is images/miniwob/server/image.toml, and these two values exist so a
+# test can assert the suite and the image still name the same archive. If they ever
+# disagree, the image wins and this table is the thing that is wrong.
+[upstream.served]
+ref = "v1.0"
+commit = "553daee55ea0b2cc32b181a474083ab4cad782a1"
+pinned_by = "images/miniwob/server/image.toml"
+dataset = "miniwob-plusplus.tar.gz"
+sha256 = "f31570f8f7ed5a05cbe23b9b11e90d62a685dce8043f1e9884769a05c34269e0"
+# The archive's miniwob/html subtree, measured over the extracted 361 blobs. This is the
+# whole benchmark: there is no database, no fixture dump and no answer key anywhere else.
+served_files = 361
+served_bytes = 4988688
+
+# Vendored blobs. `path` is relative to THIS suite directory; the scoring metadata is
+# shared by every miniwob suite, so it sits one level up under ../upstream/ and the paths
+# start with "../".
+#
+# What is NOT vendored, deliberately: the 361-blob html/ tree and core.js, because the
+# image already ships them and a second copy in git would be a second source of truth for
+# the same bytes.
+
+[[upstream.files]]
+path = "../upstream/miniwob/registration.py"
+upstream_path = "miniwob/registration.py"
+sha256 = "8f50efbdc4bfcd4c1be0da83633089e2acb94e8fc1a76aaedc7e7af63b82edb9"
+bytes = 18738
+# THE task list. 128 register() calls, 25 of them carrying nondeterministic=True. This is
+# the only file in the project that enumerates the environments; there is no JSON, YAML or
+# TOML manifest upstream to vendor instead.
+
+[[upstream.files]]
+path = "../upstream/miniwob/envs/miniwob_envs.py"
+upstream_path = "miniwob/envs/miniwob_envs.py"
+sha256 = "bd03f05daa920ae6e12e91249b9164a5aa4c08180371c6ab026738e82ee3063a"
+bytes = 65120
+# 125 classes, each carrying `subdomain` — the only field that maps an env to a URL — and a
+# sectioned docstring holding the one-line description, the utterance field names and the
+# partial-reward semantics. 20 of the 125 document a partial reward; 5 say in so many words
+# to score them with get_thresholded_reward rather than get_binary_reward.
+
+[[upstream.files]]
+path = "../upstream/miniwob/envs/flightwob_envs.py"
+upstream_path = "miniwob/envs/flightwob_envs.py"
+sha256 = "1ff48750a3632ff988dfe54b19dbfab7ee868f4d944da365704d890975739b33"
+bytes = 2246
+# The 3 FlightWoB classes. Separate from the file above because their subdomains
+# ("flight.AA", "flight.Alaska", "flight.Alaska-auto") resolve to a different URL shape and
+# a different scorer — see [urls] and [scoring].
+
+[[upstream.files]]
+path = "../upstream/miniwob/reward.py"
+upstream_path = "miniwob/reward.py"
+sha256 = "8306438c814e5589ba2069480dc4d657ddca3535208bb36999619e53b301de60"
+bytes = 2400
+# The four reward processors. Vendored because choosing among them IS the scoring policy
+# and the choice is still open — see the miniwob-reward-processor entry in
+# [[open_decisions]]. One of the three vendored blobs that differ between the two refs, and
+# the least of them: an import moves (typing -> collections.abc) and the four function
+# bodies are identical, so either ref's copy scores the same.
+
+[[upstream.files]]
+path = "../upstream/miniwob/constants.py"
+upstream_path = "miniwob/constants.py"
+sha256 = "c88dfdc9e47bb1e73752ebfb3ab7337ad9141475b018ac78ae92fced576e98cb"
+bytes = 4827
+# The observation geometry in [viewport], plus the WEBDRIVER_SPECIAL_KEYS map a harness
+# needs to type anything that is not a printable character. Byte-identical at both refs.
+
+[[upstream.files]]
+path = "../upstream/miniwob/selenium_instance.py"
+upstream_path = "miniwob/selenium_instance.py"
+sha256 = "66136a027ad72db5efc180509208ecf769c588bfd52b875b8d89217cc28d17dc"
+bytes = 17316
+# Where the reset sequence, the URL composition and the score readback are all defined.
+# Vendored for those three, not to be imported: the rest is Selenium process plumbing this
+# repo has no use for. Read it as main's: its v1.0 counterpart is 16766 bytes against 17316
+# here, and create_driver() differs in behaviour, not only in annotations. This version
+# honours a MINIWOB_CHROME_BINARY/MINIWOB_CHROMEDRIVER pair and raises ValueError when
+# exactly one of them is set, and it no longer passes window-size to Chrome — so nothing
+# sizes the browser window, and of [viewport] only the crop still reaches the observation.
+# Both versions read window.innerWidth/innerHeight back from the page after load.
+
+[[upstream.files]]
+path = "../LICENSE.upstream"
+upstream_path = "LICENSE"
+sha256 = "fd6529fb8f648d4130fd969e3d7fc740c9992a0bd94a1998f52555a873311511"
+bytes = 1222
+# Byte-identical at v1.0 and at the pinned main commit, so one copy covers both refs.
+
+[tasks]
+# DERIVED, not vendored. Upstream has no task file to copy: the list exists only as Python
+# register() calls, and an instance exists only after genProblem() has run in the browser.
+# tasks.jsonl is this repo's flattening of the vendored Python into one record per
+# registered env, so a harness can enumerate the suite without importing gymnasium.
+file = "tasks.jsonl"
+format = "jsonl"
+# The full gymnasium id, "miniwob/<name>-v1", which is what registration.py keys on. The
+# bare task name is carried separately as `subdomain`, because for the 3 flight envs it is
+# "flight.Alaska" rather than a page basename and the two must not be conflated.
+id_field = "env_id"
+# The instruction is written into the page's #query element by genProblem() at episode
+# start and read back with core.getUtterance() (textContent, whitespace-collapsed). It is
+# not in tasks.jsonl and it cannot be: it is regenerated per episode from the seed.
+instruction_source = "page_rendered"
+# A MiniWoB task is not a record. It is a page plus a seed, so nothing here identifies a
+# runnable instance on its own — this triple does. Two of the three are set by JS after
+# page load and before the episode starts; see [reset].
+instance_key = ["env_id", "seed", "data_mode"]
+derived = true
+# ../derive-tasks.py writes this file; `--check` rebuilds it in memory, compares it against
+# the committed copy and exits 1 on any difference, writing nothing. Both modes need the
+# archive: the script sha256s <--datasets-dir>/miniwob-plusplus.tar.gz — default
+# <repo>/datasets — against the pin in images/miniwob/server/image.toml and refuses to read
+# a file that is missing or does not match. That archive is where the per-page facts live,
+# which is why they are the one thing the hermetic test suite cannot check from git alone.
+# Nothing under .github/workflows runs the script, so --check runs when a person runs it.
+generator = "../derive-tasks.py"
+derived_from = [
+    "../upstream/miniwob/registration.py — env_id, entry_point, nondeterministic, nondeterministic_reason, section",
+    "../upstream/miniwob/envs/miniwob_envs.py — subdomain, description, utterance_fields, additional_notes, partial_reward",
+    "../upstream/miniwob/envs/flightwob_envs.py — the same for the 3 flight envs",
+    "miniwob-plusplus.tar.gz, sha256-checked against images/miniwob/server/image.toml — the only source of episode_max_time_ms and served_by_image",
+]
+
+# The counts that disagree, and why enumerating the wrong one fails silently instead of
+# loudly: every one of these numbers describes something the server will happily serve.
+[tasks.registry_vs_directory]
+registered_envs = 128
+served_html_pages = 130
+# 5 pages are served but deliberately unregistered: button-delay, chase-circle, hover-shape,
+# moving-items, simon-says. Upstream's docs/_scripts/gen_env_list.py lists them under
+# "Excluded Tasks" because they require waiting for a timed event and "a 'no-delay' version
+# is impossible to make".
+served_but_unregistered = 5
+# 3 registered ids have no file in html/miniwob/ at all: flight.AA, flight.Alaska,
+# flight.Alaska-auto live under html/flight/<Airline>/wrapper.html.
+registered_outside_html_miniwob = 3
+# A fourth flight site, html/flight/Alaska-auto-medium/wrapper.html, is served and returns
+# 200 but has no gym env. The set of things the server will serve is therefore neither a
+# superset nor a subset of the task list, in both directions at once.
+served_flight_sites = 4
+registered_flight_envs = 3
+# Cross-check that closes the arithmetic: 128 = (130 - 5 unregistered pages) + 3 flight.
+registered_html_pages = 125
+
+# The six-way categorisation upstream ships, read from docs/_scripts/gen_env_list.py inside
+# the sha256-pinned v1.0 archive. It sums to exactly 128, and it is the file that also names
+# the 5 excluded pages.
+#
+# tasks.jsonl does NOT carry it. Its `section` field is the coarser three-way split that
+# registration.py marks in its own comments — main 107, test 18, flightwob 3 — which is what
+# the vendored bytes actually support. The two agree where they overlap: 107 = 77 + 6 + 12 +
+# 12, test == hidden_test == 18, flight == 3.
+#
+# ⚠️ CAPTURE GAP: gen_env_list.py is not among the vendored blobs above, so these six counts
+# are transcribed from a file this repo holds only inside a dataset archive. Closing the gap
+# means vendoring it; nothing in tasks.jsonl depends on it today.
+[tasks.categories]
+original = 77
+nodelay = 6
+additional = 12
+debug = 12
+flight = 3
+hidden_test = 18
+
+# One line per field of tasks.jsonl, naming where the value comes from. A field with no
+# source here is a field the generator invented.
+[tasks.fields]
+env_id = "registration.py: register(id=...), e.g. miniwob/click-tab-2-hard-v1"
+entry_point = "registration.py: register(entry_point=...); 125 name miniwob_envs, 3 name flightwob_envs"
+subdomain = "the env class's `subdomain`; the HTML basename for 125 envs, flight.<Airline> for 3"
+url_path = "derived from `subdomain` by the two rules in [urls]; the ONLY thing that locates a task"
+section = "registration.py's own two comment markers — main 107, test 18, flightwob 3"
+nondeterministic = "registration.py: nondeterministic=True (25 true, 103 false)"
+nondeterministic_reason = "the trailing comment on that flag; non-null on all 25, null otherwise, and it exists only at the pinned main commit"
+description = "the first line under `## Description` in the env class docstring"
+utterance_fields = "the bullets under `## Utterance fields`; empty on 29 envs"
+additional_notes = "the bullets under `## Additional notes`, verbatim — this is where the partial-reward semantics and the reward-processor advice live"
+partial_reward = "true where those notes carry a `**Partial reward:**` line: 20 miniwob classes plus all 3 flight envs, 23 in all"
+episode_max_time_ms = "the page's own core.EPISODE_MAX_TIME, or 10000 where it makes no assignment — readable only from the pinned v1.0 archive, not from any vendored .py"
+episode_max_time_source = "\"core-default\" on 68 envs, \"page\" on 60; the distinction matters because a page that assigns 10000 explicitly and one that inherits it are the same deadline from different places"
+served_by_image = "true where the archive actually holds the page; true on all 128, which is the assertion that the registry and the served tree still line up"
+viewport = "constants.py's WINDOW_*/TASK_*/FLIGHT_* values, transcribed into derive-tasks.py rather than imported from it; per record rather than global: 500x320/160x210 for 125 envs and 600x800/375x667 for the 3 flight envs"
+
+# There is no placeholder-substitution scheme here — nothing like WebArena's __SHOPPING__
+# tokens exists anywhere upstream, and there is no substitution script to reproduce. That is
+# why this manifest has no [sites] table. A URL is composed at runtime from a base and the
+# env's `subdomain`, by two rules that are NOT one rule with a special case.
+[urls]
+# nginx's root is the archive's html/ directory, so miniwob/, common/, core/ and flight/ are
+# siblings under the service root. That layout is load-bearing: all 130 pages load
+# ../core/core.js by relative path, and 97 of them also load ../common/ui_utils.js, so a
+# page served flat or at a different depth renders but has no `core` object — genProblem
+# never runs and nothing ever scores.
+#
+# Paths are recorded against the service root because that is unambiguous. The service root
+# is whatever address miniwob/server answers on, and the three composes in this repo answer
+# on three: deploy/compose.yml publishes ${BIND_ADDR:-0.0.0.0}:${MINIWOB_PORT:-8399}:8399,
+# images/miniwob/compose.yml — the per-image smoke compose — publishes 8399:8399 and names
+# 127.0.0.1 as the client-side host, and deploy/compose.proxy.yml serves the same tree at
+# http://miniwob.$BENCH_HOST/ with no port at all. No single base string is right for all
+# three, and nothing in the image rewrites a URL, since every asset path here is relative.
+# 125 envs, one per registered non-flight env; {name} is the env's `subdomain`.
+non_flight = "/miniwob/{name}.html"
+# 3 envs. The dots in "flight.Alaska-auto" become slashes and "/wrapper.html" is appended —
+# not "flight.Alaska-auto.html", which 404s.
+flight = "/flight/{Airline}/wrapper.html"
+# ⚠️ THE TWO FAMILIES DO NOT SHARE A BASE, which is the trap in reusing upstream's own
+# composition instead of the two paths above. It builds non-flight URLs as
+# urljoin(base_url, subdomain + ".html") and flight URLs as
+# urljoin(base_url, subdomain.replace(".", "/") + "/wrapper.html"), and feeds those two
+# calls different roots: DEFAULT_BASE_URL is <html>/miniwob/, while the flight branch starts
+# a server rooted at <html>/. One base for both yields /miniwob/flight/Alaska/wrapper.html
+# or a bare /click-button.html, and both 404 against this image.
+#
+# Both bases need the trailing slash: urljoin drops the last segment of a base that lacks
+# one, so ".../miniwob" + "click-button.html" resolves to "/click-button.html".
+upstream_base_non_flight = "<service root>/miniwob/"
+upstream_base_flight = "<service root>/"
+# The only per-instance query parameters that exist. There is NO ?seed= anywhere: the seed
+# is global Math.random state, set by executing Math.seedrandom() in the page.
+query_params = [
+    "?mode=<train|test> — sets WOB_DATA_MODE; equivalent to core.setDataMode()",
+    "?any=<bool> — relaxes the target to 'any link'; honoured by exactly 7 pages",
+    "?record=<x> — injects core/record.js for demonstration recording; irrelevant to evaluation",
+]
+
+[requires]
+# One static nginx service, shared by every task and every episode. The service name is the
+# images/ directory path, matching docs/service-contract.md.
+services = ["miniwob/server"]
+# Both empty. images/miniwob/server/ builds this image, and deploy/compose.yml brings it up
+# as the `miniwob` service, with deploy/Caddyfile routing miniwob.$BENCH_HOST to it and
+# deploy/README.md's port table listing it. This suite has no service gap; what it has
+# instead is a deadline that no LLM agent can meet — see [[open_decisions]].
+not_built = []
+not_deployed = []
+# Every registered env has its page in the served tree, so nothing is blocked on a
+# missing service. What blocks an agent here is the deadline, not the deployment.
+runnable = 128
+blocked = 0
+# No login, no cookies, no storage_state, no seeded accounts, and therefore no [accounts]
+# table: the server is static files and the entire benchmark state lives in one browser tab.
+accounts = false
+# No engine is named, because nothing vendored here pins one. Upstream's own driver is
+# Chrome — selenium_instance.py's create_driver() builds a webdriver.Chrome — but the pages
+# do not require it: everything a harness touches (core.startEpisodeReal, core.getUtterance,
+# the WOB_* globals) is ordinary page JS, constants.py's WEBDRIVER_SPECIAL_KEYS are the W3C
+# WebDriver code points rather than Chrome's, and the one engine-specific call in core.js,
+# clearUserSelection(), feature-detects and falls back to removeAllRanges. Playwright or
+# browser-use reaches the same globals with the same JS.
+browser = "any browser the harness can execute JS in"
+
+[reset]
+# Client-side and per-episode. Nothing on the server changes, ever.
+kind = "page_episode"
+# Effectively zero: no container restart, no HTTP endpoint, no database. The measurable
+# cost is the WOB_TASK_READY poll below, which upstream bounds at 20 attempts x 50 ms.
+cost_s = 0.0
+# NOT optional. Navigating to a task URL does not start the task: window.onload calls
+# core.startEpisode(), which raises a full-page div#sync-task-cover reading START and waits.
+# A harness that goes straight to clicking is driving a page whose problem has not been
+# generated and whose timer has not started, and nothing on the page says so.
+mandatory = true
+# In this order, from ../upstream/miniwob/selenium_instance.py, where it is spread across
+# reset(), force_stop() and begin_task(). Flattened here because these six lines are the
+# part a harness has to reproduce and the rest of that file is Selenium plumbing.
+#
+# The order is load-bearing twice over. The seed must land before startEpisodeReal(),
+# because genProblem() consumes Math.random() during that call and anything else touching
+# Math.random() in between shifts the stream. And force_stop must come first because it is
+# what terminates a still-running episode: startEpisodeReal() called over a live episode
+# clears that episode's timer itself and generates a new problem on top of it, so the
+# previous episode's result is gone before anything reads it.
+sequence = [
+    "core.endEpisode(0)                     — force_stop; returns to the sync screen",
+    "driver.get(url)                        — OPTIONAL, every refresh_freq episodes; the only thing that clears carried-over tab state",
+    "Math.seedrandom(<repr(seed)>)          — reseeds the page's GLOBAL Math.random",
+    "core.setDataMode(<train|test>)         — sets WOB_DATA_MODE for the next episode",
+    "core.startEpisodeReal()                — genProblem(), clears the globals, arms the deadline timer",
+    "poll `return WOB_TASK_READY;`          — up to 20 attempts at 50 ms",
+]
+# The poll matters for the 3 flight envs and only for them: flight-common/wrapper.js sets
+# WOB_TASK_READY = false until its child iframe loads, and no file under html/miniwob/ ever
+# touches the flag. Skipping the poll costs nothing on 125 tasks and races on 3.
+poll_target = "WOB_TASK_READY"
+poll_attempts = 20
+poll_interval_s = 0.05
+# What a reset does NOT clear, which is why 25 envs are flagged nondeterministic: between
+# episodes the tab keeps jQuery-UI widget state, scroll positions, focus and setInterval
+# timers. Only the optional driver.get() clears those, and upstream requires a seed
+# whenever refresh_freq is set precisely because the reload resets Math.random too.
+clears_tab_state = false
+
+[scoring]
+# The scorer ships inside the site. Each task's HTML calls core.endEpisode(reward,
+# time_proportional, reason) from its own handlers, core.js turns that into four page
+# globals, and the harness reads the globals. There is no answer file to compare against
+# and no external evaluator to import.
+evaluator_kinds = [
+    "in_page_js_reward — the task HTML calls core.endEpisode() (295 call sites across 130 pages)",
+    "time_decayed_reward — core.js scales any positive reward by the remaining time",
+    "episode_timeout — core.js arms setTimeout(endEpisode(-1, false, 'timed out'), EPISODE_MAX_TIME)",
+    "flight_form_validator — flight-common/wrapper.js overrides endEpisode and scores via core.validateForm (3 envs)",
+]
+# All three counts are over the 128 registered envs, and they are counts of what SCORING
+# needs, not of what the episode needs. No model is in the loop anywhere, so needs_judge is
+# 0. Nothing is scorable from a stored transcript either: the score exists only as four
+# globals in the tab the episode ran in, there is no answer key anywhere in the archive to
+# compare a recorded answer against, and reading it is the readback_js below — a JS call
+# into the live page after the episode has terminated and before the next
+# startEpisodeReal() zeroes the globals. That the page is the same tab rather than a fresh
+# navigation does not make it less live.
+offline_scorable = 0
+needs_live_page = 128
+needs_judge = 0
+# The exact readback, from ../upstream/miniwob/selenium_instance.py:get_metadata. Read it
+# BEFORE calling startEpisodeReal() again: that call resets all four globals to
+# 0/0/false/null.
+# Whitespace is normalised: get_metadata builds this by adjacent-literal concatenation and
+# emits no space after each comma. Nothing else about the expression differs.
+readback_js = '''return {"done": WOB_DONE_GLOBAL, "env_reward": WOB_REWARD_GLOBAL, "raw_reward": WOB_RAW_REWARD_GLOBAL, "reason": WOB_REWARD_REASON,};'''
+reward_range = [-1.0, 1.0]
+# Only the FIRST terminal event of an episode scores. core.endEpisode returns immediately
+# if core.EP_TIMER is already null, and its last statement is core.startEpisode(), which
+# re-raises the START cover. A second click after success is ignored; a read after the next
+# startEpisodeReal() sees zeros.
+first_terminal_event_wins = true
+
+# The four processors in ../upstream/miniwob/reward.py. Which one this repo reports is an
+# open decision, not a default — the entry in [[open_decisions]] carries the options.
+[scoring.reward_processors]
+get_original_reward = "env_reward verbatim — time-decayed, so it is partly a measurement of the agent's latency"
+get_raw_reward = "raw_reward — no time penalty, keeps documented partial credit"
+get_binary_reward = "raw_reward == 1.0 ? 1.0 : -1.0 — what published MiniWoB numbers overwhelmingly report"
+get_thresholded_reward = "raw_reward >= threshold ? 1.0 : -1.0, threshold defaults to 1.0 — 5 env docstrings ask for this instead of get_binary_reward"
+
+# THE TIME DECAY, counted over the 295 endEpisode call sites in the 130 served pages.
+# core.js: reward = reward * Math.max(0, 1.0 - dt/core.EPISODE_MAX_TIME) when
+# time_proportional is truthy. A correct answer at t=9s on a 10s task yields env_reward 0.1
+# and raw_reward 1.0, so reading env_reward makes a working agent look broken.
+[scoring.time_proportional]
+literal_true = 94
+# Not a separate case: the five expressions used here — `r > 0` (80 sites, half of them
+# written unspaced), `reward > 0` (8), `x > 0` (2), `correct == 'ONE'` (1) and
+# `correct == 'TWO'` (1) — are true on exactly the successful terminations, so they decay
+# too. reward.py's own docstring states
+# the consequence plainly — "In all environments, any positive reward is scaled by the
+# remaining time."
+success_conditional = 92
+literal_false = 56
+omitted = 53
+# Of the 94 literal-true sites, the ones passing reward 1 or 1.0 — full credit, decayed.
+full_credit_decayed = 88
+# The 3 flight envs are the exception: flight-common/wrapper.js calls
+# core.endEpisode(reward, false, reason), so FlightWoB scores are not time-decayed.
+flight_decayed = false
+
+# THE DEADLINE TRAP. core.startEpisodeReal() arms a timer that fires
+# core.endEpisode(-1, false, 'timed out'). On expiry the page looks entirely normal:
+# WOB_DONE_GLOBAL flips true, the reward is -1, and there is no error, no exception and no
+# console warning. Counts measured over the 130 served pages, and they sum to 130.
+[scoring.episode_deadline]
+core_js_default_ms = 10000
+# No assignment of their own, so they run at the 10-second default.
+pages_using_default = 72
+# Assign 10000 explicitly. Effectively 80 of 130 pages give an agent ten seconds.
+pages_overriding_to_10000 = 8
+pages_at_7000 = 2
+pages_at_15000 = 16
+pages_at_20000 = 18
+pages_at_30000 = 14
+# The four flight wrappers set 60000. Three of them are registered envs.
+flight_wrappers_at_60000 = 4
+# The same distribution over the 128 REGISTERED envs, which is what a run actually walks —
+# the two views differ by the 5 unregistered pages (4 of them at the default, 1 at 15000)
+# and by the 3 flight envs. tasks.jsonl carries this per record as episode_max_time_ms.
+registered_at_7000 = 2
+registered_at_10000 = 76
+registered_at_15000 = 15
+registered_at_20000 = 18
+registered_at_30000 = 14
+registered_at_60000 = 3
+# Stated because it is the single most consequential fact in this manifest: 82 of the 130
+# pages expire at ten seconds or less and 116 expire before thirty, so an LLM agent that
+# spends thirty seconds deciding has scored -1 on 116 of them before its first click.
+# MiniWoB as published cannot be run by an LLM agent. Both obvious fixes — raising
+# EPISODE_MAX_TIME before startEpisodeReal(), or clearing core.EP_TIMER — change the
+# numbers, because the deadline is also the denominator of the time decay.
+pages_at_10000_or_less = 82
+pages_under_30000 = 116
+llm_runnable_as_published = false
+
+# Fixed instruction sets, not generators, for two of the three flight envs — so data_mode
+# selects between two enumerable pools rather than shifting a distribution.
+# flight.Alaska-auto overrides core.sampleQuestion and generates its own.
+[scoring.flight_datasets]
+"flight.AA" = { train = 74, test = 19 }
+"flight.Alaska" = { train = 75, test = 19 }
+"flight.Alaska-auto" = { train = "generated", test = "generated" }
+
+# The observation geometry the benchmark is defined against, from
+# ../upstream/miniwob/constants.py, and carried per-record in tasks.jsonl because the 3
+# flight envs do not share it. constants.py defines all four pairs, but at the vendored main
+# commit selenium_instance.py applies only the task crop: it reads the real window size back
+# from the page and crops the screenshot to task (flight_task for the 3 flight envs), and it
+# passes no window-size to the driver at all. A harness that wants the published window has
+# to size the window itself.
+# core.getDOMInfo() skips any zero-area element and skips #reward-display,
+# #sync-task-cover, #click-canvas and #query outright — the instruction is read separately
+# via core.getUtterance(). A harness at 1280x720 is not observing what MiniWoB defines.
+[viewport]
+window = [500, 320]
+task = [160, 210]
+flight_window = [600, 800]
+flight_task = [375, 667]
+
+# Every policy question below is genuinely open. None of them has a default in this file,
+# because a default here would bury the decision in a data file. All eight ids are
+# miniwob-scoped, and none of them takes the fleet- namespace: the fleet-wide question the
+# other manifests carry is TODO.md's tie-ordering one, which needs relevance-ranked search
+# over a restored database, and this benchmark has neither — miniwob/server is static nginx
+# over the archive's html/ tree, with nothing to query and nothing to order.
+
+[[open_decisions]]
+id = "miniwob-episode-deadline"
+question = "Does this repo run MiniWoB at its published deadline, and if it raises it, is env_reward still a reportable number?"
+options = [
+    "as-published — leave core.EPISODE_MAX_TIME alone; comparable to published numbers, and an LLM agent scores -1 on the 76 registered envs that run at the 10 s default before acting",
+    "raised — set core.EPISODE_MAX_TIME before startEpisodeReal(); the run becomes possible and stops being comparable, since the deadline is also the time-decay denominator",
+    "disarmed — clear core.EP_TIMER after startEpisodeReal(); removes the -1 but leaves env_reward decaying against a deadline that no longer terminates anything",
+    "report raw_reward only and treat env_reward as unreportable under any of the above, since it is a function of agent latency",
+]
+affects = "all 128 envs; 80 of the 130 served pages run at ten seconds, 82 at ten seconds or less, and 116 expire before thirty"
+
+[[open_decisions]]
+id = "miniwob-reward-processor"
+question = "Which of reward.py's four processors is the reported score?"
+options = [
+    "get_binary_reward — raw_reward == 1.0; what published MiniWoB numbers overwhelmingly use, and it discards all documented partial credit",
+    "get_raw_reward — keeps partial credit on the 20 envs that document it, comparable to nothing published",
+    "get_thresholded_reward per-env — 5 env docstrings explicitly ask for this over get_binary_reward",
+    "get_original_reward — env_reward as-is, which is time-decayed",
+]
+affects = "all 128 envs; 20 miniwob classes and all 3 flight envs document partial rewards, 5 name a threshold"
+
+[[open_decisions]]
+id = "miniwob-seed-policy"
+question = "How many seeds per env, and are the seeds themselves pinned in this repo?"
+options = [
+    "a fixed pinned seed list, identical across runs — reproducible, and small lists overfit to whatever instances they happen to generate",
+    "N random seeds per env, reporting mean and spread — an instance is a page plus a seed, so a single seed per env is one sample, not a score",
+]
+affects = "all 128 envs; determines what a 'run' of this suite even is, since there is no fixed instance set to enumerate"
+
+[[open_decisions]]
+id = "miniwob-nondeterministic-envs"
+question = "What happens to the 25 envs marked nondeterministic=True, which a seed alone does not reproduce?"
+options = [
+    "run them and report them alongside the rest, flagged",
+    "run them with refresh_freq = 1 so every episode gets a full page reload, paying a navigation per episode to clear the carried-over widget and timer state",
+    "exclude them from the headline number and report them separately",
+]
+affects = "25 of 128 envs, including all 3 flight envs, book-flight*, choose-date*, social-media*, scroll-text*, click-dialog*, search-engine, phone-book, order-food, click-scroll-list, drag-cube, click-pie*, stock-market, terminal"
+
+[[open_decisions]]
+id = "miniwob-data-mode"
+question = "Is the suite run in train mode, test mode, or both?"
+options = [
+    "train — matches the Python env's default",
+    "test — the held-out split; for flight.AA and flight.Alaska it is a 19-scenario pool against 74 and 75",
+    "both, reported separately",
+]
+affects = "5 miniwob pages read WOB_DATA_MODE (click-checkboxes-transfer, click-test-transfer, email-inbox-forward-nl, email-inbox-forward-nl-turk, email-inbox-nl-turk) plus all 3 flight envs; the wrong mode is invisible in the page, and core.js defaults to 'default' while the Python env defaults to 'train'"
+
+[[open_decisions]]
+id = "miniwob-viewport"
+question = "Does the harness drive the published 160x210 task viewport inside a 500x320 window, or a viewport the agent can actually see?"
+options = [
+    "as-published — 500x320 / 160x210, and 600x800 / 375x667 for flight; what the benchmark is defined against",
+    "agent-native — a larger window, which changes layout, screenshot content and every geometry-dependent task",
+]
+affects = "all 128 envs; the geometry-dependent ones most of all — the 9 drag-* envs, resize-textarea, click-shape, bisect-angle and circle-center"
+
+[[open_decisions]]
+id = "miniwob-dataset-pin-ref"
+question = "Should images/miniwob/server's dataset pin move from the v1.0 tag archive to the main commit the metadata is vendored from?"
+options = [
+    "leave at v1.0 — the served bytes are already identical to main's, so the move buys only ref alignment",
+    "move to 33c3b4ddef8c6eb67c57a29663d844b1eda7e614 — one ref instead of two, at the cost of computing a new archive sha256 and pinning a commit archive rather than a tag archive",
+]
+affects = "no served byte: all 361 blobs under miniwob/html/ are byte-identical at the two refs, core.js included. This is a provenance-legibility call, not a content call, and it is the owner's."
+
+[[open_decisions]]
+id = "miniwob-unregistered-pages"
+question = "Are the 5 served-but-unregistered pages and the unregistered 4th flight site in scope for this repo?"
+options = [
+    "no — follow the registry at 128, which is what upstream's own docs do",
+    "yes — capture button-delay, chase-circle, hover-shape, moving-items, simon-says and flight/Alaska-auto-medium as a separate suite, acknowledging upstream's position that they need timed waiting and cannot have a no-delay version",
+]
+affects = "6 pages the image already serves and no manifest currently names"
