@@ -62,7 +62,7 @@ each and the directory is what disambiguates them.
 
 Upstream WebArena `.gitignore`s all 812 generated per-task JSONs (`config_files*/*[0-9].json`).
 The artifact it commits is the template, with `__SHOPPING__`-style tokens intact, and a
-28-line generator that substitutes them from environment variables.
+27-line generator that substitutes them from environment variables.
 
 Vendor the template. Substituting at capture time would bake one deployment's hostnames into
 git and destroy the relocatability the whole `deploy/` design exists to provide.
