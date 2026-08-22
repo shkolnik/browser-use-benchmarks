@@ -1,0 +1,432 @@
+# WebShop — the full human-goal set.
+#
+# This manifest IS the capture. WebShop ships no per-task record and no per-task URL:
+# a task is the pair (goal index, running server), the goal text is computed at server
+# boot from the product corpus, and the only thing addressable from a browser is a
+# session-id path segment. So every fact a harness needs to run and score one instance
+# lives here, not in a task file. See ../README.md for the end-to-end procedure.
+#
+# Every `path` below is relative to the BENCHMARK directory (tasks/webshop/), not to
+# this suite directory, because upstream/ is shared by every suite of this benchmark.
+
+[suite]
+name = "human"
+benchmark = "webshop"
+# Measured: `json.load(human/human_goals.json)` is a list of 12,087 strings, of which
+# 11,563 are distinct. The duplication is the reason this file cannot be used to
+# reconstruct a goal — see [tasks].
+task_count = 12087
+description = "All 12,087 crowd-sourced human goals, addressed by index against a live webshop/server."
+
+[upstream]
+repo = "https://github.com/princeton-nlp/WebShop"
+commit = "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+# LICENSE.md at that commit is verbatim MIT, "Copyright (c) 2023 Princeton Natural
+# Language Processing", and is vendored as LICENSE.upstream. The repo's README badge
+# says "License: Princeton" and links copyright.princeton.edu, which the file
+# contradicts; the file governs. The MIT grant covers the CODE — the scraped Amazon
+# catalogue in items_shuffle.json is distributed outside the repo and carries no
+# licence statement of its own, which is one reason this repo pins that corpus rather
+# than re-hosting it.
+license = "MIT"
+# Upstream paths whose facts this manifest states but whose bytes are NOT in the repo.
+# Nothing in [[upstream.files]] covers them, so no sha256 check can catch them going
+# stale against a re-pin. They are listed rather than left implicit because the reader
+# otherwise cannot tell which claims here are checkable.
+not_vendored = [
+    "web_agent_site/app.py",                     # the /fixed_<i> addressing and random.seed(233)
+    "web_agent_site/engine/engine.py",           # generate_product_prices — the unseeded price draw
+    "web_agent_site/templates/done_page.html",   # the #reward / #reward_info selectors
+    "baseline_models/env.py",                    # one of the two train-split definitions
+    "baseline_models/train_search_il.py",        # the other one
+    "baseline_models/test.py",                   # the 500-episode loop and the reported scale
+    "baseline_models/data/items_human_ins.json", # pinned instead — see [goal_source]
+]
+
+# The goal texts, in the order the server addresses them.
+[[upstream.files]]
+path = "human/human_goals.json"
+upstream_path = "baseline_models/data/human_goals.json"
+sha256 = "b68746ed66cd31fdc5f70eb3f5831a46b38163563b57a66ddcab8fd60ee0cbdc"
+bytes = 999419
+
+# The reward oracle, vendored to be READ and reimplemented against — never imported.
+# Importing goal.py drags in spacy + en_core_web_sm and thefuzz at module scope, and
+# calling get_reward drags in the 5.28 GiB product corpus on top, because the reward
+# reads fields off the PURCHASED product: Attributes, Title, BulletPoints, Description,
+# query, product_category and name. Scraping the done page costs none of that.
+[[upstream.files]]
+path = "upstream/web_agent_site/engine/goal.py"
+upstream_path = "web_agent_site/engine/goal.py"
+sha256 = "9703c8583244e2041182eb14856186b998145ab16ce2ba9aef8cb680877c8ed5"
+bytes = 9925
+
+# Option scoring normalises both sides through normalize_color before fuzzy matching,
+# so the reward is not reimplementable from goal.py alone. Note goal.py imports
+# normalize_color and nothing else from here: normalize_color_size, SIZE_SET and
+# SIZE_PATTERNS are unreachable from the reward path.
+#
+# normalize_color returns the first COLOR_SET entry that is a SUBSTRING of its input,
+# in COLOR_SET's own order, which is roughly alphabetical rather than
+# longest-match-first. Measured against the vendored table: "dark red" -> "dark",
+# "light blue" -> "blue", "off white" -> "white", "kiss me pink" -> "pink". Two shades
+# of one colour therefore collapse asymmetrically, and an option string containing no
+# COLOR_SET member is returned unchanged.
+[[upstream.files]]
+path = "upstream/web_agent_site/engine/normalize.py"
+upstream_path = "web_agent_site/engine/normalize.py"
+sha256 = "1962113ac9e209a636d4f181b2c70544bbea59b03adca9847e48287158d794fb"
+bytes = 3819
+
+# The expected values any reimplementation has to hit. [[scoring.oracle_cases]] below
+# reproduces its four get_reward assertions as arithmetic, so a reimplementation can be
+# checked against this manifest without a Python runtime — with the caveat recorded there
+# about which of the two option paths those four cases exercise.
+[[upstream.files]]
+path = "upstream/tests/test_goal.py"
+upstream_path = "tests/web-agent-site/engine/test_goal.py"
+sha256 = "f10b97ca81eb2f4ffd8a3a0b377f421d3c0ce50ee2d5e80d7e1f39fab228055e"
+bytes = 7913
+
+# MIT's one condition is that the notice travels with any copy.
+[[upstream.files]]
+path = "LICENSE.upstream"
+upstream_path = "LICENSE.md"
+sha256 = "8872dbf8660b00890b5e07ce1ea1f7a44fa7ae4e1857da56caba172b51dab3cb"
+bytes = 1094
+
+# The file the SERVER builds its goals from. It is pinned, not vendored, and the pin has
+# exactly one source of truth: images/webshop/server/image.toml. This entry names it by
+# filename and sha256 so the two can be checked against each other; restating the mirror
+# URLs here would make a second copy of a pin, which is a silent-wrong-data hole rather
+# than redundancy.
+[goal_source]
+filename = "items_human_ins.json"
+sha256 = "cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3"
+pinned_at = "images/webshop/server/image.toml"
+
+[tasks]
+file = "human/human_goals.json"
+format = "json_array_of_strings"
+# There is no id field. A task's identity is its ZERO-BASED INDEX in that array, and the
+# array carries nothing else — no asin, no attributes, no options, no price ceiling.
+id_field = ""
+# The instruction an agent sees is rendered by the server, not read from any file, and
+# it is not stable across boots. get_human_goals composes it as
+# `product['instruction'].strip('.') + price_text`, where price_text is
+# `f', and price lower than {price_upper:.2f} dollars'` and price_upper comes from
+# `random.sample(price_range, 2)` — with no random.seed anywhere in goal.py. The base
+# text is fixed by the corpus; the price clause is drawn fresh in every server process.
+# So /fixed_42 renders a different instruction string on two boots of the same image.
+instruction_source = "server_rendered"
+# What human_goals.json IS for: VERIFYING that a live /fixed_<i> is the goal you think
+# it is. What it is NOT for: reconstructing a goal offline. Three measured reasons.
+#
+#   1. It is lossy. 12,087 entries, 11,563 distinct — 517 texts repeat, covering 1,041
+#      entries, and 41 of the first 500 (the published test split) are among them. Text
+#      -> (asin, attributes, goal_options) is many-to-one and cannot be inverted.
+#   2. It carries none of the scored fields. `attributes`, `goal_options`, `price_upper`
+#      and `asin` are what get_reward reads, and none of them is in this file.
+#   3. It carries no price clause: measured, 0 of 12,087 entries contain
+#      "price lower than". That absence is exactly what makes it a stable identity —
+#      it is the half of the instruction that does not move between boots.
+#
+# Compare NORMALISED, never for equality. Measured over all 12,087 entries: every one is
+# already lowercase; none contains an ASCII quote (' or "), but 59 carry a TYPOGRAPHIC
+# one — U+2019 in 44 entries, U+201C in 6, U+201D in 16; 199 carry a bare '&'; and 11
+# still end with a period even though the server's own text runs the base through
+# `.strip('.')`. A harness should lowercase, strip the ", and price lower than N dollars"
+# suffix and strip trailing periods on BOTH sides before comparing. Punctuation has to be
+# handled symmetrically: stripping ASCII quotes is a no-op on this file, and stripping the
+# typographic ones — or unescaping '&' out of page source — on one side only breaks
+# exactly the entries that carry them.
+verify_by = "normalised comparison against the rendered instruction; never offline reconstruction"
+
+# No [sites] table: WebShop has no placeholder tokens and no per-task URL. Nothing in
+# this repo or upstream rewrites a WebShop URL — the app emits exclusively relative
+# links, which images/webshop/server/entrypoint.sh states as the reason it does not
+# rewrite anything from HTTP_HOST/HTTP_PORT. The task index travels in the path segment
+# instead; see [addressing].
+
+[addressing]
+# app.py selects a fixed goal with, verbatim:
+#     if session_id not in user_sessions and 'fixed' in session_id:
+#         goal_dix = int(session_id.split('_')[-1])
+#         goal = goals[goal_dix]
+# so goal i is reached at GET /fixed_<i> and the published test split is
+# /fixed_0 .. /fixed_499. A session id NOT containing "fixed" draws a random
+# weight-sampled goal instead — which is what the image's own healthcheck path /abc
+# does, and why /abc is not a task.
+path_template = "/fixed_{index}"
+# "fixed" is matched as a SUBSTRING, not a prefix, and the index is taken from the last
+# underscore-delimited field. Both halves are load-bearing: user_sessions is keyed by
+# the RAW session id, and revisiting an id already in it silently reuses the stored
+# goal rather than re-rolling, so a harness that retries /fixed_0 is driving a session
+# that is already flagged done. A distinct id that still contains "fixed" and still
+# ends in _<i> — attempt2fixed_0 — is a clean session on the same goal, and it is the
+# only way to retry without restarting the container.
+match_rule = "substring"
+retry_template = "{prefix}fixed_{index}"
+# The published test split, for the reproduce-published-numbers reading.
+test_range = [0, 500]
+# The eval split on the same reading: baseline_models/env.py starts train at 1500, which
+# leaves 500..1499 as eval. That file is not vendored, and webshop-train-split records the
+# other upstream file that contradicts its boundary.
+eval_range = [500, 1500]
+
+[requires]
+services = ["webshop/server"]
+# Nothing is missing in either direction: images/webshop/server/ builds and publishes the
+# image, and deploy/compose.yml's `webshop` service brings it up. WebShop is one
+# self-contained service — no second site, no map backend, no auth service, no external
+# network at run time — so both subsets are empty.
+not_built = []
+not_deployed = []
+# Every goal is addressable against the one service, so nothing is blocked.
+runnable = 12087
+blocked = 0
+# No login, no cookies, no storage_state and no seeded accounts, so there is no [accounts]
+# table. Session state is an in-process dict keyed by the session-id path segment, with no
+# persistence layer, so there is nothing to authenticate as.
+accounts = false
+# No required_env either. Nothing in a WebShop task is addressed through an environment
+# variable: the task index travels in the URL path (see [addressing]), and the service
+# address belongs to the harness.
+#
+# The search index is pyserini/Lucene over all ~1.18M products and is baked into the
+# image, and goal.py loads spacy en_core_web_sm at import. Both are inside the
+# container; a harness needs neither.
+
+[reset]
+# There is no reset endpoint, no reset script and no state to restore — the server
+# writes nothing. Per-task isolation comes from using a fresh session id, not from
+# resetting anything, so the declared kind is `none` and its cost is one HTTP request.
+kind = "none"
+cost_s = 0
+how = """
+Use a session id that has not been used before: /fixed_<i> the first time, and a
+distinct id containing "fixed" and ending in _<i> (attempt2fixed_0) for each retry.
+Ids do not interfere; each gets its own entry in the in-process user_sessions dict.
+
+Recreating the container is the only FULL reset, and it is not equivalent: rebuilding
+the goal list re-runs the unseeded price draws, so every goal's price clause and every
+r_price outcome changes. Only the seed(233) shuffle — and therefore which goal an index
+names — survives a restart. Recreating to "reset" a task silently changes the task.
+
+The goal list is built lazily inside the first request. Warm the server with one request
+and let the 180s health-check start period elapse before dispatching parallel agents;
+the container-recreate cost is recorded at images/webshop/server/README.md.
+"""
+
+[scoring]
+# One evaluator, and it is the server's. All 12,087 goals are scored the same way: the
+# app computes a continuous reward in [0.0, 1.0] when the agent clicks Buy Now and
+# renders it into the done page. Nothing external evaluates anything.
+evaluator_kinds = ["server_reward"]
+# Offline scoring is possible but not cheap: get_reward reads the PURCHASED product's
+# Attributes, Title, BulletPoints, Description, query, product_category and name, so it
+# needs items_shuffle.json (5,479,720,229 B) plus items_ins_v2.json (186,295,270 B) —
+# sizes as recorded beside their pins in images/webshop/server/image.toml; neither file is
+# in this repo, so the only thing that checks either number is a download verified against
+# that pin — plus spacy en_core_web_sm 3.3.0 and thefuzz 0.19.0. And it still would not be
+# enough: r_price compares against the server-side randomised price_upper, which exists
+# only inside the process that drew it. No download recovers that, which is why this count
+# is 0 rather than "expensive".
+offline_scorable = 0
+# Every task, therefore. Scoring is a DOM read of the done page, which exists only in the
+# live session the episode ended in — and the running image has already computed the
+# number, so this is the cheap path rather than the fallback.
+needs_live_page = 12087
+needs_judge = 0
+success = "reward == 1.0"
+reward_range = [0.0, 1.0]
+
+[scoring.formula]
+# Verbatim from the vendored goal.py, get_reward:
+#
+#   total_reward = (num_attr_matches + num_option_matches + r_price)
+#                / (len(goal['attributes']) + len(goal['goal_options']) + 1)
+#   total_reward *= r_type
+#
+# The numerator uses raw MATCH COUNTS. The r_att and r_option in the verbose info dict
+# are separately normalised fractions and cannot be recombined into the total; a scorer
+# that averages the sub-scores does not reproduce the score.
+numerator = "num_attr_matches + num_option_matches + r_price"
+denominator = "len(attributes) + len(goal_options) + 1"
+multiplier = "r_type"
+# r_price is the BOOLEAN `price <= goal['price_upper']`, added numerically as 1 or 0.
+# It is None when price_upper <= 0, which would make the addition a TypeError — so
+# price_upper > 0 is load-bearing, and get_human_goals guarantees it by always assigning
+# either a PRICE_RANGE multiple of ten or the 1000000 fallback.
+r_price = "bool(price <= price_upper), summed as 1 or 0"
+# r_type is a MULTIPLIER over the whole fraction, taking only these four values.
+r_type_values = [1.0, 0.5, 0.1, 0.0]
+
+[scoring.r_type]
+# get_type_reward, as a cascade of INDEPENDENT ifs — not elif — so the last one that
+# fires wins. Starting from 1.0:
+#   not (query_match or category_match or title_score > 0.2)  ->  0.5
+#   title_score < 0.1                                         ->  0.1
+#   title_score == 0.0                                        ->  0.0
+# The consequence of the cascade: an exact query match with title_score 0.05 still
+# scores r_type 0.1. query_match and category_match can only lift 0.5 to 1.0; they
+# cannot rescue a low title_score.
+query_match = "purchased['query'] == goal['query'], exact string equality"
+# The breadcrumb is split on U+203A (SINGLE RIGHT-POINTING ANGLE QUOTATION MARK), not
+# '>' and not '»'. Each part is stripped, both sides become sets, and a match is an
+# intersection of at least two elements — so order does not matter and a repeated
+# component contributes once.
+category_match = "len(set(purchased breadcrumb) & set(goal breadcrumb)) >= 2, split on U+203A"
+# spaCy en_core_web_sm parses both names; tokens are kept where pos_ is in
+# ('PNOUN', 'NOUN', 'PROPN'). 'PNOUN' is not a real spaCy tag — it is a typo for PROPN,
+# which is already in the tuple — and it is inert. Reproduce it verbatim rather than
+# correcting it, and do not substitute en_core_web_lg (which upstream's setup.sh
+# downloads and the served code never loads): a different model changes title_score and
+# therefore r_type.
+#
+# The numerator is a SET intersection and the denominator is the goal LIST's length, so
+# a goal title containing the same noun twice cannot reach title_score 1.0 even against
+# an identical purchased title.
+title_score = "len(set(purchased nouns) & set(goal nouns)) / len(goal noun list)"
+# An empty goal parse short-circuits to 0.2 — which is not > 0.2, so it does not satisfy
+# the match test on its own, and is not < 0.1, so it never drops r_type below 0.5.
+title_score_empty_goal_parse = 0.2
+
+[scoring.r_attribute]
+# get_attribute_reward, per goal attribute, first hit wins and stops the inner loop:
+#   1. thefuzz.fuzz.token_set_ratio(p_attr, g_attr) > 85 against ANY entry of the
+#      purchased product's Attributes list; else
+#   2. the goal attribute appears literally in purchased Title.lower(), in
+#      ' '.join(BulletPoints).lower(), or in Description.lower().
+# The threshold is a hard `> 85`, so 85 is a miss. requirements.txt pins thefuzz 0.19.0
+# with no python-Levenshtein extra, which puts token_set_ratio on the pure-Python
+# difflib backend; a reimplementation on the C-accelerated backend can land on the other
+# side of the threshold for borderline pairs.
+#
+# Two asymmetries in the containment fallback: the goal attribute is NOT lowercased
+# before the `in` test (only the haystack is), and BulletPoints is joined with ' ' — so
+# a purchased product whose BulletPoints is a bare string rather than a list is joined
+# CHARACTER BY CHARACTER and matches nothing. The vendored test exercises that path.
+fuzzy_threshold = 85
+fuzzy_comparator = "thefuzz.fuzz.token_set_ratio"
+
+[scoring.r_option]
+# get_option_reward. Both sides pass through normalize_color first, then a goal option
+# scores a match if token_set_ratio > 85 against any purchased option. Purchased options
+# come from the /done/<session>/<asin>/<options> URL segment, literal_eval'd to a dict,
+# and .values() is what is compared.
+#
+# Matching does not CONSUME: one purchased option can satisfy two goal options, so
+# num_option_matches is bounded by len(goal_options), not by the purchased count.
+#
+# For human goals goal_options is a LIST. For synthetic goals it is a DICT, and
+# get_reward passes .items() — i.e. (key, value) TUPLES — into normalize_color, where
+# `norm_color in color_string` becomes element membership rather than substring, and
+# thefuzz then stringifies the tuple. Human goals never take that path; a scorer
+# validated only here will misbehave on synthetic goals. The vendored test's four
+# get_reward cases go the other way — see the note on [[scoring.oracle_cases]].
+fuzzy_threshold = 85
+goal_options_type = "list (human goals); dict (synthetic goals)"
+
+[scoring.done_page]
+# The only place the score is exposed to a browser agent. Read the DOM, not the rendered
+# text: the reward_info block sits inside an `<h4 hidden>` and the goal fields sit inside
+# a `style="display:none"` div, so a visible-text observation (including WebShop's own
+# tag_visible filter) surfaces at most the score number and none of the sub-scores or
+# goal fields.
+#
+# Whether `#reward` is ITSELF inside a hidden wrapper is not settled here: done_page.html
+# is not vendored (see [upstream].not_vendored), so no byte in this repo says which of its
+# elements carry `hidden` or `display:none`. Reading the DOM is correct whether or not it
+# is, and it is the only rule that is; the check is that template at the pinned commit.
+reward_selector = "#reward pre"
+reward_info_selector = "#reward_info pre"
+# Also present on the page, all inside the hidden goal block, and worth logging because
+# they are the only offline record of what the server actually asked for on this boot:
+# goal.asin, goal.attributes, goal.goal_options, goal.price_upper, goal.instruction_text,
+# goal.query, goal.category, goal.product_category — plus asin, options, purchased_attrs
+# and mturk_code for the purchase.
+goal_fields_selector = "the display:none goal block"
+
+# The four get_reward assertions in the vendored tests/test_goal.py, restated as the
+# arithmetic above so a reimplementation can be checked against this manifest. Each
+# `arithmetic` value evaluates to `expected`; the tolerance is the test's own 1e-2.
+#
+# WHICH PATH THEY EXERCISE: in all four, the test builds goal['goal_options'] as a DICT
+# ({"color": "grey", "size": "XL"}), so get_reward takes its `.items()` branch and
+# normalize_color receives (key, value) TUPLES — the SYNTHETIC option path, not the list
+# path every goal in this suite takes (see [scoring.r_option]). The expected values come
+# out the same under either branch for these particular inputs — the options that match
+# are identical strings, and the one that does not is absent from the purchase either way
+# — so nothing in the four cases distinguishes the branches. A scorer that reproduces all
+# four has validated the dict branch and left the list branch, the one human goals need,
+# untested.
+[[scoring.oracle_cases]]
+case = "exact match"
+arithmetic = "(3 + 2 + 1) / (3 + 2 + 1) * 1.0"
+expected = 1.0
+
+[[scoring.oracle_cases]]
+# One attribute match, not three: BulletPoints is a bare string here, so the ' '.join
+# spaces it out character by character and only Description matches.
+case = "attribute partial credit"
+arithmetic = "(1 + 2 + 1) / (3 + 2 + 1) * 1.0"
+expected = 0.6667
+
+[[scoring.oracle_cases]]
+# A third goal option the purchase does not carry: the numerator is unchanged and the
+# denominator grows by one.
+case = "option partial credit"
+arithmetic = "(1 + 2 + 1) / (3 + 3 + 1) * 1.0"
+expected = 0.5714
+
+[[scoring.oracle_cases]]
+# Same fraction, halved: query and category both miss and title_score is 0.15, which is
+# not > 0.2 and not < 0.1, so r_type lands on 0.5.
+case = "r_type multiplier"
+arithmetic = "(1 + 2 + 1) / (3 + 3 + 1) * 0.5"
+expected = 0.2857
+
+# Every id below is namespaced to this benchmark, and none of them is the fleet-wide
+# search-tie question. That one asks how to score a task whose expected answer depends on
+# the order of equally-ranked search results, and WebShop has no such task: get_reward's
+# inputs are the purchased product, the goal record, the price and the purchased options
+# (upstream/web_agent_site/engine/goal.py), so the ranking that led the agent to a product
+# is not an input to its score. A permuted tie can change which product an agent buys; it
+# cannot change what a bought product scores.
+[[open_decisions]]
+id = "webshop-run-scope"
+question = "Which goal indices constitute a run, and on what scale is the result reported?"
+options = [
+    "reproduce-published: /fixed_0 .. /fixed_499, upstream's 500-goal test split, reported as mean reward x100 and success rate = the share scoring exactly 1.0",
+    "stable-in-house: a fixed subset chosen to be insensitive to the price draw, reported as mean reward in 0.0-1.0",
+    "full: all 12,087 goals",
+]
+affects = "12,087 goals; the published-numbers option scores 500 of them. The 500-episode loop and the x100/x10 reporting scale live in baseline_models/test.py, which is not vendored here."
+
+[[open_decisions]]
+id = "webshop-price-nondeterminism"
+question = "Accept the per-boot variance in the price clause and r_price, or seed the two draws?"
+options = [
+    "accept-and-report: run against the server as built, treat the price clause as non-identifying (upstream does — its own split code strips ', and price lower than' before matching, and human_goals.json carries no price clause), and report r_price variance as part of the result",
+    "seed-the-fork: seed generate_product_prices and the get_human_goals price sample so /fixed_<i> renders one instruction text for all time",
+]
+affects = "Every one of the 12,087 goals: the instruction text's price clause, and one of the three numerator terms of every reward. This repo already forks the server (shkolnik/WebShop), so the seeding change is cheap to carry — but it changes what the benchmark measures, and results from a seeded fork are not comparable with published numbers."
+
+[[open_decisions]]
+id = "webshop-goal-set"
+question = "Human goals only, or also capture the synthetic goal set?"
+options = [
+    "human-only: what this suite captures, and what images/webshop/server serves — its entrypoint runs `python -m web_agent_site.app`, and the app takes get_goals' human_goals=True default",
+    "add-synthetic: a second suite directory, which needs a server started with human_goals=0 — the gym path's default, and not something this image does",
+]
+affects = "The meaning of every index. Indices 0..499 name different goals in the two sets, and goal_options changes from a list to a dict, which changes the option-scoring path. Published WebShop numbers are rarely explicit about which set produced them."
+
+[[open_decisions]]
+id = "webshop-train-split"
+question = "Where does the train split start — index 1500 or index 500?"
+options = [
+    "1500, per baseline_models/env.py: `range(1500, len(goals))`, 10,587 goals, disjoint from eval",
+    "500, per baseline_models/train_search_il.py: `range(500, len(human_goals))`, 11,587 goals, overlapping eval entirely",
+]
+affects = "1,000 goals — indices 500..1499, which are the eval split under both readings and are also train under one of them. test (0..499) is unaffected either way. Recorded as a contradiction rather than resolved: both files are upstream at the pinned commit, neither is vendored here, and picking one would bury a decision in a data file."
