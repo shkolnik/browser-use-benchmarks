@@ -74,15 +74,24 @@ upstream_path = "LICENSE"
 sha256 = "a05020744efd1a76f94a3788a9ab9798160ac1a94b3e3adc6cea19fba59af39e"
 bytes = 1128
 
+# The input images the 84 image-carrying tasks below name, as one pinned object.
+# The archive these files come out of is pinned in tasks/vwa/datasets.toml and
+# only there: all three VWA suites take their images from one tarball, and a
+# second copy of that sha256 is a silent-wrong-data hole rather than redundancy
+# (docs/design.md). fetch-images.py, beside that pin, verifies the tarball and
+# unpacks the members named below into the gitignored datasets/ directory.
+# bin/build never sees any of it: builder/discover.py globs images/*/*/image.toml
+# and a tasks-side dataset is structurally invisible to it.
+[[external_pins]]
+what = "visualwebarena-89f5af29305c3d1e9f97ce4421462060a70c9a03.tar.gz"
+pinned_at = "tasks/vwa/datasets.toml"
+
 [tasks]
 file = "tasks.raw.json"
 # The raw form, with __TOKEN__ placeholders intact. Upstream .gitignores the
 # substituted per-task JSONs; substituting at capture time would bake one
 # deployment's hostnames into git.
 format = "json_array"
-id_field = "task_id"
-# Ids are unique within this file and not across the benchmark.
-id_range = "0-209"
 # The instruction is a literal string on the record: `intent`, already
 # instantiated from `intent_template` + `instantiation_dict`. Nothing re-renders
 # the template at run time, so `intent` is the text the agent sees. Task 27's
@@ -91,21 +100,9 @@ id_range = "0-209"
 # multimodal input field; the only such field is `image`.
 instruction_source = "literal"
 instruction_field = "intent"
-# Two in-band separators that are not placeholders and must be split on the
-# exact spaced six-character token:
-#   " |AND| " splits start_url into one browser tab per URL — 40 tasks here, 46
-#             occurrences, so several tasks open three tabs;
-#   " |OR| "  separates alternatives inside reference_url, must_include entries
-#             and eval_fuzzy_image_match — 53 occurrences.
-# Splitting on the bare "|AND|"/"|OR|" leaves stray spaces inside URLs.
-multi_value_separators = [" |AND| ", " |OR| "]
 # No record in this suite carries viewport_size; every task runs at whatever the
 # harness default is. (The classifieds and shopping suites do override it.)
 viewport_overrides = 0
-# 81 of 210 require the seeded login; every record names the same storage_state
-# path regardless. See [accounts].
-require_login = 81
-storage_state = "./.auth/reddit_state.json"
 # Annotator labels present on every record and read by no evaluator:
 # reasoning_difficulty (medium 79 / hard 73 / easy 58), visual_difficulty,
 # overall_difficulty (medium 79 / hard 76 / easy 55), and `comments`, present on
@@ -119,14 +116,6 @@ storage_state = "./.auth/reddit_state.json"
 count_tasks = 84
 count_refs = 89
 bytes = 79372113
-# The archive these files come out of is pinned in tasks/vwa/datasets.toml and
-# only there: all three VWA suites take their images from one tarball, and a
-# second copy of that sha256 is a silent-wrong-data hole rather than redundancy
-# (docs/design.md). fetch-images.py, beside that pin, verifies the tarball and
-# unpacks the members named below into the gitignored datasets/ directory.
-# bin/build never sees any of it: builder/discover.py globs images/*/*/image.toml
-# and a tasks-side dataset is structurally invisible to it.
-datasets_file = "../datasets.toml"
 # Where this suite's files sit inside the archive, under its archive_prefix.
 # count_refs is also the number of files under this prefix: all 89 referenced
 # paths resolve, and nothing under the prefix is unreferenced.
@@ -161,6 +150,18 @@ formats = { jpeg = 66, webp = 15, png = 6, gif = 2 }
 # largest by pixels 4016x6016 (task_74). Smallest is 1,118 bytes at 70x70.
 largest_bytes = 27551037
 
+[addressing]
+# The record carries its own address: start_url holds one or more absolute URLs
+# whose origin is a __TOKEN__ placeholder, so no service outside the record has
+# to be named for a task to know where it starts.
+kind = "start_url_field"
+field = "start_url"
+# In band and not a placeholder: " |AND| " splits start_url into one browser tab per
+# URL — 40 tasks here, 46 occurrences, so several tasks open three tabs. Splitting on the
+# bare "|AND|" leaves stray spaces inside the URLs. The suite's other in-band separator is
+# a scoring concern and lives in [scoring.alternatives].
+separator = " |AND| "
+
 # Placeholder token -> the service name it stands for, "<benchmark>/<service>"
 # as the directories under images/ are named. Upstream substitutes these with a
 # whole-file str.replace over the file TEXT before json.loads, so a substituted
@@ -168,7 +169,7 @@ largest_bytes = 27551037
 # a URL. Unlike WebArena's map, no VWA token is a prefix of another
 # (__SHOPPING_ADMIN__ is not in the VWA replace map and occurs 0 times here), so
 # the replacement order is not load-bearing in this suite.
-[sites]
+[addressing.sites]
 # Named here because tasks reference them, not because this repo builds them —
 # see [requires].not_built.
 "__REDDIT__" = "vwa/reddit"
@@ -186,84 +187,35 @@ largest_bytes = 27551037
 # deployment has to satisfy in full — CLASSIFIEDS and CLASSIFIEDS_RESET_TOKEN
 # included.
 
-[requires]
-services = ["vwa/reddit", "vwa/shopping", "webarena/wikipedia"]
-# images/vwa/ contains exactly one service directory, classifieds. Neither
-# vwa/reddit nor vwa/shopping is built here: no Dockerfile, no dataset pin, no
-# compose entry. Every one of the 210 tasks starts on vwa/reddit, so none of
-# them runs today.
-not_built = ["vwa/reddit", "vwa/shopping"]
-# Built and published but absent from deploy/compose.yml. webarena/wikipedia,
-# the only service these tasks address that this repo does build, is both an
-# images/webarena/ directory and a deploy/compose.yml service, so nothing here
-# is in that state.
-not_deployed = []
-# What upstream/browser_env/env_config.py demands before the evaluator chain can
-# be imported at all, and it is more than the sites this suite addresses:
-#   DATASET                  read as os.environ["DATASET"] on the module's first
-#                            line, so an unset value raises KeyError rather than
-#                            the AssertionError the other six raise; a value that
-#                            is neither "webarena" nor "visualwebarena" raises
-#                            ValueError, and only "visualwebarena" takes the
-#                            branch that defines CLASSIFIEDS at all;
-#   the other six            read with os.environ.get(name, "") and then asserted
-#                            non-empty in one `and` chain, so any one of them
-#                            missing is an AssertionError that names all six.
-# A reddit-only deployment therefore still exports dummy values for HOMEPAGE,
-# CLASSIFIEDS and CLASSIFIEDS_RESET_TOKEN. REDDIT_RESET_URL is read the same way
-# and is NOT asserted, so it silently stays "" — which is why this suite has no
-# reset endpoint even though the variable exists.
-required_env = [
-    "DATASET",
-    "REDDIT",
-    "SHOPPING",
-    "WIKIPEDIA",
-    "HOMEPAGE",
-    "CLASSIFIEDS",
-    "CLASSIFIEDS_RESET_TOKEN",
-]
-runnable = 0
-blocked = 210
-# Dependencies are computed from the tokens present in the whole record, not
-# from the `sites` field, which under-declares: task 64 declares
-# sites = ["reddit"] while carrying __WIKIPEDIA__. Token counts in this file:
-# __REDDIT__ 517 occurrences over 210 tasks, __WIKIPEDIA__ 62 over 33 tasks,
-# __SHOPPING__ 29 over 11 tasks.
-#
-# 32 tasks open a __WIKIPEDIA__ URL in start_url. Task 64's only __WIKIPEDIA__
-# reference is in `comments`, an annotator note no evaluator reads, so it needs
-# nothing but reddit at run time — which is why the token count (33) and the
-# dependency count (32) differ.
-needs_webarena_wikipedia = [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 65, 66, 67, 68, 85, 117, 118, 119, 163, 164, 185, 186, 187]
-# 11 tasks open a __SHOPPING__ URL in start_url, and 9 of those also hold a
-# __SHOPPING__ product-image URL in eval.page_image_query — so shopping is
-# needed at SCORING time as well as at run time, and a reddit-only deployment
-# cannot score them even if the agent somehow finished.
-needs_vwa_shopping = [43, 44, 75, 183, 184, 185, 186, 187, 207, 208, 209]
-needs_vwa_shopping_at_scoring_time = [44, 183, 184, 185, 186, 187, 207, 208, 209]
+# The replace_map upstream's scripts/generate_test_data.py builds for
+# DATASET=visualwebarena, in the order it iterates. It is a different map from
+# the webarena one in the same function: __SHOPPING_ADMIN__, __GITLAB__ and
+# __MAP__ are absent from it, so those tokens survive substitution untouched.
+[addressing.substitution]
+kind = "str_replace"
+order = ["__REDDIT__", "__SHOPPING__", "__WIKIPEDIA__", "__CLASSIFIEDS__", "__HOMEPAGE__"]
+applies_to = "the whole file text, before json.loads"
+generated_by = "upstream/scripts/generate_test_data.py"
 
-# There is no in-place reset for this site. env_config.py reads REDDIT_RESET_URL
-# from the environment but does not assert it, and upstream's environment
-# honours require_reset only for classifieds — for every other site it prints a
-# warning and continues against dirty state. The published runs got their reset
-# from a wrapper script that recreated the container between batches.
-[reset]
-kind = "container_recreate"
-# In this repo the recovery path for any dirtied state is a fresh container from
-# the published image, and there is no vwa/reddit image to recreate. The nearest
-# comparable appliance here, images/webarena/reddit, gives its HEALTHCHECK a
-# 90 s start period — so whatever this costs, it is a per-batch cost and not a
-# per-task one.
-how = "recreate the container from the image; nothing restores state in place"
-# 21 of 210 tasks set require_reset. Nothing reads that field for this site, so
-# without a wrapper their mutations — posts, comments, votes — persist into
-# every later task in the run, and several tasks score by reading "the latest
-# comment by MarvelsGrantMan136", which a previous task's leftover comment
-# satisfies.
-require_reset_tasks = 21
-# cost_s is absent because it is not measured, and cannot be measured here while
-# no vwa/reddit image exists; an unmeasured number is left out rather than
-# guessed, the way build_minutes is in image.toml.
+[instance]
+# One task is one record and `task_id` is the only field that names it. The uid
+# the loader builds prefixes the suite, which is what keeps three files that
+# each restart at 0 from naming one task three times.
+key = ["task_id"]
+from_file = ["task_id"]
+# Nothing is drawn at run time: every task here is enumerable from the file.
+chosen_by_harness = []
+# Ids are unique within this file and not across the benchmark.
+id_range = "0-209"
+
+[auth]
+kind = "storage_state"
+# 81 of 210 require the seeded login; every record names the same storage_state
+# path regardless. See [accounts].
+decided_by = "require_login"
+tasks_with_session = 81
+tasks_anonymous = 129
+storage_state = "./.auth/reddit_state.json"
 
 # The seeded benchmark accounts, transcribed verbatim from
 # upstream/browser_env/env_config.py's ACCOUNTS. They are recorded here because
@@ -299,7 +251,115 @@ password = "Password.123"
 username = "byteblaze"
 password = "hello1234"
 
+# There is no in-place reset for this site. env_config.py reads REDDIT_RESET_URL
+# from the environment but does not assert it, and upstream's environment
+# honours require_reset only for classifieds — for every other site it prints a
+# warning and continues against dirty state. The published runs got their reset
+# from a wrapper script that recreated the container between batches.
+[[reset]]
+scope = "task"
+kind = "none"
+# What a task changed is still there for the next one, so task order is part of
+# the run definition rather than free.
+contaminates = true
+how = "nothing runs between two tasks"
+# 21 of 210 tasks set require_reset. Nothing reads that field for this site, so
+# without a wrapper their mutations — posts, comments, votes — persist into
+# every later task in the run, and several tasks score by reading "the latest
+# comment by MarvelsGrantMan136", which a previous task's leftover comment
+# satisfies.
+require_reset_tasks = 21
+
+[[reset]]
+scope = "suite"
+kind = "container_recreate"
+# A fresh container from the published image carries nothing forward, which is
+# the whole reason this is the recovery path.
+contaminates = false
+# In this repo the recovery path for any dirtied state is a fresh container from
+# the published image, and there is no vwa/reddit image to recreate. The nearest
+# comparable appliance here, images/webarena/reddit, gives its HEALTHCHECK a
+# 90 s start period — so whatever this costs, it is a per-batch cost and not a
+# per-task one.
+how = "recreate the container from the image; nothing restores state in place"
+# cost_s is absent because it is not measured, and cannot be measured here while
+# no vwa/reddit image exists; an unmeasured number is left out rather than
+# guessed, the way build_minutes is in image.toml.
+
 [scoring]
+# The four types evaluator_router routes, and the only four: anything else
+# raises rather than scoring.
+evaluator_kinds = ["program_html", "string_match", "url_match", "page_image_query"]
+# A product of binary evaluators, so the range has two reachable values and
+# there is no partial credit to report.
+reward_range = [0.0, 1.0]
+success = "score == 1.0"
+# Scorable from a transcript alone: the 64 string_match-only tasks. The other 146
+# call into a live Playwright page. The two partition the 210.
+offline_scorable = 64
+needs_live_page = 146
+# Tasks whose scoring calls a judge, LLM or VLM: 5 fuzzy_match "N/A" answers that
+# fall through to llm_ua_match, 3 program_html fuzzy_match entries that reach
+# llm_fuzzy_match (tasks 69, 71, 72), and 10 eval_vqa tasks that need a vision
+# model. No task is in both sets, so the total is their sum. 59 of the 64
+# offline-scorable tasks need no judge; the other 5 are the llm_ua_match ones.
+needs_judge = 18
+# With a binary per-task score the mean is the success rate. A task an error
+# drops from the denominator instead of scoring 0 is a different number, which is
+# why a result record carries a status beside its score.
+aggregate = "mean"
+# Scoring is NOT self-contained. The eval_fuzzy_image_match references resolve
+# to 27 locations across 22 query objects, and they are of five kinds:
+#   13 __SHOPPING__ Magento product images — the shopping site, at scoring time;
+#    3 __REDDIT__ submission_images — the site under test;
+#    9 live images.pexels.com URLs, fetched from the public internet whenever a
+#      run is scored, so link rot or a re-encode changes the result silently;
+#    1 coco_images/000000515982.jpg, a repo-relative file that comes out of the
+#      pinned tarball rather than the deployment (see [tasks.images].extra_members);
+#    1 an unprefixed relative path that is upstream's bug (see below).
+external_references = [
+    "https://images.pexels.com/photos/14267038/pexels-photo-14267038.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2",
+    "https://images.pexels.com/photos/1170986/pexels-photo-1170986.jpeg",
+    "https://images.pexels.com/photos/2539395/pexels-photo-2539395.jpeg",
+    "https://images.pexels.com/photos/16194823/pexels-photo-16194823/free-photo-of-people-in-front-of-quincy-market-in-usa.jpeg",
+    "https://images.pexels.com/photos/2150/sky-space-dark-galaxy.jpg",
+    "https://images.pexels.com/photos/1037992/pexels-photo-1037992.jpeg",
+    "https://images.pexels.com/photos/417074/pexels-photo-417074.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1",
+    "https://images.pexels.com/photos/2706653/pexels-photo-2706653.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1",
+    "https://images.pexels.com/photos/7947958/pexels-photo-7947958.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1",
+]
+external_reference_tasks = [27, 29, 111, 112, 113]
+# Both judges in helper_functions pin model = "gpt-4-1106-preview",
+# temperature = 0, via llms/providers/openai_utils.py — which is NOT vendored
+# here. Neither is browser_env/envs.py, run.py or auto_login.py: this capture
+# vendors what scores a task, not what drives one.
+
+# " |OR| " separates alternatives in band and is split on the exact spaced token; splitting
+# on the bare "|OR|" leaves stray spaces inside the alternatives. Which fields upstream
+# honours it in is neither uniform nor inferable from the value, so they are listed. A
+# splitter applied to every string field scores tasks wrong, and one applied to too few
+# scores them wrong the other way.
+[scoring.alternatives]
+separator = " |OR| "
+# Where the separator occurs here: 18 eval.program_html[].required_contents.must_include
+# elements, 13 eval.reference_answers.must_include elements, 11 eval.reference_url values
+# and 5 eval.page_image_query[].eval_fuzzy_image_match values. Task 166's `comments` also
+# carries one; `comments` is free text that nothing reads, so it is neither split nor
+# matched — it is inert.
+split_in = [
+    "eval.reference_url",
+    "eval.reference_answers.must_include[]",
+    "eval.reference_answers.required_values[]",
+    "eval.program_html[].required_contents.must_include[]",
+    "eval.program_html[].required_contents.required_values[]",
+    "eval.program_html[].required_contents.fuzzy_match",
+    "eval.page_image_query[].eval_fuzzy_image_match",
+]
+matched_literally_in = []
+
+# Measured over the task file. A driver reads none of it; it is what says how
+# much of each kind of scoring this suite is made of.
+[scoring.census]
 # evaluator_router builds one evaluator per entry in eval.eval_types and
 # EvaluatorComb MULTIPLIES their scores, so a task with two or three types needs
 # all of them to return 1.0. They are not alternatives — this suite has the
@@ -369,42 +429,7 @@ func_helpers = { get_query_text = 50, reddit_get_latest_comment_content_by_usern
 # task 113 carries three, so the first two of 113's checks cannot fail the task.
 page_image_query = { tasks = 28, query_objects = 32, vqa = 10, vqa_questions = 14, fuzzy_image_match = 18, ssim_threshold_default = 0.8, ssim_threshold_overrides = 10 }
 multi_query_tasks = [111, 112, 113]
-# Scorable from a transcript alone: the 64 string_match-only tasks. The other 146
-# call into a live Playwright page. The two partition the 210.
-offline_scorable = 64
-needs_live_page = 146
-# Tasks whose scoring calls a judge, LLM or VLM: 5 fuzzy_match "N/A" answers that
-# fall through to llm_ua_match, 3 program_html fuzzy_match entries that reach
-# llm_fuzzy_match (tasks 69, 71, 72), and 10 eval_vqa tasks that need a vision
-# model. No task is in both sets, so the total is their sum. 59 of the 64
-# offline-scorable tasks need no judge; the other 5 are the llm_ua_match ones.
-needs_judge = 18
 judge_kinds = { llm = 8, vlm = 10 }
-# Scoring is NOT self-contained. The eval_fuzzy_image_match references resolve
-# to 27 locations across 22 query objects, and they are of five kinds:
-#   13 __SHOPPING__ Magento product images — the shopping site, at scoring time;
-#    3 __REDDIT__ submission_images — the site under test;
-#    9 live images.pexels.com URLs, fetched from the public internet whenever a
-#      run is scored, so link rot or a re-encode changes the result silently;
-#    1 coco_images/000000515982.jpg, a repo-relative file that comes out of the
-#      pinned tarball rather than the deployment (see [tasks.images].extra_members);
-#    1 an unprefixed relative path that is upstream's bug (see below).
-external_references = [
-    "https://images.pexels.com/photos/14267038/pexels-photo-14267038.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2",
-    "https://images.pexels.com/photos/1170986/pexels-photo-1170986.jpeg",
-    "https://images.pexels.com/photos/2539395/pexels-photo-2539395.jpeg",
-    "https://images.pexels.com/photos/16194823/pexels-photo-16194823/free-photo-of-people-in-front-of-quincy-market-in-usa.jpeg",
-    "https://images.pexels.com/photos/2150/sky-space-dark-galaxy.jpg",
-    "https://images.pexels.com/photos/1037992/pexels-photo-1037992.jpeg",
-    "https://images.pexels.com/photos/417074/pexels-photo-417074.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1",
-    "https://images.pexels.com/photos/2706653/pexels-photo-2706653.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1",
-    "https://images.pexels.com/photos/7947958/pexels-photo-7947958.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1",
-]
-external_reference_tasks = [27, 29, 111, 112, 113]
-# Both judges in helper_functions pin model = "gpt-4-1106-preview",
-# temperature = 0, via llms/providers/openai_utils.py — which is NOT vendored
-# here. Neither is browser_env/envs.py, run.py or auto_login.py: this capture
-# vendors what scores a task, not what drives one.
 
 # An upstream defect, recorded because scoring this task raises rather than
 # scores. Task 184's eval_fuzzy_image_match holds two " |OR| " alternatives:
@@ -422,81 +447,215 @@ field = "eval.page_image_query[0].eval_fuzzy_image_match"
 bad_value = "media/catalog/product/cache/829a59e57f886f8cf0598ffca4f8a940/B/0/B009P9HODS.1.jpg"
 effect = "PageImageEvaluator raises FileNotFoundError; the exception is not caught"
 
+[requires]
+services = ["vwa/reddit", "vwa/shopping", "webarena/wikipedia"]
+# images/vwa/ contains exactly one service directory, classifieds. Neither
+# vwa/reddit nor vwa/shopping is built here: no Dockerfile, no dataset pin, no
+# compose entry. Every one of the 210 tasks starts on vwa/reddit, so none of
+# them runs today.
+not_built = ["vwa/reddit", "vwa/shopping"]
+# Built and published but absent from deploy/compose.yml. webarena/wikipedia,
+# the only service these tasks address that this repo does build, is both an
+# images/webarena/ directory and a deploy/compose.yml service, so nothing here
+# is in that state.
+not_deployed = []
+# What upstream/browser_env/env_config.py demands before the evaluator chain can
+# be imported at all, and it is more than the sites this suite addresses:
+#   DATASET                  read as os.environ["DATASET"] on the module's first
+#                            line, so an unset value raises KeyError rather than
+#                            the AssertionError the other six raise; a value that
+#                            is neither "webarena" nor "visualwebarena" raises
+#                            ValueError, and only "visualwebarena" takes the
+#                            branch that defines CLASSIFIEDS at all;
+#   the other six            read with os.environ.get(name, "") and then asserted
+#                            non-empty in one `and` chain, so any one of them
+#                            missing is an AssertionError that names all six.
+# A reddit-only deployment therefore still exports dummy values for HOMEPAGE,
+# CLASSIFIEDS and CLASSIFIEDS_RESET_TOKEN. REDDIT_RESET_URL is read the same way
+# and is NOT asserted, so it silently stays "" — which is why this suite has no
+# reset endpoint even though the variable exists.
+required_env = [
+    "DATASET",
+    "REDDIT",
+    "SHOPPING",
+    "WIKIPEDIA",
+    "HOMEPAGE",
+    "CLASSIFIEDS",
+    "CLASSIFIEDS_RESET_TOKEN",
+]
+runnable = 0
+blocked = 210
+# Dependencies are computed from the tokens present in the whole record, not
+# from the `sites` field, which under-declares: task 64 declares
+# sites = ["reddit"] while carrying __WIKIPEDIA__. Token counts in this file:
+# __REDDIT__ 517 occurrences over 210 tasks, __WIKIPEDIA__ 62 over 33 tasks,
+# __SHOPPING__ 29 over 11 tasks.
+#
+# 32 tasks open a __WIKIPEDIA__ URL in start_url. Task 64's only __WIKIPEDIA__
+# reference is in `comments`, an annotator note no evaluator reads, so it needs
+# nothing but reddit at run time — which is why the token count (33) and the
+# dependency count (32) differ.
+needs_webarena_wikipedia = [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 65, 66, 67, 68, 85, 117, 118, 119, 163, 164, 185, 186, 187]
+
+# Every task starts here, so the whole suite is blocked on this one service and
+# task_ids would restate the id of every record in the file.
+[[requires.blocked_by]]
+service = "vwa/reddit"
+tasks = 210
+
+# 11 tasks open a __SHOPPING__ URL in start_url, and 9 of those also hold a
+# __SHOPPING__ product-image URL in eval.page_image_query — so shopping is
+# needed at SCORING time as well as at run time, and a reddit-only deployment
+# cannot score them even if the agent somehow finished.
+[[requires.blocked_by]]
+service = "vwa/shopping"
+tasks = 11
+task_ids = [43, 44, 75, 183, 184, 185, 186, 187, 207, 208, 209]
+at_scoring_time = [44, 183, 184, 185, 186, 187, 207, 208, 209]
+
 [[open_decisions]]
 id = "vwa-reddit-service-unavailable"
+scope = "suite"
+kind = "service_unavailable"
 question = "All 210 tasks need a vwa/reddit service this repo does not build, and 11 of them need vwa/shopping as well. Build them, or leave the suite captured but unrunnable?"
-options = [
-    "build vwa/reddit from postmill-populated-exposed-withimg.tar, the artifact webarena/reddit is already built from, as its own image directory",
-    "point __REDDIT__ at the existing webarena/reddit service, once someone verifies the submission_images these tasks address exist there — that image's media archive does carry a submission_images tree",
-    "leave the suite unrunnable and captured for the record, which is what it is today",
-]
 affects = "all 210 tasks"
+affects_tasks = 210
+
+[[open_decisions.options]]
+id = "build-vwa-reddit"
+text = "build vwa/reddit from postmill-populated-exposed-withimg.tar, the artifact webarena/reddit is already built from, as its own image directory"
+
+[[open_decisions.options]]
+id = "reuse-webarena-reddit"
+text = "point __REDDIT__ at the existing webarena/reddit service, once someone verifies the submission_images these tasks address exist there — that image's media archive does carry a submission_images tree"
+
+[[open_decisions.options]]
+id = "leave-unrunnable"
+text = "leave the suite unrunnable and captured for the record, which is what it is today"
 
 [[open_decisions]]
 id = "vwa-reddit-task-184-bug"
+scope = "suite"
+kind = "upstream_bug"
 question = "Task 184's second SSIM reference is an unprefixed relative path that makes PageImageEvaluator raise. What does the harness do?"
-options = [
-    "leave it and let the run fail on that task, which is what upstream does",
-    "catch the exception around the reference load and score 0, which changes nothing else and makes the task merely unpassable",
-    "add the missing __SHOPPING__ prefix, which makes the task scoreable but is an edit to the vendored task set — and vendored blobs are byte-identical to upstream by design",
-]
 affects = "1 of 210 tasks (task 184)"
+affects_tasks = 1
+
+[[open_decisions.options]]
+id = "let-it-raise"
+text = "leave it and let the run fail on that task, which is what upstream does"
+
+[[open_decisions.options]]
+id = "catch-and-score-zero"
+text = "catch the exception around the reference load and score 0, which changes nothing else and makes the task merely unpassable"
+
+[[open_decisions.options]]
+id = "add-the-prefix"
+text = "add the missing __SHOPPING__ prefix, which makes the task scoreable but is an edit to the vendored task set — and vendored blobs are byte-identical to upstream by design"
 
 [[open_decisions]]
 id = "vwa-reddit-fuzzy-image-reference"
+scope = "suite"
+kind = "image_reference"
 question = "9 SSIM references are fetched live from images.pexels.com at scoring time. Fetch them, or snapshot them?"
-options = [
-    "fetch live, as upstream does, and accept that link rot or a re-encode changes the score with no signal",
-    "snapshot the 9 images and pin them by sha256 alongside the task set, which makes scoring self-contained and freezes references upstream may since have changed",
-]
 affects = "5 of 210 tasks (27, 29, 111, 112, 113)"
+affects_tasks = 5
+
+[[open_decisions.options]]
+id = "fetch-live"
+text = "fetch live, as upstream does, and accept that link rot or a re-encode changes the score with no signal"
+
+[[open_decisions.options]]
+id = "snapshot-and-pin"
+text = "snapshot the 9 images and pin them by sha256 alongside the task set, which makes scoring self-contained and freezes references upstream may since have changed"
 
 [[open_decisions]]
 id = "vwa-reddit-vqa-model"
+scope = "suite"
+kind = "vqa_model"
 question = "Which vision model answers the 14 eval_vqa questions?"
-options = [
-    "Salesforce/blip2-flan-t5-xl, the only model get_captioning_fn accepts — it raises NotImplementedError for anything without 'blip2' in the name — to reproduce published numbers",
-    "a current VLM, which needs the captioning call reimplemented and makes those 10 tasks' scores incomparable to the paper's",
-]
 affects = "10 of 210 tasks"
+affects_tasks = 10
+
+[[open_decisions.options]]
+id = "upstream-blip2"
+text = "Salesforce/blip2-flan-t5-xl, the only model get_captioning_fn accepts — it raises NotImplementedError for anything without 'blip2' in the name — to reproduce published numbers"
+
+[[open_decisions.options]]
+id = "current-vlm"
+text = "a current VLM, which needs the captioning call reimplemented and makes those 10 tasks' scores incomparable to the paper's"
 
 [[open_decisions]]
 id = "vwa-reddit-judge-model"
+scope = "suite"
+kind = "judge_model"
 question = "Which model scores the 5 unachievable-task answers that fall through to llm_ua_match, and the 3 program_html fuzzy_match comparisons that call llm_fuzzy_match with intent = 'NOT USED'?"
-options = [
-    "gpt-4-1106-preview at temperature 0, the model helper_functions pins, to reproduce published numbers",
-    "a current model, for a judge that stays available and stable in house, at the cost of comparability",
-]
 affects = "8 of 210 tasks"
+affects_tasks = 8
+
+[[open_decisions.options]]
+id = "upstream-gpt4"
+text = "gpt-4-1106-preview at temperature 0, the model helper_functions pins, to reproduce published numbers"
+
+[[open_decisions.options]]
+id = "current-model"
+text = "a current model, for a judge that stays available and stable in house, at the cost of comparability"
 
 [[open_decisions]]
 id = "vwa-reddit-reset-policy"
+scope = "suite"
+kind = "reset_policy"
 question = "Nothing resets this site in place. What does the harness do about the 21 tasks that mutate it?"
-options = [
-    "recreate the container between batches, which is what the published runs did",
-    "run the 21 require_reset tasks last, or in their own run, so the contamination is bounded",
-    "run straight through and accept accumulated state — which for this suite is worse than it sounds, because 28 program_html entries score by reading the latest comment by MarvelsGrantMan136 and a leftover comment satisfies them",
-]
 affects = "21 of 210 tasks mutate the site; 28 program_html entries read 'the latest comment' and are sensitive to leftovers"
+affects_tasks = 21
+
+[[open_decisions.options]]
+id = "recreate-between-batches"
+text = "recreate the container between batches, which is what the published runs did"
+
+[[open_decisions.options]]
+id = "mutating-tasks-last"
+text = "run the 21 require_reset tasks last, or in their own run, so the contamination is bounded"
+
+[[open_decisions.options]]
+id = "run-straight-through"
+text = "run straight through and accept accumulated state — which for this suite is worse than it sounds, because 28 program_html entries score by reading the latest comment by MarvelsGrantMan136 and a leftover comment satisfies them"
 
 [[open_decisions]]
 id = "vwa-reddit-input-image-size"
+scope = "suite"
+kind = "input_image_size"
 question = "Are the input images sent to the agent as shipped?"
-options = [
-    "as shipped, matching upstream, up to 27,551,037 bytes and 4016x6016 in this suite",
-    "downscaled to a fixed budget, which changes what the agent can read off the image",
-]
 affects = "84 of 210 tasks, 89 images — and 2 of them are GIFs, which a still-image pipeline reads as their first frame"
+affects_tasks = 84
+
+[[open_decisions.options]]
+id = "as-shipped"
+text = "as shipped, matching upstream, up to 27,551,037 bytes and 4016x6016 in this suite"
+
+[[open_decisions.options]]
+id = "downscaled"
+text = "downscaled to a fixed budget, which changes what the agent can read off the image"
 
 [[open_decisions]]
 id = "vwa-reddit-coco-reference"
+scope = "suite"
+kind = "image_reference"
 question = "Task 28's SSIM reference is coco_images/000000515982.jpg, an MS-COCO image that upstream's MIT LICENSE does not cover. Where does scoring get it?"
-options = [
-    "take it out of the pinned tarball with the input images, which is the path upstream's config already names and puts an MS-COCO-licensed file in the fetched tree",
-    "snapshot that one file and pin it by sha256 beside the task set, which leaves the other 44 files of upstream's coco_images/ unfetched and freezes a reference upstream may since have changed",
-    "leave the reference unresolved and score the task 0, which fetches no third-party image and makes 1 task unpassable",
-]
 affects = "1 of 210 tasks (task 28)"
+affects_tasks = 1
+
+[[open_decisions.options]]
+id = "from-the-pinned-tarball"
+text = "take it out of the pinned tarball with the input images, which is the path upstream's config already names and puts an MS-COCO-licensed file in the fetched tree"
+
+[[open_decisions.options]]
+id = "snapshot-and-pin"
+text = "snapshot that one file and pin it by sha256 beside the task set, which leaves the other 44 files of upstream's coco_images/ unfetched and freezes a reference upstream may since have changed"
+
+[[open_decisions.options]]
+id = "leave-unresolved"
+text = "leave the reference unresolved and score the task 0, which fetches no third-party image and makes 1 task unpassable"
 
 # The pin this asks about is shared: one [[datasets]] entry in
 # tasks/vwa/datasets.toml serves all three suites, so answering this here answers
@@ -505,21 +664,36 @@ affects = "1 of 210 tasks (task 28)"
 # this suite alone unable to see what the images depend on.
 [[open_decisions]]
 id = "vwa-dataset-pin-source"
+scope = "benchmark"
+kind = "dataset_pin"
 question = "The input images are pinned as a 206 MB GitHub commit tarball, an object GitHub regenerates on demand. Keep it, or re-host?"
-options = [
-    "keep the tarball pin; a regenerated archive fails the checksum loudly and the fleet already fetches from forge-generated archives",
-    "derive an images-only archive and host it where the salvaged datasets live, which costs a hosting decision and gains a 186 MB object this repo controls",
-]
 affects = "the one [[datasets]] entry in tasks/vwa/datasets.toml, and so all three VWA suites at once"
+
+[[open_decisions.options]]
+id = "keep-tarball-pin"
+text = "keep the tarball pin; a regenerated archive fails the checksum loudly and the fleet already fetches from forge-generated archives"
+
+[[open_decisions.options]]
+id = "rehost-images-archive"
+text = "derive an images-only archive and host it where the salvaged datasets live, which costs a hosting decision and gains a 186 MB object this repo controls"
 
 # Not a VWA question: every relevance-ranked app in the fleet has it, so this
 # entry carries the fleet- id and the same options wherever it appears.
 [[open_decisions]]
 id = "fleet-search-tie-ordering"
+scope = "fleet"
+kind = "tie_ordering"
 question = "Search results with tied relevance permute across a rebuild. How is a task whose answer depends on the order of equally-ranked results scored?"
-options = [
-    "accept any permutation within a rank tie when scoring",
-    "pin a deterministic secondary sort in each app",
-    "accept the instability and document it per benchmark",
-]
 affects = "not measured — the tie-dependence of a task is not visible in its record; TODO.md carries the question for the whole fleet"
+
+[[open_decisions.options]]
+id = "accept-permutations"
+text = "accept any permutation within a rank tie when scoring"
+
+[[open_decisions.options]]
+id = "secondary-sort"
+text = "pin a deterministic secondary sort in each app"
+
+[[open_decisions.options]]
+id = "document-instability"
+text = "accept the instability and document it per benchmark"

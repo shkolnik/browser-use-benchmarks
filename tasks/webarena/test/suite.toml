@@ -11,7 +11,7 @@
 name = "test"
 benchmark = "webarena"
 # len(json.load(open("tasks.raw.json"))). The same number is the array's length and the
-# highest task_id plus one, because id equals index — see [tasks].id_equals_index.
+# highest task_id plus one, because id equals index — see [instance].id_equals_index.
 task_count = 812
 description = "WebArena's 812 web-agent tasks over five self-hosted sites, with site URLs left as placeholder tokens."
 
@@ -40,7 +40,7 @@ sha256 = "7b50386fd69163dbc05d615d834df4c6ed2c35596e97a1b10d17451c02537652"
 bytes = 880776
 
 # The 27-line generator. Vendored because its six replaces ARE the site-coupling
-# contract; see [substitution]. Upstream .gitignores every file it writes, so the
+# contract; see [addressing.substitution]. Upstream .gitignores every file it writes, so the
 # generated per-task configs exist in no checkout and cannot be vendored instead.
 [[upstream.files]]
 path = "upstream/scripts/generate_test_data.py"
@@ -104,22 +104,53 @@ bytes = 353
 [tasks]
 file = "tasks.raw.json"
 format = "json_array"
-id_field = "task_id"
 # The instruction is a literal string in the record (`intent`), already slot-filled.
 # `intent_template` + `instantiation_dict` are what produced it and are metadata only.
 instruction_source = "literal"
 instruction_field = "intent"
-# task_id is 0..811 with no gaps and equals the record's index, so a harness may index
-# the array directly. Stated as a fact so a test can hold it: upstream's own generator
-# writes config_files/<index>.json and its driver reads the id back out of that
-# filename, which quietly makes index and id the same thing.
-id_equals_index = true
-start_url_field = "start_url"
-storage_state_field = "storage_state"
+
+# How a task record becomes the URL an agent starts at: the record carries it, and the
+# tokens in that field are expanded by [addressing.substitution] before a tab is opened.
+[addressing]
+kind = "start_url_field"
+field = "start_url"
+# start_url only. 5 tasks (431-435) join 2 or 3 URLs; upstream opens one tab per URL and
+# makes the first one active. 812 records therefore hold 818 start URLs.
+separator = " |AND| "
+
+# Placeholder token -> the service that serves that origin, named the way [requires].services
+# names it. Only tokens that actually occur in the task file appear here; the counts are their
+# exact occurrence counts across all fields.
+[addressing.sites]
+__GITLAB__ = "webarena/gitlab"                  # 385 occurrences
+__REDDIT__ = "webarena/reddit"                  # 336
+__SHOPPING_ADMIN__ = "webarena/shopping-admin"  # 300
+__SHOPPING__ = "webarena/shopping"              # 281
+# 133 occurrences, and nothing running here answers them. __MAP__ addresses the OpenStreetMap
+# WEB FRONTEND, not a map backend: the task file's own evaluators drive it as one
+# (`__MAP__/search?query=...`, and locators for `div#content select.routing_engines`,
+# `[name="route_from"]`, `#sidebar_content`). This repo builds that frontend's three
+# backends and not the frontend itself, so the name below is a service this repo does not
+# build — see [requires].not_built.
+__MAP__ = "webarena/map-frontend"
+
+# Every value is a service name that also appears in [requires].services, and a test can
+# assert that, and that every key occurs in the task file. What it cannot assert is that the
+# value is an images/*/*/ directory: an [addressing.sites] value may name a service this repo
+# does not build, the same latitude [requires].services has. __MAP__ above takes it, and so
+# does __SHOPPING__ in all three VWA manifests, which maps to vwa/shopping while images/vwa/
+# holds only classifieds. Whether a named service is built here is [requires].not_built's
+# give and not this table's. What a token expands to
+# is a base URL, not a bare host — shopping-admin lives under /admin — and that base path
+# belongs to the service, so it is read from that service's image.toml rather than restated
+# here; a second copy of a pin is a silent-wrong-data hole. deploy/compose.yml publishes
+# each origin at ${BIND_ADDR}:${<SITE>_PORT} with BENCH_HOST baked into the app's own
+# configured base_url, so a harness must address a site at exactly the host it was
+# configured with — Magento's adminhtml 404s on any other Host header.
 
 # How placeholder tokens become URLs. This is upstream's generate_test_data.py stated as
 # data; a reimplementation must reproduce it rather than improve on it.
-[substitution]
+[addressing.substitution]
 # A whole-file text replace on the raw BYTES, before json.loads — not a walk of parsed
 # string values. That matters because tokens also occur inside expected page content
 # (60 occurrences under eval.program_html[].required_contents.must_include[]), not only
@@ -157,98 +188,38 @@ absent_from_tasks = ["__WIKIPEDIA__", "__HOMEPAGE__"]
 # the site tokens is what keeps a scan for them from eating these.
 eval_time_markers = ["__last_url__", "__page__"]
 
-# Placeholder token -> the service that serves that origin, named the way [requires].services
-# names it. Only tokens that actually occur in the task file appear here; the counts are their
-# exact occurrence counts across all fields.
-[sites]
-__GITLAB__ = "webarena/gitlab"                  # 385 occurrences
-__REDDIT__ = "webarena/reddit"                  # 336
-__SHOPPING_ADMIN__ = "webarena/shopping-admin"  # 300
-__SHOPPING__ = "webarena/shopping"              # 281
-# 133 occurrences, and nothing running here answers them. __MAP__ addresses the OpenStreetMap
-# WEB FRONTEND, not a map backend: the task file's own evaluators drive it as one
-# (`__MAP__/search?query=...`, and locators for `div#content select.routing_engines`,
-# `[name="route_from"]`, `#sidebar_content`). This repo builds that frontend's three
-# backends and not the frontend itself, so the name below is a service this repo does not
-# build — see [requires].not_built.
-__MAP__ = "webarena/map-frontend"
+# One field names a runnable task and the file supplies it, so this suite enumerates to
+# exactly its 812 tasks: nothing about an instance is drawn by the harness.
+[instance]
+key = ["task_id"]
+from_file = ["task_id"]
+chosen_by_harness = []
+# task_id is 0..811 with no gaps and equals the record's index, so a harness may index
+# the array directly. Stated as a fact so a test can hold it: upstream's own generator
+# writes config_files/<index>.json and its driver reads the id back out of that
+# filename, which quietly makes index and id the same thing.
+id_equals_index = true
 
-# Every value is a service name that also appears in [requires].services, and a test can
-# assert that, and that every key occurs in the task file. What it cannot assert is that the
-# value is an images/*/*/ directory: a [sites] value may name a service this repo does not
-# build, the same latitude [requires].services has. __MAP__ above takes it, and so does
-# __SHOPPING__ in all three VWA manifests, which maps to vwa/shopping while images/vwa/ holds
-# only classifieds. Whether a named service is built here is [requires].not_built's answer to
-# give and not this table's. What a token expands to
-# is a base URL, not a bare host — shopping-admin lives under /admin — and that base path
-# belongs to the service, so it is read from that service's image.toml rather than restated
-# here; a second copy of a pin is a silent-wrong-data hole. deploy/compose.yml publishes
-# each origin at ${BIND_ADDR}:${<SITE>_PORT} with BENCH_HOST baked into the app's own
-# configured base_url, so a harness must address a site at exactly the host it was
-# configured with — Magento's adminhtml 404s on any other Host header.
-
-[requires]
-# The environment the substitution and the evaluators read. HOMEPAGE is the shape that
-# makes this its own list rather than a restatement of `services`: nothing serves it and no
-# task addresses it, so it is not a service, yet env_config.py's assert fails without it and
-# upstream's own setup_env.sh exports the literal string "PASS". WIKIPEDIA is the other
-# shape — a variable that must be set AND a service 23 tasks expect to reach — so it is in
-# both lists.
-required_env = [
-    "REDDIT",
-    "SHOPPING",
-    "SHOPPING_ADMIN",
-    "GITLAB",
-    "WIKIPEDIA",
-    "MAP",
-    "HOMEPAGE",
-]
-# Every service the 812 tasks and the scoring chain need, named the way images/*/*/ names
-# it. `not_built` and `not_deployed` below are subsets of this list, so this is the whole
-# requirement and not just the satisfiable part of it. Only services: a token that is an
-# environment variable and nothing else — HOMEPAGE — is declared in
-# [requires].required_env and does not appear here.
-services = [
-    "webarena/shopping",
-    "webarena/shopping-admin",
-    "webarena/reddit",
-    "webarena/gitlab",
-    # Zero tasks reference __WIKIPEDIA__ in any URL, but 23 are tagged `sites: wikipedia`
-    # and expect the answer to come from an encyclopedia lookup, and the WIKIPEDIA env var
-    # must be non-empty or the evaluators will not import. Required for both reasons.
-    "webarena/wikipedia",
-    # The map chain. None of the four is reachable from deploy/compose.yml, for the two
-    # different reasons split out below.
-    "webarena/map-tile",
-    "webarena/map-osrm",
-    "webarena/map-nominatim",
-    "webarena/map-frontend",
-]
-# No image directory here and nothing in this repo from which to make one. __MAP__ addresses
-# the OpenStreetMap WEB FRONTEND, and the three backends do not substitute for it: the task
-# locators read that frontend's DOM. Starting all three backends still leaves every map task
-# unrunnable, so this gap is the one that matters and closing the other does not touch it.
-not_built = ["webarena/map-frontend"]
-# Built here, and still absent from the fleet. Each of the three has an images/webarena/<name>/
-# directory with a Dockerfile and an image.toml; .github/workflows/build.yml enables every
-# image except probe/ and pushes it to ghcr; images/webarena/compose.yml starts all three, so
-# `bin/build smoke` reaches them. What omits them is the deployment: deploy/compose.yml,
-# deploy/Caddyfile and deploy/README.md's port table name exactly eight services and no map
-# service among them. Adding three entries there is the whole fix, and it would still leave
-# not_built above unanswered.
-not_deployed = [
-    "webarena/map-tile",
-    "webarena/map-osrm",
-    "webarena/map-nominatim",
-]
-# 128 of 812 — the map-tagged tasks, which are exactly the tasks whose start_url is
-# __MAP__, and exactly the tasks with a null storage_state. Every one of them is blocked;
-# none of the other 684 touches a map origin (zero __MAP__ occurrences in
-# eval.program_html[].url). So the runnable set and the logged-in set are the same 684
-# tasks, and the 684 in [login].tasks_with_session is that same set rather than a
-# coincidence of counts.
-blocked = 128
-runnable = 684
+[auth]
+kind = "storage_state"
+# Login is decided by storage_state being non-null, NOT by require_login — which is true
+# on all 812 records and therefore carries no information.
+decided_by = "storage_state"
+tasks_with_session = 684
+# The 128 anonymous tasks are exactly the 128 map tasks, so a run restricted to what this
+# repo can serve today never exercises the anonymous path at all.
+tasks_anonymous = 128
+# Cookie-file name -> how many tasks name it. The site combination is parsed out of the
+# BASENAME (`rsplit('_', 1)[0].split('.')`), so these names are an interface, not labels.
+sessions = { "shopping_state.json" = 187, "gitlab_state.json" = 186, "shopping_admin_state.json" = 182, "reddit_state.json" = 111, "gitlab.reddit_state.json" = 18 }
+# auto_login.py generates a file for each single site and each 2-combination of
+# [gitlab, shopping, shopping_admin, reddit] EXCEPT reddit x shopping and
+# reddit x shopping_admin, which it skips outright. Two consequences visible in the data
+# and left alone because they are the benchmark, not a capture defect: the 5 tasks tagged
+# ["shopping", "reddit"] (671-675) carry reddit_state.json only, so the agent is logged
+# out of shopping; and tasks 759 and 760 are tagged ["map", "shopping_admin"] with a null
+# storage_state, so they run fully anonymous.
+never_generated = ["reddit.shopping", "reddit.shopping_admin"]
 
 # The benchmark APPLICATION logins, transcribed verbatim from
 # upstream/browser_env/env_config.py's ACCOUNTS table. These are the accounts baked into
@@ -281,39 +252,27 @@ password = "admin1234"
 username = "admin"
 password = "admin1234"
 
-[login]
-# Login is decided by storage_state being non-null, NOT by require_login — which is true
-# on all 812 records and therefore carries no information.
-decided_by = "storage_state"
-tasks_with_session = 684
-# The 128 anonymous tasks are exactly the 128 map tasks, so a run restricted to what this
-# repo can serve today never exercises the anonymous path at all.
-tasks_anonymous = 128
-# Cookie-file name -> how many tasks name it. The site combination is parsed out of the
-# BASENAME (`rsplit('_', 1)[0].split('.')`), so these names are an interface, not labels.
-sessions = { "shopping_state.json" = 187, "gitlab_state.json" = 186, "shopping_admin_state.json" = 182, "reddit_state.json" = 111, "gitlab.reddit_state.json" = 18 }
-# auto_login.py generates a file for each single site and each 2-combination of
-# [gitlab, shopping, shopping_admin, reddit] EXCEPT reddit x shopping and
-# reddit x shopping_admin, which it skips outright. Two consequences visible in the data
-# and left alone because they are the benchmark, not a capture defect: the 5 tasks tagged
-# ["shopping", "reddit"] (671-675) carry reddit_state.json only, so the agent is logged
-# out of shopping; and tasks 759 and 760 are tagged ["map", "shopping_admin"] with a null
-# storage_state, so they run fully anonymous.
-never_generated = ["reddit.shopping", "reddit.shopping_admin"]
-
-[reset]
+[[reset]]
+scope = "task"
 # Per task: none. Upstream rolls back no server-side state between tasks; it recreates the
 # browser context and re-mints cookies, and that is all. `require_reset` is false on all
 # 812 records and no code reads it, so it is not evidence of anything.
 kind = "none"
+# What a task mutates is still there for the next one, so the order tasks run in is part
+# of the run definition — see the webarena-task-order-and-reset decision below.
+contaminates = true
 cost_s = 0
 how = "Nothing. State a task mutates — a placed order, an opened issue, a posted submission, a created cart rule — persists into every later task in the run."
+
+[[reset]]
+scope = "suite"
 # Whole suite: recreate the containers. Upstream's environment_docker/README.md documents
 # a stop/remove/run of shopping, shopping_admin, gitlab and forum after all 812 examples,
 # followed by re-applying the base_url and external_url reconfiguration. Map and Wikipedia
 # are read-only and are not in that list. In this repo the equivalent is a fresh container
 # from the published image, which is the only stated recovery path for dirtied state.
-suite_kind = "container_recreate"
+kind = "container_recreate"
+contaminates = false
 # Not stated as one number, because this repo has not measured a full four-service
 # recreate. The two components it HAS measured are each recorded where the measurement was
 # taken, and repeated here only as a budget: gitlab pays ~28 s of `gitlab-ctl reconfigure`
@@ -323,7 +282,7 @@ suite_kind = "container_recreate"
 # HEALTHCHECK start-period budgets in their Dockerfiles, 900 s, 300 s and 90 s, which are
 # ceilings and not measurements.
 #
-# The command recreates exactly the four services suite_kind names — upstream's `forum` is
+# The command recreates exactly the four services `how` names — upstream's `forum` is
 # this repo's `reddit` — and nothing else. `down` would stop the whole fleet, including the
 # wikipedia, classifieds, webshop and miniwob containers that no task has dirtied.
 # --force-recreate is what discards the state, and it is enough because no service in
@@ -331,7 +290,7 @@ suite_kind = "container_recreate"
 # writable layer and dies with the container. BENCH_HOST has no default there and all four
 # refuse to start without it. --wait holds until each reports healthy, which is where the
 # boot costs above are paid.
-suite_how = "BENCH_HOST=<addr> docker compose -f deploy/compose.yml up -d --force-recreate --wait shopping shopping-admin reddit gitlab"
+how = "BENCH_HOST=<addr> docker compose -f deploy/compose.yml up -d --force-recreate --wait shopping shopping-admin reddit gitlab"
 
 [scoring]
 # evaluator_router matches exactly these three literals and raises on anything else.
@@ -339,16 +298,9 @@ suite_how = "BENCH_HOST=<addr> docker compose -f deploy/compose.yml up -d --forc
 # evaluator must return exactly 1.0. The published metric is mean(score) over the 812.
 evaluator_kinds = ["string_match", "url_match", "program_html"]
 binary_per_task = true
-# Tasks per evaluator kind (a task can appear in two of these).
-string_match_tasks = 335
-url_match_tasks = 205
-program_html_tasks = 411
-# The exact combinations in use, so a harness knows there is no three-evaluator case.
-eval_types_string_match_only = 325
-eval_types_program_html_only = 282
-eval_types_program_html_and_url_match = 129
-eval_types_url_match_only = 66
-eval_types_string_match_and_url_match = 10
+reward_range = [0.0, 1.0]
+success = "score == 1.0"
+aggregate = "mean"
 
 # Only the tasks whose eval_types is exactly ["string_match"] can be scored from a stored
 # final answer. The other 487 need the LIVE browser after the episode: URLEvaluator reads
@@ -361,6 +313,20 @@ needs_live_page = 487
 # ["string_match"] and the other 5 are ["string_match", "url_match"], so 5 judged tasks
 # also need the live page. Call counts and the model question are in [scoring.judge].
 needs_judge = 118
+
+# The counts measured over the task file. A driver reads none of them, so they sit below
+# the keys it does read rather than among them.
+[scoring.census]
+# Tasks per evaluator kind (a task can appear in two of these).
+string_match_tasks = 335
+url_match_tasks = 205
+program_html_tasks = 411
+# The exact combinations in use, so a harness knows there is no three-evaluator case.
+eval_types_string_match_only = 325
+eval_types_program_html_only = 282
+eval_types_program_html_and_url_match = 129
+eval_types_url_match_only = 66
+eval_types_string_match_and_url_match = 10
 
 # StringEvaluator's approaches, by the key present in eval.reference_answers. The field is
 # null on exactly the 477 tasks with no string_match — the two sets coincide, so null is
@@ -427,6 +393,9 @@ program_html_prep_action_targets = 10
 # scoring them 0.
 tasks_with_func_expression = 79
 
+and_tasks = 5
+start_urls_total = 818
+
 [scoring.helper_functions]
 reddit_get_post_url = 65               # url form; pure urlparse string surgery, no API
 shopping_get_latest_order_url = 10     # url form; Magento REST admin API
@@ -464,27 +433,27 @@ upstream_top_p = 1.0
 # llm_ua_match tests "different" before asserting "same".
 prompt_source = "upstream/evaluation_harness/helper_functions.py"
 
-# Separators are in-band, bare-string-split, and all three are spelled with surrounding
-# single spaces. They are not interchangeable and they do not appear everywhere a list of
-# strings appears.
-[scoring.separators]
-# start_url only. 5 tasks (431-435) join 2 or 3 URLs; upstream opens one tab per URL and
-# makes the first one active. 812 records therefore hold 818 start URLs.
-and = " |AND| "
-and_tasks = 5
-start_urls_total = 818
-# eval.reference_url alternatives (7 tasks: 604, 608, 609, 625, 681-683) AND, separately,
-# alternatives inside a single eval.program_html[].required_contents.must_include element
-# (5 elements across tasks 431, 750, 751, 755, 756). The separator occurs 19 times in the
-# file: 12 in those reference_urls, 6 in those must_include elements, and 1 in the inert
-# case below. Several strings carry more than one, so element counts are not occurrences.
-or = " |OR| "
-or_reference_url_tasks = 7
-or_program_html_elements = 5
-# The asymmetry that a shared splitter would get wrong: StringEvaluator's must_include does
-# NOT split on " |OR| ". Task 386's reference_answers.must_include is ["65 |OR| 3"] and is
-# matched as that literal substring.
-or_split_in_reference_answers = false
+# " |OR| " separates alternatives in band and is split on the exact spaced token; splitting
+# on the bare "|OR|" leaves stray spaces inside the alternatives. Which fields upstream
+# honours it in is neither uniform nor inferable from the value, so they are listed. A
+# splitter applied to every string field scores tasks wrong, and one applied to too few
+# scores them wrong the other way.
+[scoring.alternatives]
+separator = " |OR| "
+# 7 tasks carry alternatives in eval.reference_url (604, 608, 609, 625, 681-683) and 5
+# eval.program_html[].required_contents.must_include elements carry them (tasks 431, 750,
+# 751, 755, 756). The separator occurs 19 times in the file: 12 in those reference_urls, 6
+# in those must_include elements, and 1 in the literal case below. Several strings carry
+# more than one, so element counts are not occurrence counts.
+split_in = [
+    "eval.reference_url",
+    "eval.program_html[].required_contents.must_include[]",
+]
+# The asymmetry a shared splitter gets wrong: StringEvaluator's must_include does NOT split.
+# Task 386's eval.reference_answers.must_include is ["65 |OR| 3"], matched as that literal
+# substring. VisualWebArena's fork DOES split the same field, so this is a real divergence
+# between the two benchmarks and not an oversight in one of them.
+matched_literally_in = ["eval.reference_answers.must_include[]"]
 
 # The task fields a harness will reach for and should not build on.
 [scoring.dead_fields]
@@ -519,6 +488,73 @@ eval_string_note_present = 335
 eval_reference_answer_raw_annotation_present = 332
 eval_url_note_present = 196
 
+[requires]
+# The environment the substitution and the evaluators read. HOMEPAGE is the shape that
+# makes this its own list rather than a restatement of `services`: nothing serves it and no
+# task addresses it, so it is not a service, yet env_config.py's assert fails without it and
+# upstream's own setup_env.sh exports the literal string "PASS". WIKIPEDIA is the other
+# shape — a variable that must be set AND a service 23 tasks expect to reach — so it is in
+# both lists.
+required_env = [
+    "REDDIT",
+    "SHOPPING",
+    "SHOPPING_ADMIN",
+    "GITLAB",
+    "WIKIPEDIA",
+    "MAP",
+    "HOMEPAGE",
+]
+# Every service the 812 tasks and the scoring chain need, named the way images/*/*/ names
+# it. `not_built` and `not_deployed` below are subsets of this list, so this is the whole
+# requirement and not just the satisfiable part of it. Only services: a token that is an
+# environment variable and nothing else — HOMEPAGE — is declared in
+# [requires].required_env and does not appear here.
+services = [
+    "webarena/shopping",
+    "webarena/shopping-admin",
+    "webarena/reddit",
+    "webarena/gitlab",
+    # Zero tasks reference __WIKIPEDIA__ in any URL, but 23 are tagged `sites: wikipedia`
+    # and expect the answer to come from an encyclopedia lookup, and the WIKIPEDIA env var
+    # must be non-empty or the evaluators will not import. Required for both reasons.
+    "webarena/wikipedia",
+    # The map chain. None of the four is reachable from deploy/compose.yml, for the two
+    # different reasons split out below.
+    "webarena/map-tile",
+    "webarena/map-osrm",
+    "webarena/map-nominatim",
+    "webarena/map-frontend",
+]
+# No image directory here and nothing in this repo from which to make one. __MAP__ addresses
+# the OpenStreetMap WEB FRONTEND, and the three backends do not substitute for it: the task
+# locators read that frontend's DOM. Starting all three backends still leaves every map task
+# unrunnable, so this gap is the one that matters and closing the other does not touch it.
+not_built = ["webarena/map-frontend"]
+# Built here, and still absent from the fleet. Each of the three has an images/webarena/<name>/
+# directory with a Dockerfile and an image.toml; .github/workflows/build.yml enables every
+# image except probe/ and pushes it to ghcr; images/webarena/compose.yml starts all three, so
+# `bin/build smoke` reaches them. What omits them is the deployment: deploy/compose.yml,
+# deploy/Caddyfile and deploy/README.md's port table name exactly eight services and no map
+# service among them. Adding three entries there is the whole fix, and it would still leave
+# not_built above unanswered.
+not_deployed = [
+    "webarena/map-tile",
+    "webarena/map-osrm",
+    "webarena/map-nominatim",
+]
+# 128 of 812 — the map-tagged tasks, which are exactly the tasks whose start_url is
+# __MAP__, and exactly the tasks with a null storage_state. Every one of them is blocked;
+# none of the other 684 touches a map origin (zero __MAP__ occurrences in
+# eval.program_html[].url). So the runnable set and the logged-in set are the same 684
+# tasks, and the 684 in [auth].tasks_with_session is that same set rather than a
+# coincidence of counts.
+blocked = 128
+runnable = 684
+
+[[requires.blocked_by]]
+service = "webarena/map-frontend"
+tasks = 128
+
 # Everything below is a question this repo has not answered. A default invented here would
 # bury a policy decision in a data file. Each entry names the two framings the capture is
 # meant to keep open: reproduce the published numbers, or be stable in house — they are not
@@ -526,49 +562,85 @@ eval_url_note_present = 196
 
 [[open_decisions]]
 id = "webarena-judge-model"
+scope = "suite"
+kind = "judge_model"
 question = "Which model scores the 118 fuzzy-match tasks, and what happens when it answers off-script?"
-options = [
-    "gpt-4-1106-preview at temperature 0 with upstream's exact prompts — the only configuration that reproduces published numbers, and it costs an external API call per judged element (145 calls minimum, 181 maximum).",
-    "A different or local judge with the same prompts — stable and offline-affordable in house, but the scores stop being comparable to any published WebArena number.",
-    "Independent of the model: decide what an unparseable reply means. llm_fuzzy_match returns 0.0 when the reply contains 'partially correct' or 'incorrect' and otherwise asserts 'correct' is present; llm_ua_match asserts 'same'. Either assert RAISES on any other reply. Upstream's run.py — not vendored here — catches that and the task is omitted from the scored set instead of scored 0, which raises the reported success rate by shrinking the denominator. Scoring an unparseable reply as 0 is a one-line change and a different metric.",
-]
 affects = "118 of 812 tasks score through the judge; the denominator behaviour moves the reported rate for the whole 812."
+affects_tasks = 118
+
+[[open_decisions.options]]
+id = "upstream-gpt4"
+text = "gpt-4-1106-preview at temperature 0 with upstream's exact prompts — the only configuration that reproduces published numbers, and it costs an external API call per judged element (145 calls minimum, 181 maximum)."
+
+[[open_decisions.options]]
+id = "local-judge"
+text = "A different or local judge with the same prompts — stable and offline-affordable in house, but the scores stop being comparable to any published WebArena number."
+
+[[open_decisions.options]]
+id = "unparseable-reply"
+text = "Independent of the model: decide what an unparseable reply means. llm_fuzzy_match returns 0.0 when the reply contains 'partially correct' or 'incorrect' and otherwise asserts 'correct' is present; llm_ua_match asserts 'same'. Either assert RAISES on any other reply. Upstream's run.py — not vendored here — catches that and the task is omitted from the scored set instead of scored 0, which raises the reported success rate by shrinking the denominator. Scoring an unparseable reply as 0 is a one-line change and a different metric."
 
 [[open_decisions]]
 id = "webarena-task-order-and-reset"
+scope = "suite"
+kind = "reset_policy"
 question = "Is task order part of the run definition, or does the harness reset state between tasks?"
-options = [
-    "Run 0..811 in ascending order against one freshly created fleet and reset only at the end, as upstream does — reproduces the published setup exactly, including its contamination, and makes task order load-bearing: a task that opens a GitLab issue or places a Magento order changes what every later task sees.",
-    "Recreate the mutated containers between tasks — stable and order-independent, at the cost of a full container recreate per task and numbers that are not comparable to published ones.",
-    "Reset between GROUPS rather than between tasks, e.g. per site, trading contamination for cost at a chosen granularity.",
-]
 affects = "All 812. There is no per-task reset upstream and require_reset is false on every record, so nothing in the task data marks which tasks mutate state — the choice cannot be made per task from this file."
+affects_tasks = 812
+
+[[open_decisions.options]]
+id = "upstream-order"
+text = "Run 0..811 in ascending order against one freshly created fleet and reset only at the end, as upstream does — reproduces the published setup exactly, including its contamination, and makes task order load-bearing: a task that opens a GitLab issue or places a Magento order changes what every later task sees."
+
+[[open_decisions.options]]
+id = "recreate-per-task"
+text = "Recreate the mutated containers between tasks — stable and order-independent, at the cost of a full container recreate per task and numbers that are not comparable to published ones."
+
+[[open_decisions.options]]
+id = "reset-per-group"
+text = "Reset between GROUPS rather than between tasks, e.g. per site, trading contamination for cost at a chosen granularity."
 
 [[open_decisions]]
 # The one decision here that is not WebArena's. Its id carries the fleet- namespace instead
 # of webarena-, and it appears with this id and these options in every suite it affects, so
-# that one answer applies to all of them. The options are bare strings for that reason: each
-# suite's own consequences belong in its comments, and prose baked into an option would make
-# two suites offer different options for the same question.
+# that one answer applies to all of them. Its option ids and text are identical in every one
+# for that reason: each suite's own consequences belong in its comments, and prose baked
+# into an option would make two suites offer different options for the same question.
 #
 # What each costs here: accepting permutations is a harness-side rule that changes no image
 # and no upstream code; a secondary sort is a real divergence from upstream that has to be
 # applied consistently across shopping, shopping-admin, reddit and classifieds; documenting
 # it leaves every affected task's score unstable across a rebuild.
 id = "fleet-search-tie-ordering"
+scope = "fleet"
+kind = "tie_ordering"
 question = "Search results with tied relevance permute across a rebuild. How is a task whose answer depends on the order of equally-ranked results scored?"
-options = [
-    "accept any permutation within a rank tie when scoring",
-    "pin a deterministic secondary sort in each app",
-    "accept the instability and document it per benchmark",
-]
 affects = "Not determinable from this file: no field marks which tasks depend on the relative order of equally-ranked results. The instability is measured and fleet-wide — see TODO.md and images/webarena/reddit/README.md."
+
+[[open_decisions.options]]
+id = "accept-permutations"
+text = "accept any permutation within a rank tie when scoring"
+
+[[open_decisions.options]]
+id = "secondary-sort"
+text = "pin a deterministic secondary sort in each app"
+
+[[open_decisions.options]]
+id = "document-instability"
+text = "accept the instability and document it per benchmark"
 
 [[open_decisions]]
 id = "webarena-program-html-navigation-sleep"
+scope = "suite"
+kind = "scoring_timing"
 question = "Is HTMLContentEvaluator's fixed 3-second sleep after each navigation part of the scoring budget?"
-options = [
-    "Keep the sleep as upstream wrote it (it carries upstream's own TODO) — 413 of the 651 program_html targets navigate (338 templated URLs + 75 func: URLs), so a full 812-task scoring pass spends 1,239 s, about 20.6 minutes, sleeping before any page-load time is counted.",
-    "Replace it with a load-state wait — faster and less flaky, but it changes what the evaluator observes on a slow page and so can change a score.",
-]
 affects = "411 tasks / 651 targets carry program_html; 413 of those targets navigate and pay the sleep."
+affects_tasks = 411
+
+[[open_decisions.options]]
+id = "keep-sleep"
+text = "Keep the sleep as upstream wrote it (it carries upstream's own TODO) — 413 of the 651 program_html targets navigate (338 templated URLs + 75 func: URLs), so a full 812-task scoring pass spends 1,239 s, about 20.6 minutes, sleeping before any page-load time is counted."
+
+[[open_decisions.options]]
+id = "load-state-wait"
+text = "Replace it with a load-state wait — faster and less flaky, but it changes what the evaluator observes on a slow page and so can change a score."
