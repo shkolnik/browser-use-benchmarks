@@ -46,12 +46,36 @@ pins are declined on that basis, not on the merits of the individual advisory.
 - **Honest labelling.** This document, rather than a version number that
   implies a maintenance cadence that does not exist.
 
+## Vendored upstream code and task data
+
+`tasks/` holds each benchmark's task set together with the upstream code that
+scores it, copied byte-for-byte at a pinned commit and left unmodified. That is
+third-party Python in this repository, which nothing else here is, so it is
+worth being plain about what it is and is not.
+
+It is vendored to be **read and reimplemented against**, not imported blind. Two
+properties of the upstream evaluators make that distinction load-bearing:
+WebArena and VisualWebArena task files carry `func:`-prefixed strings that
+upstream resolves with a bare `eval()` against its evaluator module's globals, so
+whatever runs them executes expressions that arrive with the task data; and
+scoring drives a live browser against a running benchmark site after the episode
+ends. A harness that adopts this code adopts both. Run it where you run the
+images — on a trusted network, against these appliances, and nowhere else.
+
+What the vendoring does give you is provenance. Every file records the commit it
+came from and its sha256, `tests/test_task_suites.py` holds the bytes against
+those records on every push, and each benchmark's directory carries the upstream
+licence it is redistributed under.
+
 ## How to run them safely
 
 - Keep them on a trusted LAN, a lab VLAN, or a host-local network.
 - Do not port-forward them, and do not place them behind a public reverse proxy.
-- Treat any credentials they ship — the benchmark admin logins are published in
-  the upstream benchmark repositories — as public knowledge, because they are.
+- Treat any credentials they ship as public knowledge, because they are. The
+  benchmark application logins are published in the upstream benchmark
+  repositories, and each suite's `tasks/*/*/suite.toml` records the set its tasks
+  use — scoring cannot be described without them, since some tasks are scored by
+  minting an admin API token.
 - Do not put real data in them.
 - Prefer ephemeral hosts. The containers hold no state you need to keep; a
   rebuild from the published image is always the recovery path.
@@ -64,4 +88,7 @@ scope and worth reporting via a GitHub issue.
 
 Advisories against the pinned upstream dependencies are **out of scope** and
 will be closed with a pointer to this document. They are known, they are
-expected, and they are the accepted cost of a stable benchmark.
+expected, and they are the accepted cost of a stable benchmark. The same applies
+to the upstream evaluator code vendored under `tasks/`: it is pinned to a commit
+and kept unmodified on purpose, so a report that it should be patched is a report
+that it should stop matching upstream.

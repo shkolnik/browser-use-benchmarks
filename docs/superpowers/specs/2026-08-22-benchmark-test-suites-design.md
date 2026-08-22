@@ -128,7 +128,7 @@ manifests do.
 [[upstream.files]]  # per vendored blob: local path, upstream path, sha256, bytes
 [tasks]      # which file holds the task set, its format, its id field, instruction_source
 [sites]      # placeholder token -> repo service name (absent where a benchmark has none)
-[requires]   # services the suite needs; which of them this repo does not build
+[requires]   # services the suite needs, plus not_built and not_deployed subsets of them
 [reset]      # kind (none | http_endpoint | container_recreate | page_episode) and cost
 [scoring]    # evaluator kinds in use, what is offline-scorable, what needs a judge
 [[open_decisions]]  # question, options, blast radius
@@ -160,11 +160,20 @@ images.
 
 ## What is pinned rather than vendored
 
-VWA's 346 per-task input images are 186,294,634 bytes and live in the upstream git tree
-rather than a released archive. They are pinned as a `[[datasets]]` entry and fetched into
-the existing gitignored `datasets/` directory, exactly as image data is. Two facts travel
-with the pin because both are silent traps: the files are named `.png` but are JPEGs, and
-their paths are relative to the upstream repo root, so the capture records the rewrite rule.
+VWA's 346 per-task input images are 186,149,527 bytes, plus one 145,107-byte MS-COCO image
+used as a scoring reference. They live in the upstream git tree rather than a released
+archive, so the pinnable object is the commit tarball. It is pinned once, in
+`tasks/vwa/datasets.toml`, and fetched into the existing gitignored `datasets/` directory.
+
+The fetch is `tasks/vwa/fetch-images.py`, beside the data it fetches, not `bin/build`:
+`find_images` globs `images/*/*/image.toml` and structurally cannot see a tasks-side
+dataset. Two facts travel with the pin because both are silent traps: the file extensions
+lie — 323 of the 346 are named `.png` while being JPEG, WebP or GIF — and the in-archive
+paths are relative to the upstream repo root, so the capture records the rewrite rule.
+
+The pin is recorded once rather than in each of the three VWA manifests. A pin has exactly
+one source of truth; three copies of a sha256 is the silent-wrong-data hole `docs/design.md`
+describes, not redundancy.
 
 WebShop's `items_human_ins.json` is **already pinned** at
 `images/webshop/server/image.toml`, byte-identical to upstream's copy. The suite manifest
@@ -176,10 +185,18 @@ source of truth; a second copy is a silent-wrong-data hole, not redundancy.
 `tests/test_task_suites.py`, in the hermetic suite, reading the real files rather than
 fixtures — the invariant is about what this repo ships, and a fixture cannot go stale the way
 the thing being guarded does. It asserts every vendored blob still matches the sha256 its
-manifest records, every `suite.toml` parses and carries the skeleton above, every service in
-a `[requires]` list is either an `images/*/*/` directory or declared unrunnable, and every
-`[sites]` token appears in the task file it claims to template. With a vacuity guard on each
-collection: a vacuous suite is indistinguishable from a passing one.
+manifest records, every `suite.toml` parses and carries the skeleton above, and every
+`[sites]` token appears in the task file it claims to template, in both directions: a mapped
+token that never occurs is a claim about nothing, and an occurring token that is not mapped
+substitutes to nothing and yields a relative URL.
+
+The `[requires]` split is held the same way. A name in `not_built` must not be an
+`images/*/*/` directory, and a name in `not_deployed` must be one *and* be absent from
+`deploy/compose.yml` — so the day the map services are wired into the fleet, the test says
+which manifests now describe the fleet wrongly.
+
+With a vacuity guard on each collection: a vacuous suite is indistinguishable from a passing
+one.
 
 `tests.yml` runs on push to any branch with no path filter, so this is covered from the
 first commit. `build.yml` triggers only on `main` and only under `images/`, `builder/`,
