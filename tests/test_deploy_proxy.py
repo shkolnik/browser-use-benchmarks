@@ -70,44 +70,78 @@ SITES = dict(
 
 NAMES = sorted(BASE_SERVICES)
 
+# A service may have more than one subdomain, because a service may have more
+# than one listener: map-osrm serves car, bike and foot from one container and
+# selects the profile by port alone. So a site is matched to its service by the
+# upstream it names, never by its own name.
+SITES_BY_SERVICE = {}
+for site, upstream in SITES.items():
+    SITES_BY_SERVICE.setdefault(split_ports(upstream)[0], {})[site] = upstream
+
+
+def bakes_its_address(name: str) -> bool:
+    """Whether this service's image reads HTTP_HOST, read off the image itself.
+
+    The proxy overlay exists to correct a baked-in address, so the services it
+    must cover are exactly the ones that bake one. Derived rather than listed:
+    a hand-kept list is one more thing to forget when an image is added.
+    """
+    image = BASE_SERVICES[name]["image"]
+    repo, _, _ = image.rpartition(":")
+    benchmark, _, service = (repo or image).rsplit("/", 1)[-1].partition("-")
+    directory = REPO / "images" / benchmark / service
+    assert directory.is_dir(), (
+        f"{name}'s image {image!r} does not name an images/*/*/ directory")
+    return any("HTTP_HOST" in f.read_text(errors="ignore")
+               for f in directory.rglob("*") if f.is_file())
+
+
+ADDRESSED = sorted(n for n in NAMES if bakes_its_address(n))
+ADDRESSLESS = sorted(n for n in NAMES if n not in ADDRESSED)
+
 
 def test_the_fleet_was_discovered():
     # A parse bug that found nothing would make every test below vacuous, and a
     # vacuous suite is indistinguishable from a passing one.
-    assert len(NAMES) == 8, f"expected 8 services in {BASE.name}, got {NAMES}"
-    assert len(SITES) == 8, f"expected 8 proxied sites in Caddyfile, got {SITES}"
+    assert NAMES, f"no services parsed out of {BASE.name}"
+    assert SITES, f"no proxied sites parsed out of {CADDYFILE.name}"
+    assert ADDRESSED and ADDRESSLESS, (
+        "the fleet no longer has both kinds of service, so the split this file "
+        "tests against has stopped meaning anything")
+    assert set(SITES_BY_SERVICE) <= set(NAMES), (
+        f"{CADDYFILE.name} proxies to {sorted(set(SITES_BY_SERVICE) - set(NAMES))}, "
+        f"which {BASE.name} does not define — Docker's DNS will not resolve it.")
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_every_service_has_a_subdomain(name):
-    assert name in SITES, (
-        f"{name} is in {BASE.name} but has no http://{name}.{{$BENCH_HOST}} site "
-        f"in {CADDYFILE.name}, so it is unreachable through the proxy.")
+def test_every_listener_has_a_subdomain(name):
+    """One subdomain per published listener, not per service.
 
-
-@pytest.mark.parametrize("name", NAMES)
-def test_upstream_targets_the_container_listen_port(name):
-    # Brace-aware, for the same reason split_ports is: gitlab's upstream is
-    # `gitlab:{$PROXY_PORT:80}`, whose last colon is inside the default value.
-    upstream_host, upstream_port = split_ports(SITES[name])
-    assert upstream_host == name, (
-        f"{CADDYFILE.name} proxies {name} to host '{upstream_host}', which is "
-        f"not the compose service name — Docker's DNS will not resolve it.")
-    expected = container_port(BASE_SERVICES[name]["ports"][0])
-    if "${" in expected:
+    map-osrm is why this counts listeners: its three routing profiles differ by
+    port and by nothing else, so a service-shaped check passes on car while bike
+    and foot are unreachable through the proxy and nothing says so.
+    """
+    sites = SITES_BY_SERVICE.get(name, {})
+    assert sites, (
+        f"{name} is in {BASE.name} but nothing in {CADDYFILE.name} proxies to it, "
+        f"so it is unreachable through the proxy.")
+    proxied = {split_ports(u)[1] for u in sites.values()}
+    listening = {container_port(m) for m in BASE_SERVICES[name]["ports"]}
+    if any("${" in port for port in listening):
         # gitlab: its in-container listener follows HTTP_PORT, so the upstream
         # must track PROXY_PORT rather than name a fixed number.
-        assert upstream_port == "{$PROXY_PORT:80}", (
+        assert proxied == {"{$PROXY_PORT:80}"}, (
             f"{name}'s listen port follows HTTP_PORT, so the Caddyfile upstream "
-            f"must be {{$PROXY_PORT:80}}, not '{upstream_port}'.")
-    else:
-        assert upstream_port == expected, (
-            f"{CADDYFILE.name} proxies {name} to port {upstream_port} but "
-            f"{BASE.name} shows it listening on {expected} in-container. "
-            f"The subdomain would return 502 against a healthy container.")
+            f"must be {{$PROXY_PORT:80}}, not {sorted(proxied)}.")
+        return
+    assert proxied == listening, (
+        f"{CADDYFILE.name} proxies {name} to {sorted(proxied)} and {BASE.name} "
+        f"shows it listening on {sorted(listening)} in-container. A port in one "
+        f"and not the other is either a 502 against a healthy container or a "
+        f"listener nothing can reach.")
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", ADDRESSED)
 def test_overlay_moves_the_public_address_to_the_subdomain(name):
     env = OVERLAY_SERVICES[name]["environment"]
     assert env["HTTP_HOST"].startswith(f"{name}.${{BENCH_HOST"), (
@@ -120,13 +154,29 @@ def test_overlay_moves_the_public_address_to_the_subdomain(name):
         f"container's own published port.")
 
 
+@pytest.mark.parametrize("name", ADDRESSLESS)
+def test_the_overlay_leaves_addressless_services_alone(name):
+    """A service that bakes no address has nothing for the overlay to correct.
+
+    The map back ends serve tiles, routes and geocoding results — no page, no
+    links, no address anywhere in what they emit. An overlay block for one would
+    set HTTP_HOST and HTTP_PORT on a container that reads neither, which reads
+    as a contract the image honours and it does not.
+    """
+    assert name not in OVERLAY_SERVICES, (
+        f"{OVERLAY.name} sets an environment for {name}, whose image reads no "
+        f"HTTP_HOST. Proxying it is {CADDYFILE.name}'s job and needs no override.")
+
+
 def test_overlay_declares_no_ports_for_backends():
     """Compose merges `ports:` additively — an overlay cannot remove one.
 
     So the overlay must not restate them: a second mapping for the same service
     is appended, not substituted, and the two collide at bind time.
     """
-    for name in NAMES:
+    # The proxy is the one service the overlay introduces rather than overrides,
+    # and publishing its own port is the whole point of it.
+    for name in set(OVERLAY_SERVICES) & set(BASE_SERVICES):
         assert "ports" not in OVERLAY_SERVICES[name], (
             f"{OVERLAY.name} restates ports for {name}. Compose appends rather "
             f"than replaces, so this collides with {BASE.name}'s mapping.")
@@ -152,8 +202,8 @@ def test_unmatched_hosts_get_an_error_not_a_blank_200():
         f"unpublished hostname is not a success.")
 
 
-@pytest.mark.parametrize("name", NAMES)
-def test_index_lists_every_service(name):
+@pytest.mark.parametrize("name", sorted(SITES))
+def test_index_lists_every_site(name):
     """The bare domain serves an index; a service missing from it is invisible.
 
     This is a completeness check only. It does NOT guard the config's syntax:

@@ -43,6 +43,30 @@ http://webshop.{$BENCH_HOST} {
 	reverse_proxy webshop:3000
 }
 
+# The map back ends, up only under `--profile map`. One subdomain per LISTENER,
+# not per service: map-osrm serves car, bike and foot from one container and
+# picks the profile by port alone, so a single subdomain would reach car and
+# silently strand the other two.
+http://map-tile.{$BENCH_HOST} {
+	reverse_proxy map-tile:80
+}
+
+http://map-osrm-car.{$BENCH_HOST} {
+	reverse_proxy map-osrm:5000
+}
+
+http://map-osrm-bike.{$BENCH_HOST} {
+	reverse_proxy map-osrm:5001
+}
+
+http://map-osrm-foot.{$BENCH_HOST} {
+	reverse_proxy map-osrm:5002
+}
+
+http://map-nominatim.{$BENCH_HOST} {
+	reverse_proxy map-nominatim:8080
+}
+
 http://miniwob.{$BENCH_HOST} {
 	reverse_proxy miniwob:8399
 }
@@ -71,6 +95,15 @@ http://{$BENCH_HOST} {
   http://classifieds.{$BENCH_HOST}      VisualWebArena classifieds (Osclass)
   http://webshop.{$BENCH_HOST}          WebShop
   http://miniwob.{$BENCH_HOST}          MiniWoB++
+
+Up only under --profile map, and reachable by no benchmark task: this repo does
+not build the OSM front end the map tasks address.
+
+  http://map-tile.{$BENCH_HOST}         WebArena map tiles
+  http://map-osrm-car.{$BENCH_HOST}     WebArena map routing, car profile
+  http://map-osrm-bike.{$BENCH_HOST}    WebArena map routing, bike profile
+  http://map-osrm-foot.{$BENCH_HOST}    WebArena map routing, foot profile
+  http://map-nominatim.{$BENCH_HOST}    WebArena map geocoding
 
 A subdomain that returns 502 is a service that is not running: bring it up with
     docker compose up -d --wait <name>

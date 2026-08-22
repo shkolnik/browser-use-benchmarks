@@ -11,6 +11,11 @@
 files, which exist to smoke-gate one freshly-built image on the build runner and
 publish only to `127.0.0.1`.
 
+Three more — the WebArena map back ends — sit behind `--profile map` and do not
+come up with the rest. They are ~35 GB, and no benchmark task can reach them: all
+128 map-tagged WebArena tasks address the OpenStreetMap front end, which this repo
+does not build. Add `--profile map` if you want them anyway.
+
 ```sh
 BENCH_HOST=nas.local docker compose -f deploy/compose.yml up -d --wait
 ```
@@ -27,7 +32,7 @@ Bring up one suite at a time by naming services:
 BENCH_HOST=nas.local docker compose -f deploy/compose.yml up -d --wait shopping reddit
 ```
 
-## One hostname instead of eight ports
+## One hostname instead of a port per service
 
 `deploy/compose.proxy.yml` overlays a Caddy front door, giving each service a
 subdomain on a single host and port:
@@ -46,7 +51,7 @@ bind-mounted.
 
 **`*.$BENCH_HOST` has to resolve to this host** — a wildcard DNS record, or
 per-name entries in each client's hosts file. The bare domain serves an index
-of the eight names; an unpublished hostname gets a 404 saying so, and a
+of the published names; an unpublished hostname gets a 404 saying so, and a
 subdomain whose service is not running gets a 502.
 
 `PROXY_PORT` (default 80) moves the front door.
@@ -81,6 +86,22 @@ DNS-01 provider.
 | `webshop` | 3000 | `WEBSHOP_PORT` |
 | `miniwob` | 8399 | `MINIWOB_PORT` |
 
+Under `--profile map`:
+
+| Service | Published | Override |
+|---|---|---|
+| `map-tile` | 8080 | `MAP_TILE_PORT` |
+| `map-osrm` (car) | 5000 | `MAP_OSRM_CAR_PORT` |
+| `map-osrm` (bike) | 5001 | `MAP_OSRM_BIKE_PORT` |
+| `map-osrm` (foot) | 5002 | `MAP_OSRM_FOOT_PORT` |
+| `map-nominatim` | 8085 | `MAP_NOMINATIM_PORT` |
+
+`map-osrm` is one container with three listeners: it picks the routing profile
+from the port and from nothing else, so all three are published and the proxy
+gives each its own subdomain. The three map services take no `HTTP_HOST` or
+`HTTP_PORT` — tiles, routes and geocoding results carry no address — so their
+overrides move the published side alone.
+
 Each override moves the published port and `HTTP_PORT` together, which is what
 the service contract requires — `HTTP_PORT` names the port a client types, not
 the port the process binds. Wikipedia publishes 9888 rather than upstream's
@@ -101,8 +122,8 @@ reserved port is one nobody wants to publish.
 **These images are `linux/amd64` only.** There is no `arm64` variant, so an
 ARM-based NAS cannot run them without emulation.
 
-**Disk: ~280 GB compressed to pull, more once unpacked.** Compressed sizes from
-the registry:
+**Disk: ~280 GB compressed to pull, ~316 GB with the map profile, more once
+unpacked.** Compressed sizes from the registry:
 
 | Image | Compressed |
 |---|---|
@@ -115,12 +136,22 @@ the registry:
 | `webarena-shopping-admin` | 1.1 GB |
 | `miniwob-server` | 0.03 GB |
 
+Under `--profile map`, another ~35 GB on top:
+
+| Image | Compressed |
+|---|---|
+| `webarena-map-nominatim` | 13.1 GB |
+| `webarena-map-tile` | 12.7 GB |
+| `webarena-map-osrm` | 9.8 GB |
+
 Make sure Docker's storage lives on the large volume before pulling.
 
 **Memory.** Both Magento images run Elasticsearch alongside PHP-FPM and nginx,
-and GitLab runs its full runit-supervised stack. Running all eight at once wants
-considerably more RAM than any one of them — bring the fleet up suite by suite
-the first time and watch, rather than assuming the whole set fits.
+and GitLab runs its full runit-supervised stack. Running the whole fleet at once
+wants considerably more RAM than any one of them — bring it up suite by suite the
+first time and watch, rather than assuming the whole set fits. The map profile
+adds two more Postgres instances to that, for services nothing can currently
+reach.
 
 ## First boot
 

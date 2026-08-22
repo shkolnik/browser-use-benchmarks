@@ -21,6 +21,10 @@
 # a client types", not "the port the process listens on" — note that reddit and
 # wikipedia listen on 80 in-container and are still HTTP_PORT=9999/9888. Move a
 # port by setting its variable; both sides follow.
+#
+# The three map services are the exception: they take no HTTP_HOST or HTTP_PORT
+# at all, because nothing they serve carries an address. They are also behind
+# `--profile map` and do not come up with the rest. See their block below.
 
 services:
   # ---- WebArena -----------------------------------------------------------
@@ -98,6 +102,52 @@ services:
       RESET_TOKEN: ${CLASSIFIEDS_RESET_TOKEN:-4b61655535e7ed388f0d40a93600254c}
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${CLASSIFIEDS_PORT:-9980}:9980"
+    restart: unless-stopped
+
+  # ---- WebArena maps ------------------------------------------------------
+  #
+  # Opt in with `--profile map`. These three are ~35 GB of published layers and
+  # nothing can reach them yet: all 128 map-tagged WebArena tasks address
+  # __MAP__, which is the OSM front end, and this repo does not build one. See
+  # tasks/webarena/test/suite.toml's [[requires.blocked_by]]. They are here so
+  # the deployment matches what the repo publishes, and so the front end has
+  # something to talk to on the day it exists — not because a task can use them.
+  #
+  # None of the three takes HTTP_HOST or HTTP_PORT, and they are the only
+  # services here that do not. They serve tiles, routes and geocoding results,
+  # never a page with links in it, so no address is baked into anything they
+  # emit and there is nothing for a deployment to correct. That is also why the
+  # proxy overlay has no entry for them: it exists to rewrite that address.
+  map-tile:
+    image: ghcr.io/shkolnik/webarena-map-tile:latest
+    profiles: ["map"]
+    # Listens on 80 in-container, published on upstream's 8080. Postgres 5432 is
+    # deliberately not published — nothing outside the container reads it.
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${MAP_TILE_PORT:-8080}:80"
+    restart: unless-stopped
+
+  map-osrm:
+    image: ghcr.io/shkolnik/webarena-map-osrm:latest
+    profiles: ["map"]
+    # One container serving all three routing profiles on the ports upstream's
+    # clients expect: car 5000, bike 5001, foot 5002. Upstream runs three
+    # containers off one image differing only in mounted /data and port; see the
+    # image's README for that decision. The profile is chosen by port and by
+    # nothing else, so all three have to be published for all three to work.
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${MAP_OSRM_CAR_PORT:-5000}:5000"
+      - "${BIND_ADDR:-0.0.0.0}:${MAP_OSRM_BIKE_PORT:-5001}:5001"
+      - "${BIND_ADDR:-0.0.0.0}:${MAP_OSRM_FOOT_PORT:-5002}:5002"
+    restart: unless-stopped
+
+  map-nominatim:
+    image: ghcr.io/shkolnik/webarena-map-nominatim:latest
+    profiles: ["map"]
+    # Listens on 8080 in-container, published on upstream's 8085. Postgres 5432
+    # is deliberately not published.
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${MAP_NOMINATIM_PORT:-8085}:8080"
     restart: unless-stopped
 
   # ---- WebShop ------------------------------------------------------------

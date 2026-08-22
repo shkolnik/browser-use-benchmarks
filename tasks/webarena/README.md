@@ -316,23 +316,22 @@ raises rather than scoring 0 — the same denominator problem as the judge.
 
 ## What cannot run here today
 
-**The 128 map tasks are blocked, by two separate gaps.** They are exactly the tasks whose
-`start_url` is `__MAP__`, and exactly the tasks with a null `storage_state`.
+**The 128 map tasks are blocked.** They are exactly the tasks whose `start_url` is
+`__MAP__`, and exactly the tasks with a null `storage_state`.
 
-1. `webarena/map-tile`, `webarena/map-osrm` and `webarena/map-nominatim` are built, published
-   and present in `images/webarena/compose.yml`, but absent from `deploy/compose.yml`,
-   `deploy/Caddyfile` and `deploy/README.md`'s port table — the deployment declares eight
-   services and none of them is a map service. `bin/build smoke` can start them; the fleet
-   deployment cannot. `suite.toml` lists these three as `[requires].not_deployed`, and three
-   entries in `deploy/` is the whole fix.
-2. Nothing in this repo builds the OpenStreetMap **web frontend** that `__MAP__` addresses,
-   and the three backends do not substitute for it. The task file says so itself: the
-   reference URLs are `__MAP__/search?query=...`, and the locators read that frontend's DOM
-   — `div#content select.routing_engines`, `[name="route_from"]`, `#sidebar_content`. All 63
-   map `program_html` targets are `last`, i.e. they score the frontend page as the agent left
-   it. Starting all three backends still leaves every map task unrunnable. `suite.toml` lists
-   `webarena/map-frontend` as `[requires].not_built`: a service the tasks need, that this repo
-   has no image directory for, and that closing the first gap does not touch.
+Nothing in this repo builds the OpenStreetMap **web frontend** that `__MAP__` addresses, and
+the three map back ends do not substitute for it. The task file says so itself: the reference
+URLs are `__MAP__/search?query=...`, and the locators read that frontend's DOM —
+`div#content select.routing_engines`, `[name="route_from"]`, `#sidebar_content`. All 63 map
+`program_html` targets are `last`, i.e. they score the frontend page as the agent left it.
+`suite.toml` lists `webarena/map-frontend` as `[requires].not_built`: a service the tasks
+need, and one this repo has no image directory for.
+
+This was two gaps, and the other is closed. `webarena/map-tile`, `webarena/map-osrm` and
+`webarena/map-nominatim` are now in `deploy/compose.yml`, behind compose's `map` profile
+because they are ~35 GB and nothing can reach them yet; `deploy/Caddyfile` gives each of
+their listeners a subdomain. Deploying them moved no count in `suite.toml` — which is the
+point worth keeping: the back ends were never what blocked these tasks.
 
 **`__HOMEPAGE__` is not a third gap.** It is not a service at all: the token occurs zero
 times in the task file, nothing here serves it, and nothing is meant to. It matters only
