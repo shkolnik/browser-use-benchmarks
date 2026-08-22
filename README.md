@@ -50,15 +50,22 @@ reasoning, what is done instead, and how to run the fleet safely.
 | VisualWebArena | vwa-classifieds | [ghcr.io/shkolnik/vwa-classifieds](https://github.com/shkolnik/browser-use-benchmarks/pkgs/container/vwa-classifieds) |
 | WebShop | webshop-server | [ghcr.io/shkolnik/webshop-server](https://github.com/shkolnik/browser-use-benchmarks/pkgs/container/webshop-server) |
 | MiniWoB++ | miniwob-server | [ghcr.io/shkolnik/miniwob-server](https://github.com/shkolnik/browser-use-benchmarks/pkgs/container/miniwob-server) |
+| WebArena | webarena-map-tile | [ghcr.io/shkolnik/webarena-map-tile](https://github.com/shkolnik/browser-use-benchmarks/pkgs/container/webarena-map-tile) |
+| WebArena | webarena-map-osrm | [ghcr.io/shkolnik/webarena-map-osrm](https://github.com/shkolnik/browser-use-benchmarks/pkgs/container/webarena-map-osrm) |
+| WebArena | webarena-map-nominatim | [ghcr.io/shkolnik/webarena-map-nominatim](https://github.com/shkolnik/browser-use-benchmarks/pkgs/container/webarena-map-nominatim) |
+
+The three map images are built and published but sit behind compose's `map`
+profile, and no benchmark task can reach them: WebArena's 128 map tasks address
+the OpenStreetMap front end, which this repo does not build.
 
 Images are `linux/amd64` only, and several are large (wikipedia is ~88 GB
-compressed; the full fleet is ~280 GB to pull). See
+compressed; the fleet is ~280 GB to pull, ~316 GB with the map profile). See
 [`deploy/README.md`](deploy/README.md) for per-image sizes and host requirements.
 
 ## Running the benchmarks
 
-The fastest path is the fleet compose file, which brings up all eight services
-(or any subset) from the published `:latest` images:
+The fastest path is the fleet compose file, which brings up all eight benchmark
+services (or any subset) from the published `:latest` images:
 
 ```sh
 BENCH_HOST=nas.local docker compose -f deploy/compose.yml up -d --wait

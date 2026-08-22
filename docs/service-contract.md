@@ -28,14 +28,30 @@ Regenerated from the tree, not copied from the plan.
 | `webshop/server` | 3000 | `localhost:3000/` | `3000:3000` | `localhost:3000/` |
 | `webarena/gitlab` | 8023 | `gitlab-healthcheck` (not HTTP) | `8023:8023` | `localhost:8023/explore` |
 | `webarena/wikipedia` | 80 | `127.0.0.1:80/<landing>` | **`9888:80`** | `127.0.0.1:9888/<landing>` |
+| `webarena/map-tile` | 80, 5432 | `localhost:80/tile/0/0/0.png` | **`8080:80`** | `localhost:8080/tile/0/0/0.png` |
+| `webarena/map-osrm` | 5000, 5001, 5002 | `healthcheck.sh`, all three profiles | `5000:5000`, `5001:5001`, `5002:5002` | `localhost:5000/route/...` |
+| `webarena/map-nominatim` | 8080 | `localhost:8080/search?q=…` | **`8085:8080`** | `localhost:8085/search?q=…` |
 
 `images/probe/synthetic/` is deliberately absent: it has no Dockerfile and no runnable service.
 `bin/build smoke probe` failing on the missing healthcheck is correct, and CI excludes the
 benchmark by name in `build.yml`'s discover step.
 
+The last three take no `HTTP_HOST` or `HTTP_PORT`, and they are the only images here that do
+not. They serve tiles, routes and geocoding results — never a page with links in it — so
+there is no address to bake and nothing for a deployment to correct. `deploy/compose.yml`
+therefore gives them no environment, and `deploy/compose.proxy.yml` no override; they are
+still proxied, by `deploy/Caddyfile` alone. Postgres 5432 is exposed by map-tile and
+map-nominatim and published by neither: nothing outside those containers reads it.
+
+`webarena/map-osrm` is also the only image with more than one listener. One container serves
+all three routing profiles, selected by port and by nothing else, so all three are published
+and the proxy gives each its own subdomain.
+
 ### Reddit is the worked example
 
-Reddit is the only image whose published and listen ports differ — `9999:80`. So:
+Four images publish a port that differs from the one they listen on — reddit `9999:80`,
+wikipedia `9888:80`, map-tile `8080:80`, map-nominatim `8085:8080`. Reddit is the worked
+example. So:
 
 - its `HEALTHCHECK` probes **`localhost:80`**, because it runs *inside* the container, where
   nothing is bound to 9999;

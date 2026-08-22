@@ -17,9 +17,14 @@
 # the URLs they serve (Magento's base_url, Osclass's WEB_PATH, GitLab's
 # external_url). Behind a proxy the address clients use is the subdomain on the
 # proxy's port, not the container's own published port, so HTTP_HOST/HTTP_PORT
-# have to say so. Leaving them at the direct-mode values would produce eight
-# services that answer through the proxy while every link they emit points back
-# at the direct ports.
+# have to say so. Leaving them at the direct-mode values would produce services
+# that answer through the proxy while every link they emit points back at the
+# direct ports.
+#
+# Which is why the three map services have no block below: they take neither
+# variable. Tiles, routes and geocoding results carry no address, so there is
+# nothing for the proxy to correct. They are still proxied — deploy/Caddyfile
+# gives each listener a subdomain — they just need no environment to be.
 #
 # Consequence worth knowing: an image can only bake ONE address, so the direct
 # ports from the base file still answer here but serve subdomain links. They
@@ -42,7 +47,7 @@ services:
       - caddy_config:/config
     # Deliberately no depends_on: Caddy resolves upstreams per request, so it
     # starts fine on its own and a subset of the fleet can be brought up
-    # without dragging in all eight. A service that is down is a 502.
+    # without dragging in the whole fleet. A service that is down is a 502.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
       interval: 10s

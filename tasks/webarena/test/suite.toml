@@ -518,30 +518,25 @@ services = [
     # and expect the answer to come from an encyclopedia lookup, and the WIKIPEDIA env var
     # must be non-empty or the evaluators will not import. Required for both reasons.
     "webarena/wikipedia",
-    # The map chain. None of the four is reachable from deploy/compose.yml, for the two
-    # different reasons split out below.
+    # The map chain. The three back ends are deployed under compose's `map` profile; the
+    # front end they exist to serve is not built here at all, which is what blocks every
+    # map task. See not_built below.
     "webarena/map-tile",
     "webarena/map-osrm",
     "webarena/map-nominatim",
     "webarena/map-frontend",
 ]
 # No image directory here and nothing in this repo from which to make one. __MAP__ addresses
-# the OpenStreetMap WEB FRONTEND, and the three backends do not substitute for it: the task
-# locators read that frontend's DOM. Starting all three backends still leaves every map task
-# unrunnable, so this gap is the one that matters and closing the other does not touch it.
+# the OpenStreetMap WEB FRONTEND, and the three back ends do not substitute for it: the task
+# locators read that frontend's DOM (`div#content select.routing_engines`, `[name="route_from"]`,
+# `[name="route_to"]`, `#sidebar_content`). Running all three back ends leaves every map task
+# unrunnable, which is why deploying them changed no count in this file.
 not_built = ["webarena/map-frontend"]
-# Built here, and still absent from the fleet. Each of the three has an images/webarena/<name>/
-# directory with a Dockerfile and an image.toml; .github/workflows/build.yml enables every
-# image except probe/ and pushes it to ghcr; images/webarena/compose.yml starts all three, so
-# `bin/build smoke` reaches them. What omits them is the deployment: deploy/compose.yml,
-# deploy/Caddyfile and deploy/README.md's port table name exactly eight services and no map
-# service among them. Adding three entries there is the whole fix, and it would still leave
-# not_built above unanswered.
-not_deployed = [
-    "webarena/map-tile",
-    "webarena/map-osrm",
-    "webarena/map-nominatim",
-]
+# Empty, and it was not always: the three map back ends are in deploy/compose.yml, behind
+# `--profile map` because they are ~35 GB that no task can currently reach. A profiled
+# service is deployed — `docker compose --profile map up` starts it and deploy/Caddyfile
+# gives each of its listeners a subdomain — so nothing here belongs in this list.
+not_deployed = []
 # 128 of 812 — the map-tagged tasks, which are exactly the tasks whose start_url is
 # __MAP__, and exactly the tasks with a null storage_state. Every one of them is blocked;
 # none of the other 684 touches a map origin (zero __MAP__ occurrences in
