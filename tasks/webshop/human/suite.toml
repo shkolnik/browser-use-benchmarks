@@ -40,7 +40,7 @@ not_vendored = [
     "baseline_models/env.py",                    # one of the two train-split definitions
     "baseline_models/train_search_il.py",        # the other one
     "baseline_models/test.py",                   # the 500-episode loop and the reported scale
-    "baseline_models/data/items_human_ins.json", # pinned instead — see [goal_source]
+    "baseline_models/data/items_human_ins.json", # pinned instead — see [[external_pins]]
 ]
 
 # The goal texts, in the order the server addresses them.
@@ -100,17 +100,14 @@ bytes = 1094
 # filename and sha256 so the two can be checked against each other; restating the mirror
 # URLs here would make a second copy of a pin, which is a silent-wrong-data hole rather
 # than redundancy.
-[goal_source]
-filename = "items_human_ins.json"
-sha256 = "cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3"
+[[external_pins]]
+what = "items_human_ins.json"
 pinned_at = "images/webshop/server/image.toml"
+sha256 = "cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3"
 
 [tasks]
-file = "human/human_goals.json"
+file = "human_goals.json"
 format = "json_array_of_strings"
-# There is no id field. A task's identity is its ZERO-BASED INDEX in that array, and the
-# array carries nothing else — no asin, no attributes, no options, no price ceiling.
-id_field = ""
 # The instruction an agent sees is rendered by the server, not read from any file, and
 # it is not stable across boots. get_human_goals composes it as
 # `product['instruction'].strip('.') + price_text`, where price_text is
@@ -142,13 +139,18 @@ instruction_source = "server_rendered"
 # exactly the entries that carry them.
 verify_by = "normalised comparison against the rendered instruction; never offline reconstruction"
 
-# No [sites] table: WebShop has no placeholder tokens and no per-task URL. Nothing in
+# No [addressing.sites] table: WebShop has no placeholder tokens and no per-task URL.
+# Nothing in
 # this repo or upstream rewrites a WebShop URL — the app emits exclusively relative
 # links, which images/webshop/server/entrypoint.sh states as the reason it does not
 # rewrite anything from HTTP_HOST/HTTP_PORT. The task index travels in the path segment
 # instead; see [addressing].
 
 [addressing]
+# The address is built from the instance key: no task record carries a URL, and the app
+# emits only relative links, so a bare path needs the service it is relative to.
+kind = "path_template"
+base_service = "webshop/server"
 # app.py selects a fixed goal with, verbatim:
 #     if session_id not in user_sessions and 'fixed' in session_id:
 #         goal_dix = int(session_id.split('_')[-1])
@@ -157,7 +159,7 @@ verify_by = "normalised comparison against the rendered instruction; never offli
 # /fixed_0 .. /fixed_499. A session id NOT containing "fixed" draws a random
 # weight-sampled goal instead — which is what the image's own healthcheck path /abc
 # does, and why /abc is not a task.
-path_template = "/fixed_{index}"
+template = "/fixed_{index}"
 # "fixed" is matched as a SUBSTRING, not a prefix, and the index is taken from the last
 # underscore-delimited field. Both halves are load-bearing: user_sessions is keyed by
 # the RAW session id, and revisiting an id already in it silently reuses the stored
@@ -174,34 +176,28 @@ test_range = [0, 500]
 # other upstream file that contradicts its boundary.
 eval_range = [500, 1500]
 
-[requires]
-services = ["webshop/server"]
-# Nothing is missing in either direction: images/webshop/server/ builds and publishes the
-# image, and deploy/compose.yml's `webshop` service brings it up. WebShop is one
-# self-contained service — no second site, no map backend, no auth service, no external
-# network at run time — so both subsets are empty.
-not_built = []
-not_deployed = []
-# Every goal is addressable against the one service, so nothing is blocked.
-runnable = 12087
-blocked = 0
+[instance]
+# There is no id field. A task's identity is its ZERO-BASED INDEX in that array, and the
+# array carries nothing else — no asin, no attributes, no options, no price ceiling.
+key = ["index"]
+from_file = ["index"]
+chosen_by_harness = []
+
+[auth]
 # No login, no cookies, no storage_state and no seeded accounts, so there is no [accounts]
 # table. Session state is an in-process dict keyed by the session-id path segment, with no
 # persistence layer, so there is nothing to authenticate as.
-accounts = false
-# No required_env either. Nothing in a WebShop task is addressed through an environment
-# variable: the task index travels in the URL path (see [addressing]), and the service
-# address belongs to the harness.
-#
-# The search index is pyserini/Lucene over all ~1.18M products and is baked into the
-# image, and goal.py loads spacy en_core_web_sm at import. Both are inside the
-# container; a harness needs neither.
+kind = "none"
 
-[reset]
+[[reset]]
 # There is no reset endpoint, no reset script and no state to restore — the server
 # writes nothing. Per-task isolation comes from using a fresh session id, not from
 # resetting anything, so the declared kind is `none` and its cost is one HTTP request.
-kind = "none"
+scope = "task"
+kind = "new_session"
+# Nothing one task does reaches the next: the server persists nothing, and each session
+# id gets its own entry in the in-process user_sessions dict, so task order is free.
+contaminates = false
 cost_s = 0
 how = """
 Use a session id that has not been used before: /fixed_<i> the first time, and a
@@ -240,6 +236,10 @@ needs_live_page = 12087
 needs_judge = 0
 success = "reward == 1.0"
 reward_range = [0.0, 1.0]
+# The mean over whatever set of goals a run scores. The x100 reporting scale is
+# webshop-run-scope's to answer, so writing it here would settle an open decision in a
+# data file.
+aggregate = "mean"
 
 [scoring.formula]
 # Verbatim from the vendored goal.py, get_reward:
@@ -387,6 +387,33 @@ case = "r_type multiplier"
 arithmetic = "(1 + 2 + 1) / (3 + 3 + 1) * 0.5"
 expected = 0.2857
 
+[requires]
+services = ["webshop/server"]
+# Nothing is missing in either direction: images/webshop/server/ builds and publishes the
+# image, and deploy/compose.yml's `webshop` service brings it up. WebShop is one
+# self-contained service — no second site, no map backend, no auth service, no external
+# network at run time — so both subsets are empty.
+not_built = []
+not_deployed = []
+# Every goal is addressable against the one service, so nothing is blocked.
+runnable = 12087
+blocked = 0
+# No required_env either. Nothing in a WebShop task is addressed through an environment
+# variable: the task index travels in the URL path (see [addressing]), and the service
+# address belongs to the harness.
+#
+# The search index is pyserini/Lucene over all ~1.18M products and is baked into the
+# image, and goal.py loads spacy en_core_web_sm at import. Both are inside the
+# container; a harness needs neither.
+
+[decisions_not_applicable]
+fleet-search-tie-ordering = """\
+WebShop has no task whose expected answer depends on the order of equally-ranked \
+search results: get_reward's inputs are the purchased product, the goal record, the \
+price and the purchased options, so the ranking that led the agent to a product is not \
+an input to its score. A permuted tie can change which product an agent buys; it \
+cannot change what a bought product scores."""
+
 # Every id below is namespaced to this benchmark, and none of them is the fleet-wide
 # search-tie question. That one asks how to score a task whose expected answer depends on
 # the order of equally-ranked search results, and WebShop has no such task: get_reward's
@@ -396,37 +423,64 @@ expected = 0.2857
 # cannot change what a bought product scores.
 [[open_decisions]]
 id = "webshop-run-scope"
+scope = "suite"
+kind = "run_scope"
 question = "Which goal indices constitute a run, and on what scale is the result reported?"
-options = [
-    "reproduce-published: /fixed_0 .. /fixed_499, upstream's 500-goal test split, reported as mean reward x100 and success rate = the share scoring exactly 1.0",
-    "stable-in-house: a fixed subset chosen to be insensitive to the price draw, reported as mean reward in 0.0-1.0",
-    "full: all 12,087 goals",
-]
 affects = "12,087 goals; the published-numbers option scores 500 of them. The 500-episode loop and the x100/x10 reporting scale live in baseline_models/test.py, which is not vendored here."
+
+[[open_decisions.options]]
+id = "reproduce-published"
+text = "/fixed_0 .. /fixed_499, upstream's 500-goal test split, reported as mean reward x100 and success rate = the share scoring exactly 1.0"
+
+[[open_decisions.options]]
+id = "stable-in-house"
+text = "a fixed subset chosen to be insensitive to the price draw, reported as mean reward in 0.0-1.0"
+
+[[open_decisions.options]]
+id = "full"
+text = "all 12,087 goals"
 
 [[open_decisions]]
 id = "webshop-price-nondeterminism"
+scope = "suite"
+kind = "nondeterminism"
 question = "Accept the per-boot variance in the price clause and r_price, or seed the two draws?"
-options = [
-    "accept-and-report: run against the server as built, treat the price clause as non-identifying (upstream does — its own split code strips ', and price lower than' before matching, and human_goals.json carries no price clause), and report r_price variance as part of the result",
-    "seed-the-fork: seed generate_product_prices and the get_human_goals price sample so /fixed_<i> renders one instruction text for all time",
-]
 affects = "Every one of the 12,087 goals: the instruction text's price clause, and one of the three numerator terms of every reward. This repo already forks the server (shkolnik/WebShop), so the seeding change is cheap to carry — but it changes what the benchmark measures, and results from a seeded fork are not comparable with published numbers."
+
+[[open_decisions.options]]
+id = "accept-and-report"
+text = "run against the server as built, treat the price clause as non-identifying (upstream does — its own split code strips ', and price lower than' before matching, and human_goals.json carries no price clause), and report r_price variance as part of the result"
+
+[[open_decisions.options]]
+id = "seed-the-fork"
+text = "seed generate_product_prices and the get_human_goals price sample so /fixed_<i> renders one instruction text for all time"
 
 [[open_decisions]]
 id = "webshop-goal-set"
+scope = "suite"
+kind = "goal_set"
 question = "Human goals only, or also capture the synthetic goal set?"
-options = [
-    "human-only: what this suite captures, and what images/webshop/server serves — its entrypoint runs `python -m web_agent_site.app`, and the app takes get_goals' human_goals=True default",
-    "add-synthetic: a second suite directory, which needs a server started with human_goals=0 — the gym path's default, and not something this image does",
-]
 affects = "The meaning of every index. Indices 0..499 name different goals in the two sets, and goal_options changes from a list to a dict, which changes the option-scoring path. Published WebShop numbers are rarely explicit about which set produced them."
+
+[[open_decisions.options]]
+id = "human-only"
+text = "what this suite captures, and what images/webshop/server serves — its entrypoint runs `python -m web_agent_site.app`, and the app takes get_goals' human_goals=True default"
+
+[[open_decisions.options]]
+id = "add-synthetic"
+text = "a second suite directory, which needs a server started with human_goals=0 — the gym path's default, and not something this image does"
 
 [[open_decisions]]
 id = "webshop-train-split"
+scope = "suite"
+kind = "data_split"
 question = "Where does the train split start — index 1500 or index 500?"
-options = [
-    "1500, per baseline_models/env.py: `range(1500, len(goals))`, 10,587 goals, disjoint from eval",
-    "500, per baseline_models/train_search_il.py: `range(500, len(human_goals))`, 11,587 goals, overlapping eval entirely",
-]
 affects = "1,000 goals — indices 500..1499, which are the eval split under both readings and are also train under one of them. test (0..499) is unaffected either way. Recorded as a contradiction rather than resolved: both files are upstream at the pinned commit, neither is vendored here, and picking one would bury a decision in a data file."
+
+[[open_decisions.options]]
+id = "start-at-1500"
+text = "1500, per baseline_models/env.py: `range(1500, len(goals))`, 10,587 goals, disjoint from eval"
+
+[[open_decisions.options]]
+id = "start-at-500"
+text = "500, per baseline_models/train_search_il.py: `range(500, len(human_goals))`, 11,587 goals, overlapping eval entirely"
