@@ -25,3 +25,7 @@ outputs = ["shopping_admin_db.sql.gz", "shopping_admin_media.tar", "shopping_adm
 # rather than localhost for the same reason the HEALTHCHECK names it: adminhtml
 # is host-pinned to base_url, and localhost measurably 404s here.
 healthcheck = "http://127.0.0.1:7780/admin"
+# Magento serves the storefront at the root and adminhtml under this prefix, on
+# the same port. A caller that templates a path onto host:7780 alone reaches the
+# storefront, which answers 200 — the wrong app, not an error.
+base_path = "/admin"

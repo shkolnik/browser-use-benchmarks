@@ -78,6 +78,13 @@ class Manifest:
     # container that is healthy in-container and unreachable through the port
     # mapping, which is what happened to shopping for 901s (#66).
     reachability_timeout_s: int = 30
+    # The path a client prefixes to reach this service's content, empty for the
+    # ones served at the root. A port number alone cannot reconstruct a base URL:
+    # shopping-admin serves its app under /admin and wikipedia under its ZIM
+    # book's article namespace, so a caller that templates a path onto
+    # host:port lands on the storefront or on a 404 rather than the app.
+    # Leading slash, no trailing slash, so joining is always base_path + "/" + rest.
+    base_path: str = ""
     build_args: dict[str, str] = field(default_factory=dict)
     source: Source = Source(kind="build")
     prepare: Prepare | None = None
@@ -199,10 +206,17 @@ def load_manifest(image_dir: Path) -> Manifest:
              "driver only checks that the PUBLISHED address answers. Move the budget "
              "into the HEALTHCHECK and delete this key; set reachability_timeout_s "
              "only if the port mapping itself is slow to come up.")
+    base_path = str(svc.get("base_path", ""))
+    if base_path and (not base_path.startswith("/") or base_path.endswith("/")):
+        _die(image_dir,
+             f"service.base_path must start with '/' and not end with one, got {base_path!r}. "
+             "Callers join it as base_path + '/' + rest, so a trailing slash produces a "
+             "double slash and a missing leading one produces a relative path.")
     return Manifest(
         datasets=datasets,
         healthcheck=svc.get("healthcheck"),
         reachability_timeout_s=int(svc.get("reachability_timeout_s", 30)),
+        base_path=base_path,
         build_args={k: str(v) for k, v in data.get("build", {}).get("args", {}).items()},
         source=Source(kind=kind, dataset=src.get("dataset"), tag=src.get("tag")),
         prepare=prepare,

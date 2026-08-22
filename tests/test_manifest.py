@@ -214,3 +214,29 @@ def test_reachability_timeout_defaults_and_overrides(tmp_path):
     (tmp_path / "image.toml").write_text(
         '[service]\nhealthcheck = "http://x/"\nreachability_timeout_s = 90\n')
     assert load_manifest(tmp_path).reachability_timeout_s == 90
+
+
+BASE_PATH = '''
+[service]
+healthcheck = "http://localhost:8080/admin"
+base_path = "%s"
+'''
+
+
+def test_base_path_defaults_to_empty(tmp_path):
+    assert load_manifest(write(tmp_path, GOOD)).base_path == ""
+
+
+def test_base_path_is_kept_verbatim(tmp_path):
+    m = load_manifest(write(tmp_path, BASE_PATH % "/admin"))
+    assert m.base_path == "/admin"
+
+
+@pytest.mark.parametrize("bad", ["admin", "/admin/", "/"])
+def test_base_path_must_be_joinable(tmp_path, bad):
+    # Callers join it as base_path + "/" + rest. A missing leading slash yields a
+    # relative path and a trailing one yields a double slash, and both produce a
+    # URL that resolves somewhere plausible rather than failing.
+    with pytest.raises(SystemExit) as e:
+        load_manifest(write(tmp_path, BASE_PATH % bad))
+    assert "base_path" in str(e.value)

@@ -80,6 +80,10 @@ outputs = [
 # (2026-08-08): 200 in ONE hop, zero redirects, <title>User:The other Kiwix
 # guy/Landing</title>, 19,396 bytes.
 healthcheck = "http://127.0.0.1:9888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
+# kiwix-serve mounts each archive under its own name, and articles live in the
+# ZIM's A namespace beneath it. The root serves the library index instead, which
+# answers 200 whether or not the archive opened, so it is not a substitute.
+base_path = "/wikipedia_en_all_maxi_2022-05/A"
 # The default budget is ample: this poll starts only after `up --wait` has
 # already seen the container healthy, so the first-boot reassembly (see the
 # Dockerfile's HEALTHCHECK start period) is over by the time it runs. kiwix
